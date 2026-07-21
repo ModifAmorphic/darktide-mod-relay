@@ -1,0 +1,60 @@
+/*
+ * launcher.rc - PE version-info resource for mod_relay.exe.
+ *
+ * Embeds VS_VERSION_INFO (the standard Windows version resource) so the
+ * launcher surfaces FileVersion / ProductName / OriginalFilename /
+ * FileDescription in Explorer's Details tab and via GetFileVersionInfo /
+ * PowerShell's $(Get-Item ...).VersionInfo. Without it the binary's version
+ * fields are empty in CI block events.
+ *
+ * Version model: numeric MAJOR/MINOR/PATCH are injected by the build scripts
+ * (build.ps1 via rc.exe /D, Makefile via windres -D), themselves derived from
+ * .release-please-manifest.json - the single source of truth that also feeds
+ * RELAY_VERSION for --version. Both the binary FILEVERSION 4-tuple AND the
+ * string form of FileVersion / ProductVersion are composed from these same
+ * numeric defines via STRINGIZE, so the two cannot drift apart. The dotted
+ * string RELAY_VERSION is NOT passed to the resource compiler - rc.exe's
+ * preprocessor has no string-to-numeric conversion.
+ */
+#include <windows.h>
+
+/* Two-level stringize: STRINGIZE(x) forces macro expansion of x first, then
+ * stringizes the expanded tokens. (Direct #x would suppress expansion.) */
+#define STRINGIZE2(x) #x
+#define STRINGIZE(x) STRINGIZE2(x)
+
+/* MAJOR.MINOR.PATCH as a single string literal. The dots are pp-number
+ * continuation characters, so the macro argument expands to a single
+ * pp-number token (e.g. 0.8.0) and stringizes to "0.8.0" - no adjacent-
+ * string concatenation needed (rc.exe does not concatenate adjacent strings
+ * reliably). */
+#define RELAY_VERSION_STRING STRINGIZE(RELAY_VERSION_MAJOR.RELAY_VERSION_MINOR.RELAY_VERSION_PATCH)
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    RELAY_VERSION_MAJOR,RELAY_VERSION_MINOR,RELAY_VERSION_PATCH,0
+ PRODUCTVERSION RELAY_VERSION_MAJOR,RELAY_VERSION_MINOR,RELAY_VERSION_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "ModifAmorphic"
+            VALUE "FileDescription",  "Mod Relay launcher"
+            VALUE "FileVersion",      RELAY_VERSION_STRING
+            VALUE "InternalName",     "mod_relay"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 ModifAmorphic. Licensed under GPL-3.0."
+            VALUE "OriginalFilename", "mod_relay.exe"
+            VALUE "ProductName",      "Mod Relay"
+            VALUE "ProductVersion",   RELAY_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 0x04B0
+    END
+END

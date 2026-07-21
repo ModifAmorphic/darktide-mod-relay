@@ -1,0 +1,49 @@
+# relay-discovery — Mod Relay discovery pure-library (Rust)
+#
+# Production discovery engine for the Darktide LuaJIT runtime. Resolves all 16
+# target function addresses by Method A (string-anchor) + Method B (source-
+# pattern) plus `.pdata` gap-handling (CFG thunks / leaf functions / import
+# thunks). Pure computation over a borrowed byte slice; no I/O, no globals,
+# no live-game access. Safe Rust everywhere except the capstone FFI wrapper and
+# the C-ABI seam.
+#
+# Built as a `staticlib`/`cdylib` for linkage into the C shell, and as a normal
+# `lib` for host-side `cargo test` (including the oracle test against the real
+# Darktide.exe resolved via $DARKTIDE_GAME_DIR).
+[package]
+name = "relay-discovery"
+description = "Darktide LuaJIT function-address discovery engine (Mod Relay pure-library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "relay_discovery"
+# rlib for host tests + downstream Rust; staticlib for the C shell link. (No
+# cdylib: the shell is a single PE DLL with the Rust staticlib linked in, not
+# a standalone Rust DLL.)
+crate-type = ["rlib", "staticlib"]
+
+[features]
+# `test-hooks` exposes the `relay_test_panic_boundary` C-ABI entry used only by
+# the panic-boundary unit tests. The release staticlib linked into the C shell
+# is built without this feature, so the test-only symbol never ships in the
+# production DLL. Enable for `cargo test`/`cargo clippy`:
+#   cargo test --features test-hooks -p relay-discovery
+test-hooks = []
+
+[dependencies]
+# capstone is the one external dependency: the source-pattern matchers compare
+# against capstone's Intel-syntax `op_str` exactly as the validated C discovery
+# baseline did, so we use the same underlying libcapstone (bundled and built by
+# capstone-sys' build script — portable C, cross-compiles to MinGW and builds
+# under MSVC).
+capstone = "0.13"
+
+[dev-dependencies]
+# SHA-256 of the resolved binary is computed by the oracle test to decide
+# whether the pinned exact-match tier applies.
+sha2 = "0.10"

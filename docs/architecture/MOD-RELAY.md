@@ -1,0 +1,381 @@
+# Mod Relay (runtime) — architecture
+
+**Mod Relay (runtime)** is the injected modding runtime + its launcher for
+Darktide. It's a **Hybrid** — a Rust discovery pure-library
++ a C live-game shell, linked into one DLL, delivered by `CreateRemoteThread`.
+See `docs/architecture/README.md` for the project-wide architecture.
+
+## Subcomponents
+
+### `discovery/` — Rust discovery pure-library  *(built, stable)*
+
+A pure function: a PE image (`&[u8]`) → the 16 LuaJIT/engine function
+addresses. No I/O, no global state; 100% safe Rust in core logic;
+offline-testable against a binary fixture. Compiled to a C-ABI staticlib.
+
+- **Interface (the seam):** `relay_discover` / `relay_discover_detail`
+  (C-ABI). Shared contract: `RelayAddressTable` (`#[repr(C)]`, mirrored in
+  `shell/include/relay_discovery.h`) + return codes.
+- **State:** production-quality (the Relay runtime seed). The canonical 16
+  engine/LuaJIT function addresses are stable.
+
+### `shell/` — C live-game shell (the injected DLL)  *(built; live-validated)*
+
+This is **`relay_shell.dll`** — the C shell linked with the Rust **discovery**
+staticlib (`librelay_discovery.a`) + MinHook, into one PE DLL.
+
+The DLL injected into Darktide. `DllMain` spawns a worker that: runs discovery
+(via the seam) → installs the two production hooks → stages the trampoline →
+signals hook-ready.
+
+- **Two production hooks.** The shell installs exactly two MinHook detours,
+  both required (a failure to install either is fatal — the worker exits and
+  the launcher's hook-ready wait times out, terminating the game rather than
+  resuming half-modded):
+  - **`lua_newstate`** — captures the single Lua VM (`g_L`) and emits a
+    one-time `lua_gettop(L)=0` structural sanity log (confirms the LJ_64
+    non-GC64 struct layout in-process).
+  - **`lua_pcall`** — counts calls and runs the staged trampoline exactly
+    once at pcall#1, BEFORE the original pcall.
+- **Engine-context mechanism (proven).** A chunk injected at the first
+  `lua_pcall` (after `luaL_openlibs`, while `io`/`loadstring` are still in
+  globals) sees the engine's real facilities and can `io.open` + `loadstring`
+  staged Lua — validated end-to-end in the live game. The engine removes
+  `io`/`loadstring` from globals by ~pcall#10, so the trampoline runs in the
+  pcall#1 → pcall#10 window and captures them first. There is no `setfenv`
+  sandbox at pcall#1 (a chunk's env *is* the globals table). **`Managers`** is
+  an engine global (appears late in boot); **`CLASS`** is never engine-set, so
+  the mod loader sets it.
+- **Production trampoline + the mod loader.** The production trampoline is
+  wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
+  engine's pcall) it injects the proven chunk — set the two root globals
+  (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`), `io.open` the staged entry
+  (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. The mod loader
+  Lua is **packaged with the Relay runtime** (staged into `bin/mod_loader/`
+  by `make build`, deployed next to the launcher/DLL; the shell self-locates it
+  from its own DLL path as `<dll-dir>\mod_loader\` and publishes that dir as the
+  internal `MOD_LOADER_DIR` global — not an env var/flag). The mod root is read
+  from `RELAY_MOD_PATH` (the launcher sets it in the child env from
+  `--mod-path`); if unset the chunk emits an empty `RELAY_MOD_PATH` (the
+  loader runs, finds no mod root, and degrades gracefully — mods won't load, no
+  crash). If the loader dir can't be self-located (DLL path unreadable/too
+  long), the trampoline is SKIPPED (logged) and the game runs **vanilla**. The
+  chunk template and game-safety discipline (one-shot, stack-clean,
+  re-entrancy-guarded) are unchanged.
+- **Built + live-validated (the full modding chain).** The mod loader
+  (`src/mod_loader/init.lua`, the runtime-staged entry) runs in
+  engine-context at pcall#1, captures the engine's real
+  `io`/`loadstring`/`require`/`print`/`os`/`ffi` into the `Mods` table **before
+  the engine removes `io`/`loadstring` (~pcall#6)**, and bridges pcall#1 to the
+  engine's late boot via a **deferred bootstrap**:
+  - the **require bridge** (`require_bridge.lua`) preserves the engine's real
+    `require` (as `Mods.original_require`), wraps global `require` to record
+    each distinct table result in `Mods.require_store` (identity-deduped, for
+    DMF's `hook_require`), and calls the lifecycle coordinator after every
+    successful require;
+  - the **class registry** (`class_registry.lua`) is installed once by the
+    coordinator the moment the engine's global `class` appears. It wraps
+    `class()` so every class object is recorded in the `CLASS` table. Missing
+    keys return the unresolved name as a **string sentinel** (e.g.
+    `CLASS.InputService == "InputService"` before the class is registered) so
+    official DMF's string/table hook validator accepts `dmf:hook_safe(CLASS.X,
+    …)` calls issued before the class exists and queues them as delayed hooks;
+    `rawget(CLASS, name)` still returns nil for unresolved classes so the
+    lifecycle's readiness checks treat them as absent. Each registered class is
+    also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF
+    assignments are preserved) for mod compatibility (mods cache class globals
+    like `_G.Promise`, which the engine defines via `class("Promise")` in
+    `scripts/foundation/utilities/promise.lua` but does not publish to `_G`);
+  - the **lifecycle** (`lifecycle.lua`) coordinator then directly
+    closure-wraps `BootStateRequireGameScripts._state_update` exactly once it
+    exists. That wrapper calls the original first (preserving its returns,
+    never swallowing its errors), then a protected `advance_bootstrap` that —
+    with per-step retry/idempotency — loads the loader driver
+    (`mod_manager.lua`, which itself loads the DMF adapter
+    `dmf_adapter.lua` from the loader root), instantiates `Managers.mod`, and
+    directly closure-wraps `StateGame.update` + `GameStateMachine._change_state`
+    (no generic hook API, no loadstring-generated hook chain, no string-path
+    deferred queue).
+  The loader splits load into two phases: `init()` SCANs (reads `mods.lst`,
+    builds the `_mods` table — the order file is authoritative, the loader
+    injects nothing — restores persisted manager settings via the adapter, and
+    registers the DMF IO observer via the adapter; no mod loaded), and the first
+    `StateGame.update` tick LOADs (per-mod `run()` → object → `init()`, then
+    `_state="done"` via the adapter) — deferred so boot-complete globals like
+    `Managers.input` exist. Every `update` tick also polls the developer-mode-
+    gated hot-reload shortcut (LEFT Ctrl + LEFT Shift + R) and drives the
+    reload state machine: a request is consumed at the start of an update into a
+    teardown frame (`on_reload` forward → `on_unload` reverse → retire stale DMF
+    generation globals → reread authoritative `mods.lst`), then the next update
+    loads the new generation in order (`init(reload_data_for_name)` per mod) and
+    publishes `done` — non-transactional best-effort, no shadow load/rollback.
+    The same `ModManager` instance, `_settings` table, require store, `CLASS`,
+    file service/observer, and `Managers.dmf.persistent_tables` survive every
+    generation. The file observer adapts DMF's mod-facing IO at the mod root
+    mid-DMF-init (after `core/io.lua` appears, before Phase 2) and re-adapts
+    each DMF generation across reload — tracking both the `DMFMod` table
+    identity and the exact Relay-installed `io_dofile` wrapper, so a reused
+    class table whose methods were overwritten by the new `core/io.lua` is
+    correctly re-adapted (not silently left on stock `./../mods`). Stock-DMF-specific
+    integration — persisted `_settings` restoration, the DMF-visible contract
+    fields (`_settings.developer_mode`, `_state`, `_mod_load_index`), DMF-required
+    entry-shape validation, the eight `DMFMod:io_*` overrides, and stale-
+    generation-global retirement — is centralized in `dmf_adapter.lua`;
+    `mod_manager.lua` stays generic and drives those through the adapter's
+    transition methods. The loader exposes itself as `Managers.mod`. The whole
+    bootstrap is pcall-wrapped so a DMF/mod failure degrades to vanilla + a log
+    line, not a crash. **Live-validated: the current independently-reimplemented
+    loader plus the extracted DMF adapter completed the observed startup/load
+    chain on 2026-07-14 — the operator launched through Mod Curator, the
+    game started, and DMF + user mods loaded as expected from the configured mod
+    root. Repeated in-game hot reload (LEFT Ctrl + LEFT Shift + R) was validated
+    in the same session: clean completions for generations 2, 3, and 4 (keyboard
+    requests, DMF `on_reload`/`on_unload` each generation, mods reinitializing),
+    with no `./../mods`, localization-return, framework-failure, or
+    degraded/restart-recommended errors in Darktide's console log. Not claimed by
+    this run: behavior across every possible mod, every failure path, or
+    repeated reload under arbitrarily long sessions.** The offline LuaJIT harness
+    (`make mod-loader-test`) covers the logic. See
+    `docs/architecture/MOD_LOADER-DMF.md` for the DMF integration + the IO
+    adaptation + the load timing + the [hot-reload](../docs/architecture/MOD_LOADER-DMF.md#hot-reload)
+    contract.
+- **Bootstrap-only C helpers.** C functions are acceptable only at the
+  bootstrap boundary (crossing from DLL injection into the Lua lifecycle) or
+  for runtime-private plumbing (status/log) — never as loader/DMF/mod-visible
+  replacements for engine Lua facilities (`require`, `io`, …). See the
+  compatibility section below.
+
+### `launcher/` — C injector  *(built)*
+
+This is **`mod_relay.exe`** — the C injector (`src/launcher/`), the
+process that creates the game suspended, injects the shell, and resumes it.
+`CreateProcess(Darktide.exe, SUSPENDED)`
+→ inject `relay_shell.dll` → wait for `relay_hook_ready` → `ResumeThread` →
+exit. Sets `SteamAppId`/`SteamGameId`.
+
+- **Built:** injection + hook-ready handshake + Steam appID.
+- **Interface (the CLI):** a **flag-based CLI**, where every setting
+  follows **flag > env var > default**. `--game-binary` is the only required
+  flag; the shell DLL is hardcoded next to the launcher (the shell self-locates
+  the mod loader from its path), and the log file defaults next to the launcher
+  exe.
+
+  | Flag | Env var | Default |
+  | --- | --- | --- |
+  | `--game-binary <path>` | `RELAY_GAME_BINARY` | — **(required)** |
+  | `--mod-path <path>` | `RELAY_MOD_PATH` | unset (mods won't load) |
+  | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
+  | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
+  | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
+  | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game, in order) |
+  | `--version` | — (none) | — (value-less; prints the build-injected version and exits 0) |
+
+  The injected DLL (`relay_shell.dll`) is hardcoded to `<launcher-dir>\` and
+  self-locates the mod loader (`<dll-dir>\mod_loader\`); neither path is
+  configurable. The launcher resolves the config, then publishes the
+  shell-contract values (`SteamAppId`/`SteamGameId`, `RELAY_MOD_PATH`,
+  `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`) into the child env
+  before `CreateProcess`, so the injected shell inherits them. Game arguments
+  are NOT published to the env — they go on the child command line: the quoted
+  exe as argv[0] (byte-for-byte the legacy form), followed by every token after
+  the end-of-options `--` separator, each rendered with the MSVC CRT quoting
+  algorithm. A bare `--` ends option parsing; Relay's own flags must precede it,
+  and a flag-looking token after `--` is a raw game arg (no `--` is the legacy
+  exe-only launch). The command line is ANSI only (active code page; Darktide
+  args are ASCII) and capped at `RELAY_CMDLINE_MAX` (32,767 chars incl. NUL —
+  the `CreateProcessA` ceiling); oversize is rejected before any process is
+  created. `-h`/`--help` prints the full table.
+
+## Contracts
+
+### Launcher invocation (the external interface)
+
+The launcher is a standalone CLI — run it from a shell, or invoke it from an
+app (it's the runtime that powers Mod Curator, but any caller works).
+`--game-binary` is required; the rest is flag > env > default (full table in
+`launcher/` above).
+
+- **Two roots:** the mod loader Lua (`init.lua` + its modules) ships WITH the
+  runtime — `make build` stages it into `bin/mod_loader/`, deployed next to
+  the launcher/DLL. The shell self-locates the loader root from its own DLL
+  path (`<dll-dir>\mod_loader\`, set as the internal `MOD_LOADER_DIR` global
+  — not an env var/flag). The **mod path** (`--mod-path` /
+  `RELAY_MOD_PATH`) is yours: point it at the directory that **contains**
+  your `mods/` subdirectory (the "boundary" — DMF + user mods + `mods.lst`
+  live at `<mod_path>/mods/`). The trampoline sets `RELAY_MOD_PATH` from
+  it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (what
+  `Mods.file.*` roots at) and uses `Mods._mod_path` as the containment
+  boundary for the `Mods.lua.io` raw-read wrapper (see
+  `docs/architecture/MOD_LOADER-DMF.md` → "Raw `Mods.lua.io` redirection").
+- **`mods.lst`** is a plain text file you author (or your app generates): one
+  mod folder name per line, in load order. It is **the Relay↔caller load-order
+  contract** — the mod loader reads it authoritatively and loads exactly the
+  listed mods in order; it injects nothing (DMF does not read it). When DMF is
+  used it **must be listed first** (the loader makes no framework assumption;
+  DMF is first only because `mods.lst` says so). Missing/empty → no mod loads
+  (graceful). Relay uses `mods.lst` exclusively — it has no use for the
+  community toolchain's `mod_load_order.txt`.
+- **Not the runtime's job:** load-order computation, dependency resolution,
+  profile/staging management. You handle those — by hand, or in the app
+  driving the launcher. The runtime is the conduit.
+- **Platform:** Windows — run the launcher directly, Steam in the background.
+  Linux — Steam → launcher (Proton, Darktide's compatdata) → Darktide, one
+  prefix/context. (See the root `README.md` getting-started for a `launch.bat`
+  + Steam non-Steam-game setup.)
+
+### Internal
+
+- **discovery ↔ shell:** the C-ABI seam (`relay_discover` /
+  `relay_discover_detail`); the panic boundary (`catch_unwind` at every
+  `extern "C"` entry, `panic = "abort"` fail-safe).
+- **launcher ↔ shell:** the `relay_hook_ready` named-event handshake (hook
+  armed before `main`).
+
+### Env-var contract (shell ↔ launcher)
+
+The source of truth for the values the launcher publishes into the child env
+and the injected shell reads. (The launcher's own config-override env vars are
+in the CLI table above; these are the *contract* the shell depends on.) The
+loader root is **not** here — the shell self-locates it from its own DLL path
+(`<dll-dir>\mod_loader\`) and publishes it to Lua as the internal `MOD_LOADER_DIR`
+global, so no loader-path env var exists.
+
+| Env var | Set by | Read by | Meaning |
+| --- | --- | --- | --- |
+| `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod-path boundary** — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here) and `Mods._mod_path` as the containment boundary for the `Mods.lua.io` wrapper. Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
+| `RELAY_LOG_FILE` | launcher | shell | shell log file path |
+| `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
+| `SteamAppId` / `SteamGameId` | launcher | Steam | the real Darktide app id (`1361210`); without it `SteamAPI_Init` is denied under a non-Steam shortcut |
+
+### Logging
+
+The shell's C-side log is **`relay.log`**. Each line is structured
+`<local ts+UTC offset> <LEVEL> <component>: <msg>` (e.g.
+`2026-07-16T12:34:56-04:00 INFO  trampoline: @ pcall#1: OK`) and goes to both
+`OutputDebugString` and the log file. The timestamp is **local time with an
+ISO-8601 UTC offset** that follows the system time zone (UTC itself shows
+`+00:00`; no `Z` special case). Level-filtered via
+`RELAY_LOG_LEVEL` (default `info`; crank to `debug`/`trace` for
+verbose detail). Default location is next to the launcher exe (resolved by the
+launcher from `--log-file`/`RELAY_LOG_FILE`); the shell itself opens
+`RELAY_LOG_FILE` if set, otherwise falls back to beside the game exe.
+
+Right after the startup banner, the worker logs a `launching <cmdline>` INFO
+line — the host process command line as the game sees it (the quoted exe + the
+forwarded game args, e.g. `"…\Darktide.exe" --lua-heap-mb-size 2048`), so the
+exact arguments that reached the game are captured.
+
+**Log split to be aware of:** the mod loader's Lua-side `print`/`__print` output
+(the `[mod_loader] …` lines), DMF, and mods all go to the **engine's** print
+destination — Darktide's **console log** (`console-*.log`, at
+`%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
+`<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
+under Proton) — **not** to `relay.log` and **not** to the Proton
+`steam-$APPID.log` (which captures Wine/Proton diagnostics only). `relay.log`
+carries the C-side shell + trampoline lines (including the trampoline's one-line
+`OK`/`FAIL` status, which is the reliable bootstrap validation).
+
+## Runtime patch compatibility
+
+The entire point of Mod Relay is to eliminate the fragility of the
+bundle-db / `patch_999` toolchain — not to relocate that fragility upstream
+into a reimplementation of Darktide's Lua runtime.
+
+Mod Relay replaces the current toolchain's bundle-database entry point:
+
+```text
+current:    dtkit-patch → patch_999 → mod_loader → DMF → mods
+Relay:      DLL injection → runtime patch → staged mod_loader/DMF entry point → mods
+```
+
+The runtime patch is an entry-point replacement, not a replacement Lua runtime.
+It may use native code and narrow C helpers to cross from DLL injection into the
+game's Lua lifecycle, but once staged loader/DMF/mod Lua is running it must see the
+same relevant globals, loader behavior, and file/runtime semantics it receives
+when loaded by the engine today.
+
+Runtime-owned replacement behavior is acceptable only at the bootstrap boundary
+or for runtime-private plumbing such as status/logging. Mod Relay should
+not become an ongoing compatibility shim that reimplements Darktide's Lua
+runtime or patch-fixes missing behavior for each mod.
+
+### Bootstrap boundary
+
+The shell's C bootstrap is responsible for:
+
+- finding/capturing the live Lua state at the correct lifecycle point;
+- getting the staged runtime patch into that state without the bundle database;
+- handing off to staged loader/DMF Lua in an engine-equivalent environment.
+
+After that handoff, loader/DMF-visible surfaces such as `require`, `io`,
+`loadstring`, globals, and loader hooks come from the engine path or a
+behaviorally equivalent wrapper around it — not from independent C
+reimplementations.
+
+### Engine-equivalent loader path
+
+In the current community toolchain, `patch_999` is file-based only for the
+initial bootstrap: its trampoline reads `./mod_loader` from disk and executes it
+with `loadstring`. After that, `mod_loader` runs inside the game's normal Lua
+startup path and captures the engine-visible Lua facilities that loader/DMF expect.
+
+**This mechanism is proven.** A chunk injected at `lua_pcall` #1 (the first
+script execution after `luaL_openlibs`, while `io`/`loadstring` are still in
+the globals) sees the engine's real facilities and can `io.open` + `loadstring`
+staged Lua — validated end-to-end in the live game (the production trampoline
+loads + runs staged Lua successfully). The engine removes `io`/`loadstring` by
+~pcall#10, so the trampoline runs in the pcall#1 → pcall#10 window and captures
+them first. There is no `setfenv` sandbox at pcall#1 (chunk env = globals
+table). The mod loader then runs in engine-context, captures
+`io`/`loadstring`/`require` into the `Mods` table, and defers `CLASS`/`Managers`
+work (same model as the existing community `mod_loader`).
+
+### `Mods.original_require`
+
+The runtime must provide DMF with a `Mods.original_require` function compatible
+with the loader DMF expects. In the current toolchain, `mod_loader` preserves the
+engine's real `require` as `Mods.original_require`; DMF's require module builds
+tracking (`Mods.require_store`, `hook_require`) on top of that original function.
+
+Mod Relay preserves this behavior. `Mods.original_require` is the engine's
+original `require` or a behaviorally equivalent wrapper around it. It is not a
+staging-only file loader. Runtime-owned file loading may exist for bootstrap or
+private helper paths, but not as the production implementation of
+`Mods.original_require` observed by loader/DMF/mod code.
+
+### `Mods.lua.io`
+
+The runtime must provide the `Mods.lua.io` surface that DMF uses for file access.
+DMF's `core/io.lua` deep-copies `Mods.lua.io` at init and uses the familiar Lua
+file API (`io.open`, file `:read("*all")`, `:lines()`, `:close()`, `io.close`)
+for its debug modules. Mod Relay therefore captures the engine-visible
+Lua `io` table into `Mods.lua.io` before it is stripped.
+
+Mod Relay preserves this behavior. `Mods.lua.io` is the engine-visible Lua
+`io` table or a behaviorally equivalent engine wrapper. A C/Win32 file API may
+exist for the bootstrap or runtime-private helpers, but not as the
+loader/DMF-visible production replacement for Lua `io`.
+
+## Out of scope for the Relay runtime
+
+- **Dependency resolution / load-order computation** — not the runtime's job
+  (you, or the app driving the launcher, author `mods.lst`); the Relay runtime
+  bootstraps the staged mod loader entry point, and the mod loader reads the
+  load order authoritatively (DMF does not).
+- **Profile / staging-dir management** — not the runtime's concern; handle it
+  in whatever wraps the launcher (a mod manager like Mod Curator, a script,
+  or by hand).
+
+## Build + test
+
+See `AGENTS.md` (agent ops) and `docs/architecture/README.md` (test strategy):
+MinGW + MSVC; the `test-hooks` feature; `make build/check/test` + the clippy
+gate.
+
+## References
+
+- `docs/architecture/MOD_LOADER-DMF.md` — the mod_loader↔DMF integration + IO
+  adaptation (the loader, the loader surfaces, the `Managers.mod` shape contract,
+  the load timing).
+- `docs/architecture/README.md` — project architecture.
+- `docs/reference/darktide/darktide-binary.md` — the validated game-binary constraints.

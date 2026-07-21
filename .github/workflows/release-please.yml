@@ -1,0 +1,172 @@
+# Release pipeline — release-please (simple, path-based) + chained Windows build.
+#
+# release-please versions on changes under src/ (Rust + C + Lua all count),
+# cuts the tag + GitHub release, then the build-assets job (same workflow,
+# gated on releases_created) builds the Windows runtime bundle and attaches it.
+#
+# In-workflow chaining (not a separate on: release workflow) is deliberate:
+# resources created with the default GITHUB_TOKEN don't trigger other
+# workflows, so a separate on:release job would never fire without a PAT.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      # Package path is `src`, so the per-path output is `src--tag_name`.
+      tag_name: ${{ steps.release.outputs['src--tag_name'] }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # The short ref name of the branch or tag that triggered
+          #  the workflow run. For example, `main` or `1.x`
+          target-branch: ${{ github.ref_name }}
+
+  # Build the Windows runtime bundle and attach it to the release release-please
+  # just created. Windows-only: the shipped build is the MSVC/native one.
+  # Runtime bundle includes executables, mod loader Lua, and legal notices
+  # (LICENSE and THIRD_PARTY_NOTICES.md).
+  build-assets:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: release-msvc-${{ hashFiles('src/Cargo.lock') }}
+      - name: Build Rust staticlib (x86_64-pc-windows-msvc)
+        run: cargo build --release -p relay-discovery --target x86_64-pc-windows-msvc
+      - name: Build mixed DLL + launcher (cl/link)
+        shell: cmd
+        run: |
+          :: cmd does not fail-fast between lines — check errorlevel after each command.
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat"
+          if not exist bin mkdir bin
+          if not exist bin\obj mkdir bin\obj
+          set REL=target\x86_64-pc-windows-msvc\release
+          :: Product version: build-injected from the release-please manifest
+          :: (release-please has already bumped it before this job runs) so the
+          :: shipped exe's --version reports the new release version.
+          for /f "delims=" %%v in ('powershell -NoProfile -Command "(Get-Content ..\.release-please-manifest.json | ConvertFrom-Json).src"') do set "RELAY_VERSION=%%v"
+          if "%RELAY_VERSION%"=="" set "RELAY_VERSION=0.0.0-dev"
+          :: Extract numeric version components (major, minor, patch) for VS_VERSION_INFO.
+          :: Splits the RELAY_VERSION env var (already extracted above) on "." and "-" so
+          :: pre-release suffixes like "-dev" / "-rc1" are stripped cleanly (rc.exe rejects
+          :: non-numeric FILEVERSION parts). delims=.- tokenizes on both in one pass; the
+          :: suffix becomes token 4+ which is ignored. Pure cmd — no nested PowerShell.
+          for /f "tokens=1,2,3 delims=.-" %%a in ("%RELAY_VERSION%") do (
+            set "RELAY_VERSION_MAJOR=%%a"
+            set "RELAY_VERSION_MINOR=%%b"
+            set "RELAY_VERSION_PATCH=%%c"
+          )
+          :: Compile PE version resources (VS_VERSION_INFO) so the shipped binaries
+          :: carry ProductName/FileVersion/OriginalFileName/etc. metadata, which the
+          :: build previously omitted entirely. Version components are derived from
+          :: the same .release-please-manifest.json that RELAY_VERSION uses.
+          :: Compile launcher resources
+          rc /nologo /fo bin\obj\launcher.res ^
+             /DRELAY_VERSION_MAJOR=%RELAY_VERSION_MAJOR% ^
+             /DRELAY_VERSION_MINOR=%RELAY_VERSION_MINOR% ^
+             /DRELAY_VERSION_PATCH=%RELAY_VERSION_PATCH% ^
+             launcher\src\launcher.rc
+          if errorlevel 1 exit /b 1
+          :: Compile shell DLL resources
+          rc /nologo /fo bin\obj\relay_shell.res ^
+             /DRELAY_VERSION_MAJOR=%RELAY_VERSION_MAJOR% ^
+             /DRELAY_VERSION_MINOR=%RELAY_VERSION_MINOR% ^
+             /DRELAY_VERSION_PATCH=%RELAY_VERSION_PATCH% ^
+             shell\src\relay_shell.rc
+          if errorlevel 1 exit /b 1
+          :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
+          :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
+          :: LNK2019/LNK4217 CRT-mismatch errors at link time.
+          cl /nologo /O2 /MD /c /I shell\include /I shell\vendor\minhook\include ^
+             shell\src\dllmain.c ^
+             shell\vendor\minhook\src\buffer.c ^
+             shell\vendor\minhook\src\hook.c ^
+             shell\vendor\minhook\src\trampoline.c ^
+             shell\vendor\minhook\src\hde\hde64.c
+          if errorlevel 1 exit /b 1
+          :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
+          :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
+          :: LNK2019/LNK4217 CRT-mismatch errors at link time.
+          cl /nologo /O2 /MD /c /I shell\include shell\src\trampoline.c /Fo:relay_trampoline.obj
+          if errorlevel 1 exit /b 1
+          :: Explicit /EXPORT: entries are required because MSVC link /DLL does NOT
+          :: auto-export from input objects/libs (unlike mingw -shared). Without these,
+          :: the DLL ships with zero exports. Mirror what mingw auto-exports.
+          link /nologo /DLL /OUT:bin\relay_shell.dll ^
+             dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj relay_trampoline.obj ^
+             %REL%\relay_discovery.lib ^
+             psapi.lib kernel32.lib user32.lib ws2_32.lib userenv.lib bcrypt.lib ntdll.lib ^
+             /NODEFAULTLIB:libgcc.lib /EXPORT:DllMain /EXPORT:relay_discover /EXPORT:relay_discover_detail ^
+             bin\obj\relay_shell.res
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /DRELAY_VERSION=\"%RELAY_VERSION%\" /Fe:bin\mod_relay.exe launcher\src\launcher.c bin\obj\launcher.res /link kernel32.lib
+          if errorlevel 1 exit /b 1
+      # Part of the build: the DLL executes the staged mod loader Lua, so the
+      # launcher is worthless without it — ship mod_loader/ alongside.
+      - name: Stage mod loader Lua into bin/mod_loader/
+        shell: pwsh
+        run: |
+          $dst = "bin/mod_loader"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # Clean any stale files from previous builds
+          Remove-Item -Path "$dst/*.lua" -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path @(
+              "mod_loader/init.lua",
+              "mod_loader/file.lua",
+              "mod_loader/class_registry.lua",
+              "mod_loader/lifecycle.lua",
+              "mod_loader/require_bridge.lua",
+              "mod_loader/mod_manager.lua",
+              "mod_loader/dmf_adapter.lua"
+          ) -Destination $dst
+      # Stage legal notices (LICENSE and THIRD_PARTY_NOTICES.md) required
+      # in the runtime bundle.
+      - name: Stage legal notices into bin/
+        shell: pwsh
+        run: |
+          if (!(Test-Path "../LICENSE")) { throw "../LICENSE not found" }
+          if (!(Test-Path "../THIRD_PARTY_NOTICES.md")) { throw "../THIRD_PARTY_NOTICES.md not found" }
+          Copy-Item -Path "../LICENSE", "../THIRD_PARTY_NOTICES.md" -Destination "bin/"
+      - name: Package release zip (flat layout)
+        shell: bash
+        run: |
+          cd bin
+          7z a "../${{ needs.release-please.outputs.tag_name }}-windows-x64.zip" \
+            relay_shell.dll mod_relay.exe mod_loader/ LICENSE THIRD_PARTY_NOTICES.md
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            "${{ needs.release-please.outputs.tag_name }}-windows-x64.zip" --clobber

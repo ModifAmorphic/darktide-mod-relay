@@ -1,0 +1,390 @@
+# PR Quality Gate — builds + tests every PR targeting main.
+#
+# There is intentionally no `push:` trigger here. release-please
+# (.github/workflows/release-please.yml) runs on push to main; the build-assets
+# job in that workflow attaches the Windows runtime bundle to the resulting release.
+# This workflow is the trust gate for merges.
+#
+# paths-ignore skips release-please's bot-authored release PRs (they only touch
+# version/changelog files). Without this, those GITHUB_TOKEN-authored PRs sit
+# in an approval-required CI limbo.
+#
+# Release Please PRs must remain limited to the two ignored metadata files:
+# - src/CHANGELOG.md (the versioned changelog)
+# - .release-please-manifest.json (the version manifest)
+# Adding extra version files (e.g., Cargo.toml/Cargo.lock) to the release config
+# would require revisiting this guard to avoid CI triggering on release PRs.
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'src/CHANGELOG.md'
+      - '.release-please-manifest.json'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Auto-format on the PR branch: run cargo fmt, and if it changed anything,
+  # commit + push with [skip ci] so the push doesn't re-trigger this workflow.
+  # Downstream jobs (needs: fmt) check out the formatted tip and run on it.
+  # Caveat: if required-checks branch protection is ever enabled, [skip ci]
+  # would leave those checks pending on the format commit and block merge;
+  # the fix then is to drop [skip ci] and let the push trigger a fresh run
+  # (concurrency cancels the stale one).
+  fmt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        working-directory: src
+        run: cargo fmt --all
+      - name: commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add -u
+            git commit -m "style: cargo fmt [skip ci]"
+            git push
+          fi
+
+  lint:
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: clippy-${{ runner.os }}-${{ hashFiles('src/Cargo.lock') }}
+      - name: cargo clippy (deny warnings)
+        working-directory: src
+        run: cargo clippy --all-targets --features test-hooks -- -D warnings
+
+  # MinGW cross-compile from Linux. Not shipped (the release is MSVC/native
+  # Windows); this exists so contributors can build locally on Linux with
+  # confidence that path stays green.
+  mingw:
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Install MinGW-w64 cross-compiler + wine + LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 wine64 luajit
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: mingw-${{ runner.os }}-${{ hashFiles('src/Cargo.lock') }}
+      - name: Build (make build)
+        working-directory: src
+        run: make build
+      - name: Verify valid PE with DllMain (make check)
+        working-directory: src
+        run: make check
+      - name: C unit tests (make c-tests, via wine)
+        working-directory: src
+        run: make c-tests
+      - name: Mod loader Lua tests (make mod-loader-test)
+        working-directory: src
+        run: make mod-loader-test
+      - name: Rust tests (cargo test)
+        working-directory: src
+        env:
+          RELAY_CI: "1"
+        run: cargo test --features test-hooks -p relay-discovery
+      - name: Verify build outputs exist
+        shell: bash
+        run: |
+          cd src
+          test -f bin/relay_shell.dll
+          test -f bin/mod_relay.exe
+          test -d bin/mod_loader
+          # Verify expected seven runtime modules exist
+          test -f bin/mod_loader/init.lua
+          test -f bin/mod_loader/file.lua
+          test -f bin/mod_loader/class_registry.lua
+          test -f bin/mod_loader/lifecycle.lua
+          test -f bin/mod_loader/require_bridge.lua
+          test -f bin/mod_loader/mod_manager.lua
+          test -f bin/mod_loader/dmf_adapter.lua
+          # Verify deleted runtime modules do not exist
+          test ! -f bin/mod_loader/hook.lua || { echo "Error: bin/mod_loader/hook.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/class_patch.lua || { echo "Error: bin/mod_loader/class_patch.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/require_wrap.lua || { echo "Error: bin/mod_loader/require_wrap.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/init.v1.lua || { echo "Error: bin/mod_loader/init.v1.lua exists but should have been deleted"; exit 1; }
+          test -f bin/LICENSE
+          test -f bin/THIRD_PARTY_NOTICES.md
+
+  # MSVC native build on Windows. Authoritative Windows build (this is what
+  # ships). Mirrors the mingw path with the MSVC toolchain.
+  msvc:
+    needs: fmt
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: msvc-${{ runner.os }}-${{ hashFiles('src/Cargo.lock') }}
+      - name: Build Rust staticlib (x86_64-pc-windows-msvc)
+        run: cargo build --release -p relay-discovery --target x86_64-pc-windows-msvc
+      - name: Build mixed DLL + launcher (cl/link)
+        shell: cmd
+        run: |
+          :: cmd does not fail-fast between lines — check errorlevel after each command.
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat"
+          if not exist bin mkdir bin
+          if not exist bin\obj mkdir bin\obj
+          set REL=target\x86_64-pc-windows-msvc\release
+          :: Product version: build-injected from the release-please manifest so
+          :: --version reports it (matches the mingw Makefile + release-please
+          :: shipping build). Fall back if unset.
+          for /f "delims=" %%v in ('powershell -NoProfile -Command "(Get-Content ..\.release-please-manifest.json | ConvertFrom-Json).src"') do set "RELAY_VERSION=%%v"
+          if "%RELAY_VERSION%"=="" set "RELAY_VERSION=0.0.0-dev"
+          :: Extract numeric version components (major, minor, patch) for VS_VERSION_INFO.
+          :: Splits the RELAY_VERSION env var (already extracted above) on "." and "-" so
+          :: pre-release suffixes like "-dev" / "-rc1" are stripped cleanly (rc.exe rejects
+          :: non-numeric FILEVERSION parts). delims=.- tokenizes on both in one pass; the
+          :: suffix becomes token 4+ which is ignored. Pure cmd — no nested PowerShell.
+          for /f "tokens=1,2,3 delims=.-" %%a in ("%RELAY_VERSION%") do (
+            set "RELAY_VERSION_MAJOR=%%a"
+            set "RELAY_VERSION_MINOR=%%b"
+            set "RELAY_VERSION_PATCH=%%c"
+          )
+          :: Compile PE version resources (VS_VERSION_INFO) so the shipped binaries
+          :: carry ProductName/FileVersion/OriginalFileName/etc. metadata, which the
+          :: build previously omitted entirely. Version components are derived from
+          :: the same .release-please-manifest.json that RELAY_VERSION uses.
+          :: Compile launcher resources
+          rc /nologo /fo bin\obj\launcher.res ^
+             /DRELAY_VERSION_MAJOR=%RELAY_VERSION_MAJOR% ^
+             /DRELAY_VERSION_MINOR=%RELAY_VERSION_MINOR% ^
+             /DRELAY_VERSION_PATCH=%RELAY_VERSION_PATCH% ^
+             launcher\src\launcher.rc
+          if errorlevel 1 exit /b 1
+          :: Compile shell DLL resources
+          rc /nologo /fo bin\obj\relay_shell.res ^
+             /DRELAY_VERSION_MAJOR=%RELAY_VERSION_MAJOR% ^
+             /DRELAY_VERSION_MINOR=%RELAY_VERSION_MINOR% ^
+             /DRELAY_VERSION_PATCH=%RELAY_VERSION_PATCH% ^
+             shell\src\relay_shell.rc
+          if errorlevel 1 exit /b 1
+          :: Compile the C shell + MinHook to objects.
+          :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
+          :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
+          :: LNK2019/LNK4217 CRT-mismatch errors at link time.
+          cl /nologo /O2 /MD /c /I shell\include /I shell\vendor\minhook\include ^
+             shell\src\dllmain.c ^
+             shell\vendor\minhook\src\buffer.c ^
+             shell\vendor\minhook\src\hook.c ^
+             shell\vendor\minhook\src\trampoline.c ^
+             shell\vendor\minhook\src\hde\hde64.c
+          if errorlevel 1 exit /b 1
+          :: Our trampoline helpers (path escape/build/join) — separate object
+          :: to avoid name clash with MinHook's trampoline.obj.
+          :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
+          :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
+          :: LNK2019/LNK4217 CRT-mismatch errors at link time.
+          cl /nologo /O2 /MD /c /I shell\include shell\src\trampoline.c /Fo:relay_trampoline.obj
+          if errorlevel 1 exit /b 1
+          :: Link the DLL against the Rust staticlib + system libs.
+          :: Explicit /EXPORT: entries are required because MSVC link /DLL does NOT
+          :: auto-export from input objects/libs (unlike mingw -shared). Without these,
+          :: the DLL ships with zero exports. Mirror what mingw auto-exports.
+          link /nologo /DLL /OUT:bin\relay_shell.dll ^
+             dllmain.obj buffer.obj hook.obj trampoline.obj hde64.obj relay_trampoline.obj ^
+             %REL%\relay_discovery.lib ^
+             psapi.lib kernel32.lib user32.lib ws2_32.lib userenv.lib bcrypt.lib ntdll.lib ^
+             /NODEFAULTLIB:libgcc.lib /EXPORT:DllMain /EXPORT:relay_discover /EXPORT:relay_discover_detail ^
+             bin\obj\relay_shell.res
+          if errorlevel 1 exit /b 1
+          :: Launcher.
+          cl /nologo /O2 /DRELAY_VERSION=\"%RELAY_VERSION%\" /Fe:bin\mod_relay.exe launcher\src\launcher.c bin\obj\launcher.res /link kernel32.lib
+          if errorlevel 1 exit /b 1
+      # Part of the build, not a deploy step: stage the mod loader Lua next to
+      # the DLL/launcher (the shell self-locates <dll-dir>\mod_loader\init.lua).
+      # Fails if any source file is missing.
+      - name: Stage mod loader Lua into bin/mod_loader/
+        shell: pwsh
+        run: |
+          $dst = "bin/mod_loader"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # Clean any stale files from previous builds
+          Remove-Item -Path "$dst/*.lua" -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path @(
+              "mod_loader/init.lua",
+              "mod_loader/file.lua",
+              "mod_loader/class_registry.lua",
+              "mod_loader/lifecycle.lua",
+              "mod_loader/require_bridge.lua",
+              "mod_loader/mod_manager.lua",
+              "mod_loader/dmf_adapter.lua"
+          ) -Destination $dst
+      # Stage legal notices (LICENSE and THIRD_PARTY_NOTICES.md) required
+      # in the runtime bundle.
+      - name: Stage legal notices into bin/
+        shell: pwsh
+        run: |
+          if (!(Test-Path "../LICENSE")) { throw "../LICENSE not found" }
+          if (!(Test-Path "../THIRD_PARTY_NOTICES.md")) { throw "../THIRD_PARTY_NOTICES.md not found" }
+          Copy-Item -Path "../LICENSE", "../THIRD_PARTY_NOTICES.md" -Destination "bin/"
+      - name: Build + run C unit tests (cl/link)
+        shell: cmd
+        run: |
+          :: cmd does not fail-fast between lines — check errorlevel after each command.
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat"
+          if not exist bin mkdir bin
+          set REL=target\x86_64-pc-windows-msvc\release
+          :: Product version: build-injected from the release-please manifest so
+          :: --version reports it (matches the mingw Makefile). Fall back if unset.
+          for /f "delims=" %%v in ('powershell -NoProfile -Command "(Get-Content ..\.release-please-manifest.json | ConvertFrom-Json).src"') do set "RELAY_VERSION=%%v"
+          if "%RELAY_VERSION%"=="" set "RELAY_VERSION=0.0.0-dev"
+          cl /nologo /O2 /c tests\test_runner.c
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /DRELAY_TEST_BUILD /DRELAY_VERSION=\"%RELAY_VERSION%\" /I launcher\src /c launcher\src\launcher.c /Fo:launcher_test.obj
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /Fe:bin\stub_target.exe tests\stub_target.c /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /c tests\stub_shell.c
+          if errorlevel 1 exit /b 1
+          link /nologo /DLL /OUT:bin\stub_shell.dll stub_shell.obj kernel32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /I launcher\src /Fe:bin\test_steam_env.exe ^
+             tests\test_steam_env.c test_runner.obj launcher_test.obj kernel32.lib shell32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fe:bin\test_injection.exe ^
+             tests\test_injection.c test_runner.obj launcher_test.obj kernel32.lib shell32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fe:bin\test_config.exe ^
+             tests\test_config.c test_runner.obj launcher_test.obj kernel32.lib shell32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fe:bin\test_quoting.exe ^
+             tests\test_quoting.c test_runner.obj launcher_test.obj kernel32.lib shell32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /I shell\include /Fe:bin\test_trampoline.exe ^
+             tests\test_trampoline.c test_runner.obj kernel32.lib
+          if errorlevel 1 exit /b 1
+          echo === C unit tests ===
+          bin\test_steam_env.exe
+          if errorlevel 1 exit /b 1
+          bin\test_injection.exe
+          if errorlevel 1 exit /b 1
+          bin\test_config.exe
+          if errorlevel 1 exit /b 1
+          bin\test_quoting.exe
+          if errorlevel 1 exit /b 1
+          bin\test_trampoline.exe
+          if errorlevel 1 exit /b 1
+      - name: Verify valid PE with DllMain
+        shell: pwsh
+        run: |
+          # dumpbin is an MSVC tool — load the VC env for this step. GitHub
+          # Actions steps don't share env, so the build step's vcvars64 doesn't
+          # carry over; this imports it into the current pwsh session.
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
+          }
+          # MZ header check
+          $pe = [System.IO.BinaryReader]::new([System.IO.File]::OpenRead("bin\relay_shell.dll"))
+          $mz = $pe.ReadBytes(2); if (($mz[0] -ne 0x4D) -or ($mz[1] -ne 0x5A)) { throw "not MZ" }
+          Write-Host "bin\relay_shell.dll is a valid PE (MZ header)"
+          $pe.Close()
+          # Export table check — must capture output and assert.
+          $exports = & dumpbin /exports bin\relay_shell.dll
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed" }
+          $expected = @("DllMain", "relay_discover", "relay_discover_detail")
+          # Anchor relay_discover so it doesn't match relay_discover_detail.
+          foreach ($sym in $expected) {
+            $pattern = if ($sym -eq "relay_discover") { "relay_discover([^a-zA-Z0-9_]|$)" } else { [regex]::Escape($sym) }
+            if (-not ($exports -match $pattern)) { throw "expected symbol absent from exports: $sym" }
+          }
+          if ($exports -match "relay_test_panic_boundary") { throw "test-only symbol leaked into release exports" }
+          Write-Host "OK: all expected exports present + test-only symbol absent"
+          # Version-info resources: assert VS_VERSION_INFO is embedded in both
+          # the DLL and the launcher exe. Regression guard for a future change
+          # that drops the .res, removes the .rc, or breaks version extraction
+          # — all of which would otherwise ship a resource-less binary.
+          # $env:RELAY_VERSION is set inside the cmd Build step above, not here,
+          # so re-read the manifest to get the expected version at verify time.
+          $manifestVersion = (Get-Content ..\.release-please-manifest.json | ConvertFrom-Json).src
+          $expectedFileVersion = (($manifestVersion -split '\.') | ForEach-Object { ($_ -split '-')[0] } | Select-Object -First 3) -join '.'
+          foreach ($bin in @("bin\relay_shell.dll", "bin\mod_relay.exe")) {
+              $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $bin).Path)
+              foreach ($field in @("ProductName", "FileVersion", "OriginalFilename", "FileDescription")) {
+                  if ([string]::IsNullOrWhiteSpace($vi.$field)) {
+                      throw "$bin VersionInfo.$field is empty (PE resources missing - was the .res dropped from the link command?)"
+                  }
+              }
+              if ($vi.FileVersion -ne $expectedFileVersion) {
+                  throw "$bin FileVersion '$($vi.FileVersion)' != expected '$expectedFileVersion' (version injection broken?)"
+              }
+              Write-Host "OK: $bin has PE version resources (ProductName='$($vi.ProductName)', FileVersion='$($vi.FileVersion)')"
+          }
+      - name: Rust tests (cargo test)
+        env:
+          RELAY_CI: "1"
+        run: cargo test --features test-hooks -p relay-discovery
+      - name: Verify build outputs exist
+        shell: bash
+        run: |
+          test -f bin/relay_shell.dll
+          test -f bin/mod_relay.exe
+          test -d bin/mod_loader
+          # Verify expected seven runtime modules exist
+          test -f bin/mod_loader/init.lua
+          test -f bin/mod_loader/file.lua
+          test -f bin/mod_loader/class_registry.lua
+          test -f bin/mod_loader/lifecycle.lua
+          test -f bin/mod_loader/require_bridge.lua
+          test -f bin/mod_loader/mod_manager.lua
+          test -f bin/mod_loader/dmf_adapter.lua
+          # Verify deleted runtime modules do not exist
+          test ! -f bin/mod_loader/hook.lua || { echo "Error: bin/mod_loader/hook.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/class_patch.lua || { echo "Error: bin/mod_loader/class_patch.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/require_wrap.lua || { echo "Error: bin/mod_loader/require_wrap.lua exists but should have been deleted"; exit 1; }
+          test ! -f bin/mod_loader/init.v1.lua || { echo "Error: bin/mod_loader/init.v1.lua exists but should have been deleted"; exit 1; }
+          test -f bin/LICENSE
+          test -f bin/THIRD_PARTY_NOTICES.md

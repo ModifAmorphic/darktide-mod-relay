@@ -1,0 +1,30 @@
+# AI Agents scratch — ephemeral, local-only (docs passed between agent
+# sessions), never committed.
+.agents
+
+## build outputs
+# All build outputs land in src/bin/ (the mixed DLL + launcher + staged mod
+# loader). The global *.dll/*.exe/*.lib/*.o ignores below cover the contents;
+# the explicit /src/bin/ documents intent.
+/src/bin/
+/src/target/
+**/*.rs.bk
+
+## C / C++ / linker build artifacts (cover anything that escapes src/bin/)
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.dwo
+
+## Local files (env, logs, scratch)
+*.log
+*.tmp
+*.bak
+*.swp
+.cache/
+Testing/

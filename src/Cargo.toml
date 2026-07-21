@@ -1,0 +1,44 @@
+# darktide-mod-relay — Hybrid Rust discovery + C shell (the runtime)
+#
+# Workspace root. The production deliverable here is the `discovery` crate
+# (pure-library + C-ABI staticlib). `shell` and `launcher` are native C and
+# built with their own Makefiles; they are not cargo crates.
+[workspace]
+resolver = "2"
+members = ["discovery"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "GPL-3.0-only"
+repository = "https://github.com/ModifAmorphic/darktide-mod-relay"
+publish = false
+
+# Abort on uncaught panic in release artifacts: an uncaught panic crossing the
+# C-ABI boundary would be UB, so the fail-safe is to terminate the host process
+# rather than unwind into C. (See the panic-boundary discussion in lib.rs: the
+# C-ABI seam wraps every entry point in `catch_unwind`, which is the *primary*
+# containment; `panic = "abort"` is the belt-and-suspenders backstop for
+# anything that escapes a boundary.)
+#
+# NOTE: `catch_unwind` only catches a panic when the panic strategy is unwind
+# for the code path that panics. We therefore keep the library on the default
+# (unwind) strategy for the builds that link into the shell, and expose a
+# separate `panic-abort` Cargo profile for the abort-mode fail-safe. The
+# boundary containment is documented in discovery/src/lib.rs.
+[profile.release]
+panic = "unwind"
+lto = true
+codegen-units = 1
+
+# ---- Panic-boundary fail-safe profile ----
+# Separate profile so the abort-mode artifact can be produced without changing
+# the default unwind build that the shell links (and on which `catch_unwind`
+# relies for graceful containment). Build with:
+#   cargo build --release --profile panic-abort -p relay-discovery
+# See discovery/src/lib.rs (panic-boundary docs) for why abort + catch_unwind
+# is a nuanced combination.
+[profile.panic-abort]
+inherits = "release"
+panic = "abort"
