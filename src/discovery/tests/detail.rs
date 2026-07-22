@@ -13,9 +13,7 @@
 //!     error code) AND populates the detail buffer with a non-empty message.
 
 use relay_discovery::pe::map_from_file;
-use relay_discovery::{
-    relay_discover_detail, RelayAddressTable, RELAY_ERR_PE, RELAY_OK,
-};
+use relay_discovery::{relay_discover_detail, RelayAddressTable, RELAY_ERR_PE, RELAY_OK};
 use std::path::PathBuf;
 
 /// Resolve `DARKTIDE_GAME_DIR` from the environment. Returns `None` if the
@@ -84,10 +82,7 @@ fn relay_discover_detail_success_and_error_paths() {
         )
     };
     assert_ne!(code, RELAY_OK, "non-PE input must not succeed");
-    assert_eq!(
-        code, RELAY_ERR_PE,
-        "non-PE input must surface a PE error"
-    );
+    assert_eq!(code, RELAY_ERR_PE, "non-PE input must surface a PE error");
     let nul = detail.iter().position(|&b| b == 0).unwrap_or(detail.len());
     let msg = std::str::from_utf8(&detail[..nul]).unwrap_or("<bad utf8>");
     assert!(!msg.is_empty(), "detail buffer must be populated on error");
@@ -120,10 +115,7 @@ fn relay_discover_detail_success_and_error_paths() {
             detail.len(),
         )
     };
-    assert_eq!(
-        code, RELAY_OK,
-        "discovery must succeed on the real binary"
-    );
+    assert_eq!(code, RELAY_OK, "discovery must succeed on the real binary");
     for (name, rva) in sixteen_of(&out) {
         assert!(rva != 0, "success path: {name} discovered as 0");
     }
