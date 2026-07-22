@@ -128,19 +128,6 @@ jobs:
           test -f bin/relay_shell.dll
           test -f bin/mod_relay.exe
           test -d bin/mod_loader
-          # Verify expected seven runtime modules exist
-          test -f bin/mod_loader/init.lua
-          test -f bin/mod_loader/file.lua
-          test -f bin/mod_loader/class_registry.lua
-          test -f bin/mod_loader/lifecycle.lua
-          test -f bin/mod_loader/require_bridge.lua
-          test -f bin/mod_loader/mod_manager.lua
-          test -f bin/mod_loader/dmf_adapter.lua
-          # Verify deleted runtime modules do not exist
-          test ! -f bin/mod_loader/hook.lua || { echo "Error: bin/mod_loader/hook.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/class_patch.lua || { echo "Error: bin/mod_loader/class_patch.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/require_wrap.lua || { echo "Error: bin/mod_loader/require_wrap.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/init.v1.lua || { echo "Error: bin/mod_loader/init.v1.lua exists but should have been deleted"; exit 1; }
           test -f bin/LICENSE
           test -f bin/THIRD_PARTY_NOTICES.md
 
@@ -244,23 +231,19 @@ jobs:
           if errorlevel 1 exit /b 1
       # Part of the build, not a deploy step: stage the mod loader Lua next to
       # the DLL/launcher (the shell self-locates <dll-dir>\mod_loader\init.lua).
-      # Fails if any source file is missing.
+      # Wipe+glob below — staged dir is exactly the current source set, no list
+      # to drift (v0.1.0 shipped an incomplete mod_loader/ because the previous
+      # explicit list omitted path.lua).
       - name: Stage mod loader Lua into bin/mod_loader/
         shell: pwsh
         run: |
           $dst = "bin/mod_loader"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          # Clean any stale files from previous builds
+          # Wipe stale .lua first, then glob-copy. Together this makes the staged
+          # dir exactly the current source set — no list to drift, no per-file
+          # tests needed. The wildcard does NOT cross into mod_loader/tests/.
           Remove-Item -Path "$dst/*.lua" -Force -ErrorAction SilentlyContinue
-          Copy-Item -Path @(
-              "mod_loader/init.lua",
-              "mod_loader/file.lua",
-              "mod_loader/class_registry.lua",
-              "mod_loader/lifecycle.lua",
-              "mod_loader/require_bridge.lua",
-              "mod_loader/mod_manager.lua",
-              "mod_loader/dmf_adapter.lua"
-          ) -Destination $dst
+          Copy-Item -Path "mod_loader/*.lua" -Destination $dst
       # Stage legal notices (LICENSE and THIRD_PARTY_NOTICES.md) required
       # in the runtime bundle.
       - name: Stage legal notices into bin/
@@ -373,18 +356,5 @@ jobs:
           test -f bin/relay_shell.dll
           test -f bin/mod_relay.exe
           test -d bin/mod_loader
-          # Verify expected seven runtime modules exist
-          test -f bin/mod_loader/init.lua
-          test -f bin/mod_loader/file.lua
-          test -f bin/mod_loader/class_registry.lua
-          test -f bin/mod_loader/lifecycle.lua
-          test -f bin/mod_loader/require_bridge.lua
-          test -f bin/mod_loader/mod_manager.lua
-          test -f bin/mod_loader/dmf_adapter.lua
-          # Verify deleted runtime modules do not exist
-          test ! -f bin/mod_loader/hook.lua || { echo "Error: bin/mod_loader/hook.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/class_patch.lua || { echo "Error: bin/mod_loader/class_patch.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/require_wrap.lua || { echo "Error: bin/mod_loader/require_wrap.lua exists but should have been deleted"; exit 1; }
-          test ! -f bin/mod_loader/init.v1.lua || { echo "Error: bin/mod_loader/init.v1.lua exists but should have been deleted"; exit 1; }
           test -f bin/LICENSE
           test -f bin/THIRD_PARTY_NOTICES.md

@@ -138,17 +138,11 @@ jobs:
         run: |
           $dst = "bin/mod_loader"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          # Clean any stale files from previous builds
+          # Wipe stale .lua first, then glob-copy. Together this makes the staged
+          # dir exactly the current source set — no list to drift, no per-file
+          # tests needed. The wildcard does NOT cross into mod_loader/tests/.
           Remove-Item -Path "$dst/*.lua" -Force -ErrorAction SilentlyContinue
-          Copy-Item -Path @(
-              "mod_loader/init.lua",
-              "mod_loader/file.lua",
-              "mod_loader/class_registry.lua",
-              "mod_loader/lifecycle.lua",
-              "mod_loader/require_bridge.lua",
-              "mod_loader/mod_manager.lua",
-              "mod_loader/dmf_adapter.lua"
-          ) -Destination $dst
+          Copy-Item -Path "mod_loader/*.lua" -Destination $dst
       # Stage legal notices (LICENSE and THIRD_PARTY_NOTICES.md) required
       # in the runtime bundle.
       - name: Stage legal notices into bin/

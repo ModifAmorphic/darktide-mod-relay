@@ -97,8 +97,7 @@ fn oracle_all_sixteen_match() {
     // each discovered address against its matcher for an explicit, reportable
     // pass/fail per function, and require all RVAs non-zero + distinct.
     let pe = Pe::from_mapped(&image).unwrap();
-    let mut dis =
-        relay_discovery::disasm::Disassembler::new_x86_64_intel().expect("capstone init");
+    let mut dis = relay_discovery::disasm::Disassembler::new_x86_64_intel().expect("capstone init");
     let cluster = test_cluster(&pe, &image);
     eprintln!(
         "[oracle] cluster window = [0x{:x}, 0x{:x}), _PRELOAD rva = 0x{:x}",
