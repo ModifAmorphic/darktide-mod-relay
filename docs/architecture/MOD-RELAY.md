@@ -65,8 +65,10 @@ signals hook-ready.
 - **Built + live-validated (the full modding chain).** The mod loader
   (`src/mod_loader/init.lua`, the runtime-staged entry) runs in
   engine-context at pcall#1, captures the engine's real
-  `io`/`loadstring`/`require`/`print`/`os`/`ffi` into the `Mods` table **before
-  the engine removes `io`/`loadstring` (~pcall#6)**, and bridges pcall#1 to the
+  `io`/`loadstring`/`require`/`print`/`os` into the `Mods` table **before
+  the engine removes `io`/`loadstring` (~pcall#6)**, publishes the engine LuaJIT
+  FFI module via the pre-wrap module loader (`Mods.original_require("ffi")`,
+  since `require("ffi")` creates no global in LuaJIT 2.1), and bridges pcall#1 to the
   engine's late boot via a **deferred bootstrap**:
   - the **require bridge** (`require_bridge.lua`) preserves the engine's real
     `require` (as `Mods.original_require`), wraps global `require` to record
@@ -94,8 +96,10 @@ signals hook-ready.
     (`mod_manager.lua`, which itself loads the DMF adapter
     `dmf_adapter.lua` from the loader root), instantiates `Managers.mod`, and
     directly closure-wraps `StateGame.update` + `GameStateMachine._change_state`
-    (no generic hook API, no loadstring-generated hook chain, no string-path
-    deferred queue).
+    + `GameStateMachine.destroy` (no generic hook API, no loadstring-generated
+    hook chain, no string-path deferred queue). The `destroy` wrapper dispatches
+    one final `on_game_state_changed("exit", …)` for the active state before
+    destruction (deduplicated against `_change_state` per state machine).
   The loader splits load into two phases: `init()` SCANs (reads `mods.lst`,
     builds the `_mods` table — the order file is authoritative, the loader
     injects nothing — restores persisted manager settings via the adapter, and

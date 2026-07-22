@@ -248,6 +248,8 @@ return function(runner)
     -- Build a GameStateMachine whose _change_state changes self._state (the
     -- engine behavior), and current_state_name derives the name from it. The
     -- outgoing state object is captured by the wrapper for the exit dispatch.
+    -- Models destroy as a no-op so the full bootstrap (incl. the destroy wrap)
+    -- can complete; tests needing a custom destroy body build their own GSM.
     local function setup_gsm(sb, seq, on_gsc)
         local gsm = sb.class("GameStateMachine")
         -- Engine _change_state(self, new_state_name): assigns the new state.
@@ -259,7 +261,53 @@ return function(runner)
         gsm.current_state_name = function(self)
             return self._state and self._state.name or nil
         end
+        gsm.destroy = function(self, ...)
+            if seq then table.insert(seq, "engine:destroy") end
+        end
         return gsm
+    end
+
+    -- Full-bootstrap helper for destroy-wrapper tests. Sets up the coordinator
+    -- + BSR wrap + manager + StateGame + a GSM with _change_state,
+    -- current_state_name, and destroy. The manager's on_game_state_changed is
+    -- routed to opts.on_gsc (status, name, obj). opts.destroy_fn customizes the
+    -- GSM destroy body. opts.print_fn captures diagnostics. Returns sb, gsm, bsr.
+    local function setup_destroy(opts)
+        opts = opts or {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = opts.print_fn or function() end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return {
+                    new = function()
+                        return {
+                            update = function() end,
+                            on_game_state_changed = function(self, status, sname, sobj)
+                                if opts.on_gsc then opts.on_gsc(status, sname, sobj) end
+                            end,
+                        }
+                    end,
+                }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        gsm.current_state_name = function(self)
+            return self._state and self._state.name or nil
+        end
+        gsm.destroy = opts.destroy_fn or function(self, ...) end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)  -- advance_bootstrap wraps StateGame + GSM
+        return sb, gsm, bsr
     end
 
     runner.register("lifecycle: _change_state dispatches exit BEFORE + enter AFTER the transition", function()
@@ -487,6 +535,7 @@ return function(runner)
         local gsm = sb.class("GameStateMachine")
         gsm._change_state = function(self, ...) gsm_change_calls = gsm_change_calls + 1 end
         gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
         -- Tick 1: manager created + GSM wrapped, StateGame missing.
         bsr._state_update(bsr)
         runner.assert_eq(1, news, "manager created once on tick 1")
@@ -527,6 +576,7 @@ return function(runner)
         local gsm = sb.class("GameStateMachine")
         gsm._change_state = function() end
         gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
         -- Tick 2: both wrap; manager not re-created.
         bsr._state_update(bsr)
         runner.assert_eq(1, news, "manager still one instance")
@@ -563,6 +613,7 @@ return function(runner)
         local gsm = sb.class("GameStateMachine")
         gsm._change_state = function() end
         gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
         -- Tick 1: load fails -> no manager, but wrapping still proceeds.
         bsr._state_update(bsr)
         runner.assert_eq(0, news, "manager not created on failed tick")
@@ -599,6 +650,7 @@ return function(runner)
         local gsm = sb.class("GameStateMachine")
         gsm._change_state = function() end
         gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
         bsr._state_update(bsr)  -- completes everything
         runner.assert_eq(1, load_calls, "one load on the completing tick")
         bsr._state_update(bsr)  -- short-circuit
@@ -742,5 +794,330 @@ return function(runner)
         runner.assert_nil(sb.Mods._deferred_hooks)
         runner.assert_nil(sb._G.MODS_HOOKS)
         runner.assert_nil(sb._G.MODS_HOOKS_BY_FILE)
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- destroy wrapper — final state-exit dispatch before destruction (Finding 3)
+    --
+    -- Contract: when a GameStateMachine with a current named state is destroyed,
+    -- exactly one on_game_state_changed("exit", name, object) is dispatched for
+    -- that final state (if not already exited) BEFORE the original destroy, with
+    -- per-state-machine dedup against _change_state. Original return values +
+    -- errors are preserved; callback failures are isolated; missing destroy
+    -- degrades without blocking the other wraps.
+    -- ---------------------------------------------------------------------
+
+    runner.register("lifecycle: destroy dispatches a final exit BEFORE the original destroy", function()
+        local timeline = {}
+        local sb, gsm = setup_destroy({
+            on_gsc = function(status, sname)
+                table.insert(timeline, "mod:gsc:" .. status .. ":" .. tostring(sname))
+            end,
+            destroy_fn = function(self) table.insert(timeline, "engine:destroy") end,
+        })
+        local inst = setmetatable({ _state = { name = "StateMainMenu" } }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq({ "mod:gsc:exit:StateMainMenu", "engine:destroy" }, timeline,
+            "final exit must dispatch BEFORE the original destroy")
+    end)
+
+    runner.register("lifecycle: destroy forwards exit status + name + exact state object identity", function()
+        local recorded = {}
+        local state_obj = { name = "StateIngame", marker = {} }
+        local sb, gsm = setup_destroy({
+            on_gsc = function(status, sname, sobj)
+                table.insert(recorded, { status = status, name = sname, obj = sobj })
+            end,
+        })
+        local inst = setmetatable({ _state = state_obj }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq(1, #recorded, "exactly one exit dispatched")
+        runner.assert_eq("exit", recorded[1].status)
+        runner.assert_eq("StateIngame", recorded[1].name)
+        runner.assert_eq(state_obj, recorded[1].obj,
+            "the exact state object is forwarded (identity)")
+    end)
+
+    runner.register("lifecycle: destroy with no current state dispatches no exit", function()
+        local count = 0
+        local sb, gsm = setup_destroy({
+            on_gsc = function() count = count + 1 end,
+        })
+        local inst = setmetatable({}, { __index = gsm })  -- no _state
+        inst:destroy()
+        runner.assert_eq(0, count, "no exit when there is no current state")
+    end)
+
+    runner.register("lifecycle: destroy with no current_state_name dispatches no exit gracefully", function()
+        -- Graceful degradation: if the engine build doesn't expose
+        -- current_state_name(), destroy dispatches no exit, and the original
+        -- destroy still runs unchanged.
+        local gsc_called = false
+        local engine_ran = false
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = function() end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return {
+                        update = function() end,
+                        on_game_state_changed = function() gsc_called = true end,
+                    }
+                end }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        -- NOTE: no current_state_name defined on this GameStateMachine.
+        gsm.destroy = function(self) engine_ran = true end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)
+        local inst = setmetatable({ _state = { name = "X" } }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq(true, engine_ran, "original destroy still runs")
+        runner.assert_eq(false, gsc_called,
+            "no exit dispatch when current_state_name is absent")
+    end)
+
+    runner.register("lifecycle: destroy callback failure isolated; original destroy still runs", function()
+        local engine_ran = false
+        local logged = {}
+        local sb, gsm = setup_destroy({
+            print_fn = function(m) table.insert(logged, m) end,
+            on_gsc = function() error("mod callback boom") end,
+            destroy_fn = function(self) engine_ran = true end,
+        })
+        local inst = setmetatable({ _state = { name = "StateX" } }, { __index = gsm })
+        local ok = pcall(function() inst:destroy() end)
+        runner.assert_eq(true, ok, "destroy must not propagate the callback error")
+        runner.assert_eq(true, engine_ran, "original destroy runs despite the callback error")
+        local found = false
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("final state exit drive failed", 1, true) then
+                found = true; break
+            end
+        end
+        runner.assert_truthy(found, "callback failure is logged")
+    end)
+
+    runner.register("lifecycle: original destroy error propagates (not swallowed)", function()
+        local sb, gsm = setup_destroy({
+            destroy_fn = function(self) error("engine destroy boom") end,
+        })
+        local inst = setmetatable({ _state = { name = "StateX" } }, { __index = gsm })
+        local ok, err = pcall(function() inst:destroy() end)
+        runner.assert_eq(false, ok, "original destroy error must propagate")
+        runner.assert_truthy(tostring(err):find("engine destroy boom") ~= nil,
+            "engine error preserved")
+    end)
+
+    runner.register("lifecycle: destroy preserves return values with embedded/trailing nils", function()
+        local sb, gsm = setup_destroy({
+            destroy_fn = function(self) return "x", nil, "y", nil end,
+        })
+        local inst = setmetatable({ _state = { name = "StateX" } }, { __index = gsm })
+        local r1, r2, r3, r4, r5 = inst:destroy()
+        runner.assert_eq("x", r1)
+        runner.assert_nil(r2, "embedded nil at slot 2 preserved")
+        runner.assert_eq("y", r3)
+        runner.assert_nil(r4, "trailing nil at slot 4 preserved")
+        runner.assert_nil(r5, "nothing beyond slot 4")
+        runner.assert_eq(4, select("#", inst:destroy()),
+            "select('#') reports 4 returns despite the nils")
+    end)
+
+    runner.register("lifecycle: destroy that internally _change_states produces exactly ONE final exit", function()
+        -- Contract point 9: a destroy that internally changes state must not
+        -- cause a duplicate exit. The destroy wrapper exits the current state,
+        -- then the original destroy's internal _change_state would normally also
+        -- exit it — the shared dedup (_claim_exit) suppresses the duplicate.
+        local exits = 0
+        local enters = 0
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = function() end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return {
+                        update = function() end,
+                        on_game_state_changed = function(self, status)
+                            if status == "exit" then exits = exits + 1
+                            elseif status == "enter" then enters = enters + 1 end
+                        end,
+                    }
+                end }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        gsm.current_state_name = function(self) return self._state and self._state.name or nil end
+        -- The original destroy internally calls _change_state (which the Step 3
+        -- wrapper would normally exit-dispatch for the outgoing state).
+        gsm.destroy = function(self, ...) self:_change_state("StateExit") end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)
+        local inst = setmetatable({ _state = { name = "StateMainMenu" } }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq(1, exits,
+            "exactly ONE exit despite destroy internally _change_state-ing (dedup)")
+    end)
+
+    runner.register("lifecycle: an already-exited state is not redispatched by destroy", function()
+        -- After _change_state exits state A and transitions to B, destroying the
+        -- machine dispatches exactly one exit for B; A is not redispatched.
+        local exits = {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = function() end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return {
+                        update = function() end,
+                        on_game_state_changed = function(self, status, sname)
+                            if status == "exit" then table.insert(exits, sname) end
+                        end,
+                    }
+                end }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        gsm.current_state_name = function(self) return self._state and self._state.name or nil end
+        gsm.destroy = function(self, ...) end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)
+        local inst = setmetatable({ _state = { name = "StateA" } }, { __index = gsm })
+        inst:_change_state("StateB")  -- exits A, enters B
+        runner.assert_eq({ "StateA" }, exits, "_change_state exited A")
+        inst:destroy()  -- should exit B (current), NOT re-exit A
+        runner.assert_eq({ "StateA", "StateB" }, exits,
+            "destroy dispatches exactly one exit for the current state B; A not redispatched")
+    end)
+
+    runner.register("lifecycle: partial bootstrap — destroy absent tick 1, wraps tick 2 without rewrapping", function()
+        local news = 0
+        local destroy_calls = 0
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = function() end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    news = news + 1
+                    return { update = function() end, on_game_state_changed = function() end }
+                end }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        gsm.current_state_name = function(self) return self._state and self._state.name or nil end
+        -- Tick 1: no destroy yet. Manager + StateGame + _change_state wrap; destroy missing.
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)
+        runner.assert_eq(1, news, "manager created tick 1")
+        -- destroy appears between ticks.
+        gsm.destroy = function(self, ...) destroy_calls = destroy_calls + 1 end
+        -- Tick 2: destroy wraps; manager/StateGame/_change_state NOT re-wrapped.
+        bsr._state_update(bsr)
+        runner.assert_eq(1, news, "manager still one instance tick 2 (no rewrap)")
+        -- Drive destroy: the wrapper dispatches a final exit then calls original once.
+        local inst = setmetatable({ _state = { name = "X" } }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq(1, destroy_calls, "original destroy called exactly once")
+    end)
+
+    runner.register("lifecycle: destroy wrapper installed once across multiple boot ticks (no layering)", function()
+        local destroy_calls = 0
+        local sb, gsm, bsr = setup_destroy({
+            destroy_fn = function(self, ...) destroy_calls = destroy_calls + 1 end,
+        })
+        -- Extra boot ticks (continued bootstrap / post-reload requires). Each
+        -- tick calls advance_bootstrap; bs.destroy_wrapped prevents re-wrapping.
+        bsr._state_update(bsr)
+        bsr._state_update(bsr)
+        local inst = setmetatable({ _state = { name = "X" } }, { __index = gsm })
+        inst:destroy()
+        runner.assert_eq(1, destroy_calls,
+            "one wrapper layer: original destroy called once despite multiple boot ticks")
+    end)
+
+    runner.register("lifecycle: absence of destroy degrades without blocking the other wraps", function()
+        local sg_update_calls = 0
+        local gsm_change_calls = 0
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Managers = {}
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.class = function(name) return { name = name } end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return { update = function() end, on_game_state_changed = function() end }
+                end }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        local sg = sb.class("StateGame")
+        sg.update = function(self, dt) sg_update_calls = sg_update_calls + 1 end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, ...) gsm_change_calls = gsm_change_calls + 1 end
+        gsm.current_state_name = function() return "X" end
+        -- NOTE: no destroy method on the GSM.
+        sb.Mods.coordinate_bootstrap()
+        local ok = pcall(function() bsr._state_update(bsr) end)
+        runner.assert_eq(true, ok, "bootstrap must not crash when destroy is absent")
+        -- Other wraps still function.
+        sg.update(sg, 0.016)
+        local inst = setmetatable({ _state = { name = "A" } }, { __index = gsm })
+        inst:_change_state("B")
+        runner.assert_eq(1, sg_update_calls, "StateGame.update wrapped despite no destroy")
+        runner.assert_eq(1, gsm_change_calls, "_change_state wrapped despite no destroy")
+        local destroy_logged = false
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("destroy", 1, true) then
+                destroy_logged = true; break
+            end
+        end
+        runner.assert_truthy(destroy_logged, "absent destroy is logged (diagnosable)")
     end)
 end

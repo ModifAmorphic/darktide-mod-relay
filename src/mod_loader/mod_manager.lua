@@ -265,18 +265,22 @@ function ModManager:request_reload(source)
     return true
 end
 
--- Poll the keyboard reload shortcut from the update path and feed acceptance
--- through request_reload("keyboard"). Exact established parity: the shortcut is
--- Keyboard.pressed(button_index("r")) AND the numeric sum
--- Keyboard.button(button_index("left shift")) + Keyboard.button(button_index
--- ("left ctrl")) == 2 (both LEFT modifiers held).
+-- _check_reload: trigger-detection seam for the community reload-control
+-- contract. Returns true when the built-in gesture (LEFT Ctrl + LEFT Shift +
+-- an R press) is active this update; false otherwise. Detection ONLY: it does
+-- not initiate teardown, mutate reload state, or enforce developer mode (those
+-- remain in request_reload). Community mods may replace or wrap this method
+-- (looked up by dynamic dispatch on self each update) to suppress or redirect
+-- the built-in gesture; a throwing replacement degrades to false via the pcall
+-- in _poll_reload_shortcut without breaking the update loop.
 --
 -- Button indexes are resolved lazily + defensively from update (not
 -- construction). Missing/invalid/throwing Keyboard APIs/indexes are treated as
 -- "reload unavailable": no update failure, a single controlled log per
 -- unavailable condition (reset on recovery), and the manager keeps retrying so
--- late availability can work. Developer mode false/default does not trigger.
-function ModManager:_poll_reload_shortcut()
+-- late availability can work. Developer mode false/default does not trigger
+-- (request_reload enforces that, not this method).
+function ModManager:_check_reload()
     if not self._kb_resolved then
         local ok = _pcall(function()
             local kb = Keyboard
@@ -298,7 +302,7 @@ function ModManager:_poll_reload_shortcut()
                 log("reload shortcut unavailable (keyboard not ready); will retry")
                 self._kb_unavailable_logged = true
             end
-            return
+            return false
         end
         self._kb_resolved = true
         -- NOTE: do not reset _kb_unavailable_logged here. The query below may
@@ -320,10 +324,21 @@ function ModManager:_poll_reload_shortcut()
             log("reload shortcut unavailable (keyboard query failed); will retry")
             self._kb_unavailable_logged = true
         end
-        return
+        return false
     end
     self._kb_unavailable_logged = false
-    if pressed and mod_sum == 2 then
+    return pressed and mod_sum == 2
+end
+
+-- _poll_reload_shortcut: orchestrates the gesture check + forwarding. Calls the
+-- detection seam by DYNAMIC DISPATCH (self:_check_reload() — never a captured
+-- local, which would defeat community replacements/wrappers), contains a
+-- throwing override via pcall (no reload, update continues), and forwards a
+-- true result through request_reload so developer-mode / done / no-stacking
+-- policy stays centralized.
+function ModManager:_poll_reload_shortcut()
+    local ok, active = _pcall(function() return self:_check_reload() end)
+    if ok and active then
         self:request_reload("keyboard")
     end
 end

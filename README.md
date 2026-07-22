@@ -19,9 +19,10 @@ powers Mod Curator (Darktide Mod Manager), but it stands on its own). See
 ## Getting started
 
 > **Run it.** Mod Relay is driven by its launcher CLI: point it at the
-> game binary and a mod directory you assemble (DMF + your mods + a load-order
-> file). The steps below cover a direct command-line setup; the same flags
-> apply if you're invoking the launcher from an app.
+> game binary and a directory you assemble whose `mods/` subfolder holds DMF +
+> your mods + a load-order file (see [Where mods go](#4-where-mods-go)). The
+> steps below cover a direct command-line setup; the same flags apply if
+> you're invoking the launcher from an app.
 
 ### 1. Get the runtime
 
@@ -50,7 +51,7 @@ self-locates the mod loader from its own path), so you only point it at your
 mods:
 
 ```bat
-mod_relay.exe --game-binary "C:\Path\To\Darktide.exe" --mod-path "C:\Path\To\mods"
+mod_relay.exe --game-binary "C:\Path\To\Darktide.exe" --mod-path "C:\Path\To\RelayMods"
 ```
 
 A minimal `launch.bat` (next to the launcher) makes this easier:
@@ -58,7 +59,7 @@ A minimal `launch.bat` (next to the launcher) makes this easier:
 ```bat
 mod_relay.exe ^
   --game-binary "C:\Games\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries\Darktide.exe" ^
-  --mod-path "C:\Path\To\mods"
+  --mod-path "C:\Path\To\RelayMods"
 ```
 
 > On Linux/Proton, use Windows-style `Z:\` paths (the Proton `Z:` drive maps to
@@ -66,7 +67,7 @@ mod_relay.exe ^
 
 > **Forwarding arguments to the game.** To pass command-line arguments to
 > Darktide, put a bare `--` on the launcher's command line followed by the
-> arguments to forward — e.g. `--game-binary "...\Darktide.exe" --mod-path "...\mods" -- --lua-heap-mb-size 2048`.
+> arguments to forward — e.g. `--game-binary "...\Darktide.exe" --mod-path "...\RelayMods" -- --lua-heap-mb-size 2048`.
 > Everything after `--` is forwarded verbatim, in order, after the exe (no
 > `--` is the normal, exe-only launch). There is no env-var form for these.
 > See [`src/README.md`](src/README.md#launcher-cli) for the full details.
@@ -102,17 +103,19 @@ Darktide Lua output.
 
 ### 4. Where mods go
 
-Mods live in the **mod directory** you point `--mod-path` at. Lay it out as:
+Mods live in the `mods/` subfolder of the directory you point `--mod-path` at
+(`--mod-path` is the *parent* of `mods/`, not `mods/` itself). Lay it out as:
 
 ```
 <mod-path>/
-  mods.lst             one mod name per line, in load order (list dmf first)
-  dmf/                 the Darktide Mod Framework (DMF) — the API mods are built against
-  <your-mod>/          your mod(s)
+  mods/
+    mods.lst           one mod name per line, in load order (list dmf first)
+    dmf/               the Darktide Mod Framework (DMF) — the API mods are built against
+    <your-mod>/        your mod(s)
 ```
 
 - **DMF** (the Darktide Mod Framework) is the framework mods are built against;
-  place it at `<mod-path>/dmf/`.
+  place it at `<mod-path>/mods/dmf/`.
 - **`mods.lst`** lists the mods to load, one name per line, in the order they
   load (list `dmf` first). The loader loads exactly what's listed, in order — it
   injects nothing. You author this file by hand, or have your app generate it.

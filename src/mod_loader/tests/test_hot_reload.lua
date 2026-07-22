@@ -153,6 +153,16 @@ return function(runner)
         return mm
     end
 
+    -- Like new_loaded, but also returns the ModManager class so a test can
+    -- replace methods on the persistent class (the same table the instance's
+    -- metatable __index points at).
+    local function new_loaded_with_class(sb)
+        local ModManager = load_driver(sb)
+        local mm = ModManager:new()
+        mm:update(0.016)
+        return mm, ModManager
+    end
+
     -- A recording mod object. seq captures {tag, data} tuples for init/update/
     -- on_reload/on_unload/on_game_state_changed. opts customizes callbacks.
     local function recording_mod(name, seq, opts)
@@ -984,5 +994,128 @@ return function(runner)
         mm:destroy()
         runner.assert_eq(2, count_tag(seq, ":on_unload"),
             "destroy after failed reload unloads exactly the current two objects")
+    end)
+
+    -- -----------------------------------------------------------------
+    -- _check_reload trigger-detection seam (Finding 2)
+    -- -----------------------------------------------------------------
+
+    runner.register("hot_reload: _check_reload exists on the class before any mod runs", function()
+        local sb = setup()
+        local ModManager = load_driver(sb)  -- class loaded, no :new() yet
+        runner.assert_type("function", ModManager._check_reload,
+            "_check_reload is defined on the class at module load (before any mod runs)")
+    end)
+
+    runner.register("hot_reload: _check_reload returns true only for LEFT Ctrl+LEFT Shift+R", function()
+        local sb, state, kstate = setup()
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm = new_loaded(sb)
+        -- LEFT Ctrl + LEFT Shift + R -> true
+        kstate.r = true; kstate.lshift = true; kstate.lctrl = true
+        runner.assert_eq(true, mm:_check_reload(), "exact LEFT combo -> true")
+        -- R only -> false
+        kstate.r = true; kstate.lshift = false; kstate.lctrl = false
+        runner.assert_eq(false, mm:_check_reload(), "R alone -> false")
+        -- LEFT modifiers without R -> false
+        kstate.r = false; kstate.lshift = true; kstate.lctrl = true
+        runner.assert_eq(false, mm:_check_reload(), "modifiers without R -> false")
+        -- only one LEFT modifier + R -> false
+        kstate.r = true; kstate.lshift = true; kstate.lctrl = false
+        runner.assert_eq(false, mm:_check_reload(), "one modifier + R -> false")
+        -- RIGHT modifiers + R -> false (left-only parity)
+        kstate.r = true; kstate.rshift = true; kstate.rctrl = true
+        kstate.lshift = false; kstate.lctrl = false
+        runner.assert_eq(false, mm:_check_reload(), "RIGHT modifiers + R -> false (left-only)")
+    end)
+
+    runner.register("hot_reload: replacing _check_reload to return false suppresses the built-in gesture", function()
+        local sb, state, kstate = setup()
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm, ModManager = new_loaded_with_class(sb)
+        -- Replace on the class to always return false (community suppression).
+        ModManager._check_reload = function() return false end
+        kstate.r = true; kstate.lshift = true; kstate.lctrl = true
+        mm:update(0.016)
+        runner.assert_eq(false, mm._reload_requested,
+            "a false-returning _check_reload suppresses the request even with keys active")
+    end)
+
+    runner.register("hot_reload: _check_reload returning true still routes through request_reload", function()
+        local sb, state = setup({ developer_mode = false })
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm, ModManager = new_loaded_with_class(sb)
+        -- Force true; request_reload must still enforce developer mode.
+        ModManager._check_reload = function() return true end
+        mm:update(0.016)
+        runner.assert_eq(false, mm._reload_requested,
+            "a true result still routes through request_reload (developer mode gates)")
+    end)
+
+    runner.register("hot_reload: a throwing _check_reload is contained; mod updates continue", function()
+        local sb, state, kstate = setup()
+        local seq = {}
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", seq)) })
+        local mm, ModManager = new_loaded_with_class(sb)
+        ModManager._check_reload = function() error("community override boom") end
+        clear(seq)
+        local ok = pcall(function() mm:update(0.016) end)
+        runner.assert_eq(true, ok, "update must not propagate the throwing override")
+        runner.assert_eq(false, mm._reload_requested, "no reload from a throwing override")
+        runner.assert_eq(1, count_tag(seq, ":update"),
+            "normal mod updates continue after the contained throw")
+    end)
+
+    runner.register("hot_reload: _check_reload recovers + single-logs on missing keyboard", function()
+        local sb, state = setup()
+        sb.Keyboard = nil
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local logged = {}
+        sb.__print = function(m) table.insert(logged, m) end
+        local mm = new_loaded(sb)
+        -- Drive _check_reload directly across multiple calls; it returns false
+        -- each time, and the unavailable condition logs exactly once (non-spam).
+        local results = {}
+        for _ = 1, 3 do
+            table.insert(results, mm:_check_reload())
+        end
+        runner.assert_eq({ false, false, false }, results, "missing keyboard -> false, no throw")
+        runner.assert_eq(1, count_log(logged, "shortcut unavailable"),
+            "unavailable logged once across three direct checks (non-spamming)")
+    end)
+
+    runner.register("hot_reload: 3 reloads do not stack _check_reload (one gesture -> one request)", function()
+        local sb, state, kstate = setup()
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm = new_loaded(sb)
+        -- The method is a single definition on the persistent class; hot reload
+        -- does not re-install it (no layering). After 3 reloads, one gesture
+        -- still produces exactly one request (request_reload no-stacking enforces).
+        for _ = 1, 3 do
+            mm:request_reload("test")
+            mm:update(0.016)  -- teardown
+            mm:update(0.016)  -- replacement
+        end
+        runner.assert_eq(4, mm._generation, "three reloads -> generation 4")
+        kstate.r = true; kstate.lshift = true; kstate.lctrl = true
+        mm:update(0.016)
+        runner.assert_eq(true, mm._reload_in_progress,
+            "one gesture after 3 reloads produces one request (entered teardown)")
+        runner.assert_eq(false, mm._reload_requested,
+            "request consumed in the same frame (no stacking)")
+    end)
+
+    runner.register("hot_reload: direct _reload_requested = true legacy path still completes a reload", function()
+        local sb, state = setup()
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm = new_loaded(sb)
+        -- Legacy: at least one public extension sets the field directly.
+        -- Catalog as legacy compatibility; do not remove. update() consumes it.
+        mm._reload_requested = true
+        mm:update(0.016)  -- teardown frame
+        runner.assert_eq(true, mm._reload_in_progress, "legacy direct flag consumed -> teardown")
+        mm:update(0.016)  -- replacement
+        runner.assert_eq("done", mm._state)
+        runner.assert_eq(2, mm._generation, "legacy path completed a reload")
     end)
 end
