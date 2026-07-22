@@ -59,11 +59,28 @@ src/                Mod Relay — the injected modding runtime + injector
                       init.lua entry + modules (path/file/class_registry/
                       require_bridge/lifecycle/mod_manager/dmf_adapter) +
                       tests/ (offline LuaJIT harness, run via
-                      `make mod-loader-test`). mod_manager.lua is the generic
+                      `make mod-loader-test`). init.lua publishes the engine
+                      LuaJIT FFI module via the pre-wrap module loader
+                      (Mods.original_require("ffi") — require("ffi") creates no
+                      global in LuaJIT 2.1; bootstrap-private, degrades to nil +
+                      one diagnostic if unavailable); lifecycle.lua is the
+                      bootstrap coordinator + the direct closure-wraps
+                      (BootStateRequireGameScripts._state_update,
+                      StateGame.update, GameStateMachine._change_state exit/enter
+                      dispatch, and GameStateMachine.destroy — the final-exit
+                      wrapper that dispatches one deduplicated
+                      on_game_state_changed("exit",…) for the active state before
+                      destruction, closing the community-contract gap where a
+                      state destroyed without a preceding _change_state exit
+                      would otherwise receive none); mod_manager.lua is the generic
                       scan/load/lifecycle driver + the hot-reload state machine
-                      (request_reload seam, LEFT Ctrl+Shift+R keyboard trigger,
-                      two-frame teardown/replacement sequencing, reload-data
-                      association keyed by name, failure isolation, no stacking);
+                      (request_reload seam, _check_reload trigger-detection seam
+                      for the community reload-control contract (detection only,
+                      dynamic dispatch so a community replacement can suppress or
+                      redirect the built-in gesture), LEFT Ctrl+Shift+R keyboard
+                      trigger, two-frame teardown/replacement sequencing,
+                      reload-data association keyed by name, failure isolation,
+                      no stacking);
                       dmf_adapter.lua is the stock-DMF compatibility boundary
                       (persisted developer-mode restoration from
                       Application.user_setting, DMF-visible contract fields +

@@ -27,6 +27,49 @@ return function(runner)
         return sb
     end
 
+    -- Count log lines containing a substring (plain find).
+    local function count_log(logged, sub)
+        local n = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find(sub, 1, true) then n = n + 1 end
+        end
+        return n
+    end
+
+    -- Build a sandbox whose pre-wrap require is a spy. ffi_behavior controls
+    -- what the spy returns/does when called with "ffi":
+    --   { result = <value> }  -> returns <value> for "ffi" (other names: {})
+    --   { throw = "msg" }     -> errors with "msg" for "ffi"
+    -- Returns sb + the calls list (each entry is the name passed to require).
+    local function setup_ffi(ffi_behavior)
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        local calls = {}
+        sb.require = function(name)
+            table.insert(calls, name)
+            if name == "ffi" then
+                if ffi_behavior and ffi_behavior.throw then
+                    error(ffi_behavior.throw)
+                end
+                return ffi_behavior and ffi_behavior.result or {}
+            end
+            return {}
+        end
+        sb.print = function() end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        return sb, calls
+    end
+
+    -- Count how many times "ffi" appears in the calls list.
+    local function count_ffi_calls(calls)
+        local n = 0
+        for _, name in ipairs(calls) do
+            if name == "ffi" then n = n + 1 end
+        end
+        return n
+    end
+
     runner.register("entry: captures Mods.original_require (the pre-wrap require)", function()
         local pre = function() return "engine" end
         local sb = mock.new_sandbox()
@@ -149,5 +192,124 @@ return function(runner)
         runner.assert_eq(false, r, "entry returns false on bootstrap failure")
         runner.assert_nil(sb.Mods.install_require_bridge,
             "bridge not installed when a module is missing")
+    end)
+
+    -- -----------------------------------------------------------------
+    -- FFI module publication (Finding 1)
+    -- -----------------------------------------------------------------
+
+    runner.register("entry: Mods.lua.ffi is the engine FFI module (required via original_require)", function()
+        -- The LuaJIT harness has a real require("ffi"); the entry must publish
+        -- exactly that module table (not a global, not a wrapper).
+        local real_ffi = require("ffi")
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function(name) if name == "ffi" then return real_ffi end; return {} end
+        sb.print = function() end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        runner.assert_type("table", sb.Mods.lua.ffi, "Mods.lua.ffi is a table")
+        runner.assert_eq(real_ffi, sb.Mods.lua.ffi,
+            "Mods.lua.ffi is the engine FFI module table (identity with require('ffi'))")
+    end)
+
+    runner.register("entry: FFI acquisition requests the module exactly once", function()
+        local sb, calls = setup_ffi({ result = { marker = "ffi" } })
+        mock.load_module("init", sb)()
+        runner.assert_eq(1, count_ffi_calls(calls),
+            "original_require('ffi') called exactly once during entry")
+    end)
+
+    runner.register("entry: an existing global ffi is NOT treated as authoritative", function()
+        -- A sentinel non-table global `ffi` must NOT be published; the required
+        -- module wins (proves the entry uses original_require, not a global grab).
+        local ffi_module = { marker = "required ffi" }
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function(name) if name == "ffi" then return ffi_module end; return {} end
+        sb.print = function() end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        sb.ffi = "sentinel-non-table"  -- a misleading global that must be ignored
+        mock.load_module("init", sb)()
+        runner.assert_eq(ffi_module, sb.Mods.lua.ffi,
+            "Mods.lua.ffi is the required module, not the global sentinel")
+    end)
+
+    runner.register("entry: FFI loader error is contained + logged once; entry still succeeds", function()
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function(name) if name == "ffi" then error("ffi loader boom") end; return {} end
+        sb.print = function(m) table.insert(logged, m) end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        local r = mock.load_module("init", sb)()
+        runner.assert_eq(true, r, "entry succeeds despite the FFI loader error")
+        runner.assert_nil(sb.Mods.lua.ffi, "Mods.lua.ffi stays nil on error")
+        runner.assert_eq(1, count_log(logged, "ffi module unavailable"),
+            "exactly one ffi-unavailable diagnostic on error")
+    end)
+
+    runner.register("entry: non-table FFI result degrades to nil with one diagnostic", function()
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function(name) if name == "ffi" then return "not a table" end; return {} end
+        sb.print = function(m) table.insert(logged, m) end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        runner.assert_nil(sb.Mods.lua.ffi, "non-table result -> Mods.lua.ffi stays nil")
+        runner.assert_eq(1, count_log(logged, "ffi module unavailable"),
+            "exactly one diagnostic for non-table result")
+    end)
+
+    runner.register("entry: FFI acquisition does NOT populate Mods.require_store", function()
+        local sb = setup_ffi({ result = { marker = "ffi" } })
+        mock.load_module("init", sb)()
+        local total = 0
+        for _ in pairs(sb.Mods.require_store) do total = total + 1 end
+        runner.assert_eq(0, total,
+            "require_store empty (FFI acquired via original_require, not the bridge)")
+    end)
+
+    runner.register("entry: FFI path does not affect the require bridge wrap", function()
+        local sb = setup_ffi({ result = { marker = "ffi" } })
+        mock.load_module("init", sb)()
+        runner.assert_truthy(sb.require ~= sb.Mods.original_require,
+            "global require is wrapped (bridge installed) even with FFI acquisition")
+        runner.assert_type("function", sb.Mods.install_require_bridge,
+            "the require bridge is installed")
+    end)
+
+    runner.register("entry: second entry run does not reacquire FFI; original_require preserved", function()
+        local calls = {}
+        local ffi_module = { marker = "ffi" }
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function(name)
+            table.insert(calls, name)
+            if name == "ffi" then return ffi_module end
+            return {}
+        end
+        sb.print = function() end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        runner.assert_eq(true, sb.Mods._loaded)
+        runner.assert_eq(1, count_ffi_calls(calls), "one acquisition on first entry")
+        local ffi_after_first = sb.Mods.lua.ffi
+        local captured_original = sb.Mods.original_require
+        -- Re-run the entry chunk; the _loaded guard bails early (no re-acquisition,
+        -- no recapture of the wrapped require as original_require).
+        mock.load_module("init", sb)()
+        runner.assert_eq(captured_original, sb.Mods.original_require,
+            "second run preserves original_require (no recapture of the wrapper)")
+        runner.assert_eq(ffi_after_first, sb.Mods.lua.ffi,
+            "second run does not reacquire FFI (same module table)")
+        runner.assert_eq(1, count_ffi_calls(calls),
+            "no additional original_require('ffi') call on second entry")
     end)
 end

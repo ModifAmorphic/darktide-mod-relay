@@ -55,10 +55,27 @@ Mods.require_store = {}
 Mods.lua = Mods.lua or {}
 Mods.lua.loadstring = loadstring
 Mods.lua.io = io
--- os + ffi are captured nil-safe (ffi is LuaJIT-only; both may be absent in a
--- stripped engine build). `or` preserves a prior capture if init re-ran.
+-- __print is captured here (ahead of the os/ffi block) so the FFI diagnostic
+-- below uses the same print surface as the rest of the loader.
+__print = __print or print
+-- os is captured nil-safe (it may be absent in a stripped engine build). `or`
+-- preserves a prior capture if init re-ran.
 Mods.lua.os = Mods.lua.os or os
-Mods.lua.ffi = Mods.lua.ffi or ffi
+-- Publish the engine LuaJIT FFI module at the community contract surface.
+-- require("ffi") creates no global in LuaJIT 2.1, so a global grab yields nil;
+-- the module is obtained from the pre-wrap original require (NOT the wrapped
+-- global, which would record into Mods.require_store and advance the bootstrap
+-- coordinator). Guarded + exactly-once (the _loaded guard already prevents
+-- re-entry); a failure / nil / non-table degrades to nil with one diagnostic,
+-- never aborting the loader.
+if Mods.lua.ffi == nil and type(Mods.original_require) == "function" then
+    local ok, result = pcall(Mods.original_require, "ffi")
+    if ok and type(result) == "table" then
+        Mods.lua.ffi = result
+    else
+        __print("[mod_loader] ffi module unavailable; Mods.lua.ffi remains nil")
+    end
+end
 -- The mod-path boundary (RELAY_MOD_PATH). _mod_path is the boundary — the
 -- directory that CONTAINS a `mods/` subdir. _mod_root is derived as
 -- _mod_path .. "/mods" (the mods dir, what Mods.file.* roots at — unchanged
@@ -78,7 +95,6 @@ if _mp ~= "" then
 else
     Mods._mod_root = ""
 end
-__print = __print or print
 
 local _io = Mods.lua.io
 -- Capture the raw io.open for _load_module. file.lua's wrapper (installed when

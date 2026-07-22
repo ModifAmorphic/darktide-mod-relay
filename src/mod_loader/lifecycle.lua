@@ -16,20 +16,31 @@
 --   - directly wraps CLASS.StateGame.update exactly once so
 --     Managers.mod:update(dt) runs BEFORE the engine update;
 --   - directly wraps CLASS.GameStateMachine._change_state exactly once,
---     dispatching exit BEFORE and enter AFTER the engine transition.
+--     dispatching exit BEFORE and enter AFTER the engine transition;
+--   - directly wraps CLASS.GameStateMachine.destroy exactly once, dispatching
+--     a final exit for the current state BEFORE the engine destroys it.
 --
 -- Retry semantics: every invocation of the already-installed _state_update
 -- wrapper calls advance_bootstrap. Each step is independently idempotent, so a
 -- partial first pass (e.g. StateGame not yet materialized) does not prevent a
 -- later pass from finishing — the manager is created once, each field is
--- wrapped once, and once all three steps complete a `completed` flag makes
+-- wrapped once, and once all steps complete a `completed` flag makes
 -- later calls cheap.
 --
 -- GameStateMachine contract (engine-facing, not synthesized here): the engine
 -- holds the current state as `self._state` and exposes a `current_state_name()`
--- method that derives its name. This wrapper only READS those — it never writes
--- a state field. Before the original, it reads the outgoing state; after the
--- original returns (having changed self._state), it reads the incoming state.
+-- method that derives its name. The _change_state wrapper only READS those — it
+-- never writes a state field. Before the original, it reads the outgoing state;
+-- after the original returns (having changed self._state), it reads the incoming
+-- state. The destroy wrapper reads the same two surfaces before the original
+-- destroy runs.
+--
+-- Exactly-once final exit: a state destroyed without a preceding _change_state
+-- exit (the observed shutdown path) gets exactly one exit dispatch from the
+-- destroy wrapper; a state already exited by _change_state is not redispatched.
+-- The dedup is a private per-state-machine side-track of the last-exited state
+-- object (identity-compared), shared between the two wrappers via _claim_exit.
+-- No public manager fields; the engine's _state is never mutated.
 --
 -- Wrapping uses direct (owner_table, method_key) references — no dotted
 -- strings, no global hook registries, no chains, no enable/disable, no dynamic
@@ -52,6 +63,27 @@ local function _pack(...)
     return { n = _select("#", ...), ... }
 end
 
+-- Per-state-machine side-track of the last state object that received an exit
+-- dispatch. Identity-compared to guarantee exactly-one exit per state object:
+-- a state already exited by _change_state is not redispatched by destroy, and a
+-- state exited by destroy is not redispatched by a _change_state the original
+-- destroy drives internally. Weak-keyed so destroyed state machines don't pin
+-- memory. Module-private; never exposed on the manager or the engine instance.
+local _last_exited = setmetatable({}, { __mode = "k" })
+
+-- Claims the exit of `state` on state machine `gsm`. Returns true and records
+-- it as the last-exited state if it was not already the last-exited state for
+-- this machine; returns false (a no-op) if it was. Called only when a manager
+-- exists and the exit will actually be dispatched, so a nil-manager transition
+-- (boot, no mods yet) does not suppress a later destroy-time dispatch.
+local function _claim_exit(gsm, state)
+    if _last_exited[gsm] == state then
+        return false
+    end
+    _last_exited[gsm] = state
+    return true
+end
+
 -- Retryable bootstrap state. Each step is independently idempotent; a partial
 -- pass does not prevent a later pass from finishing. Once all steps complete,
 -- `completed` short-circuits later calls.
@@ -69,6 +101,9 @@ local bs = {
     -- change-state step
     change_state_wrapped = false,
     change_state_missing_logged = false,
+    -- destroy step (final state-exit dispatch before destruction)
+    destroy_wrapped = false,
+    destroy_missing_logged = false,
 }
 
 -- ---------------------------------------------------------------------------
@@ -139,26 +174,29 @@ local function advance_bootstrap()
     --    incoming states are READ from the engine-maintained self._state
     --    (captured before and after the original), and their names derived via
     --    the engine's current_state_name() method. This wrapper never writes a
-    --    state field.
+    --    state field. Exit is deduplicated against the destroy wrapper via
+    --    _claim_exit so a state exited here is not redispatched on destruction.
     if not bs.change_state_wrapped then
         local gsm = CLASS and _rawget(CLASS, "GameStateMachine")
         if gsm and _type(gsm._change_state) == "function" then
             local orig_change = gsm._change_state
             gsm._change_state = function(self, ...)
                 local m = Managers and Managers.mod
-                -- Capture the outgoing state BEFORE the original runs. Only
-                -- dispatch exit when there is a current state AND the engine
-                -- exposes current_state_name() to derive its name.
+                -- Capture the outgoing state BEFORE the original runs. Dispatch
+                -- exit only when there is a current state, the engine exposes
+                -- current_state_name() to derive its name, a manager exists, and
+                -- the state has not already been exited (dedup shared with the
+                -- destroy wrapper).
                 local old_state = self._state
-                if old_state ~= nil and _type(self.current_state_name) == "function" then
+                if old_state ~= nil
+                   and _type(self.current_state_name) == "function"
+                   and m and _claim_exit(self, old_state) then
                     local old_name = self:current_state_name()
-                    if m then
-                        local ok, err = _pcall(function()
-                            m:on_game_state_changed("exit", old_name, old_state)
-                        end)
-                        if not ok then
-                            _print("[mod_loader] state exit drive failed: " .. _tostring(err))
-                        end
+                    local ok, err = _pcall(function()
+                        m:on_game_state_changed("exit", old_name, old_state)
+                    end)
+                    if not ok then
+                        _print("[mod_loader] state exit drive failed: " .. _tostring(err))
                     end
                 end
                 -- Call the original exactly once with unchanged self/varargs.
@@ -166,15 +204,13 @@ local function advance_bootstrap()
                 local results = _pack(orig_change(self, ...))
                 -- Capture the incoming state AFTER the original has changed it.
                 local new_state = self._state
-                if new_state ~= nil and _type(self.current_state_name) == "function" then
+                if new_state ~= nil and _type(self.current_state_name) == "function" and m then
                     local new_name = self:current_state_name()
-                    if m then
-                        local ok, err = _pcall(function()
-                            m:on_game_state_changed("enter", new_name, new_state)
-                        end)
-                        if not ok then
-                            _print("[mod_loader] state enter drive failed: " .. _tostring(err))
-                        end
+                    local ok, err = _pcall(function()
+                        m:on_game_state_changed("enter", new_name, new_state)
+                    end)
+                    if not ok then
+                        _print("[mod_loader] state enter drive failed: " .. _tostring(err))
                     end
                 end
                 return _unpack(results, 1, results.n)
@@ -188,8 +224,55 @@ local function advance_bootstrap()
         end
     end
 
+    -- Step 4: wrap CLASS.GameStateMachine.destroy exactly once. Dispatches a
+    --    final "exit" for the current state BEFORE the engine destroys it,
+    --    unless that state was already exited (by _change_state or a prior
+    --    destroy-side dispatch). Mirrors Step 3's wrap style: reads
+    --    self._state + current_state_name() (never writes), dedup via the shared
+    --    _claim_exit, original runs exactly once with unchanged args, its return
+    --    values (incl. trailing nils) are preserved via _pack/_unpack, and its
+    --    errors propagate (no pcall around the original). Mod-callback errors
+    --    are pcall-contained.
+    if not bs.destroy_wrapped then
+        local gsm = CLASS and _rawget(CLASS, "GameStateMachine")
+        if gsm and _type(gsm.destroy) == "function" then
+            local orig_destroy = gsm.destroy
+            gsm.destroy = function(self, ...)
+                local m = Managers and Managers.mod
+                -- Dispatch the final exit BEFORE the original destroys the
+                -- state. Same gate as Step 3's exit: current state present,
+                -- current_state_name() available, manager exists, not already
+                -- exited. The name + object are derived before the original so
+                -- destroy's own mutation cannot change what is forwarded.
+                local cur_state = self._state
+                if cur_state ~= nil
+                   and _type(self.current_state_name) == "function"
+                   and m and _claim_exit(self, cur_state) then
+                    local cur_name = self:current_state_name()
+                    local ok, err = _pcall(function()
+                        m:on_game_state_changed("exit", cur_name, cur_state)
+                    end)
+                    if not ok then
+                        _print("[mod_loader] final state exit drive failed: " .. _tostring(err))
+                    end
+                end
+                -- Original runs exactly once with unchanged self/varargs. Its
+                -- errors propagate (no pcall). Pack to preserve trailing nils.
+                local results = _pack(orig_destroy(self, ...))
+                return _unpack(results, 1, results.n)
+            end
+            bs.destroy_wrapped = true
+        else
+            if not bs.destroy_missing_logged then
+                _print("[mod_loader] bootstrap: CLASS.GameStateMachine.destroy not yet available; will retry")
+                bs.destroy_missing_logged = true
+            end
+        end
+    end
+
     -- All steps complete -> cheap short-circuit on later calls.
-    if bs.manager_created and bs.state_game_wrapped and bs.change_state_wrapped then
+    if bs.manager_created and bs.state_game_wrapped
+       and bs.change_state_wrapped and bs.destroy_wrapped then
         bs.completed = true
     end
 end

@@ -232,7 +232,7 @@ logic is the loader **logic**.
 | `Mods.original_require` | entry | the engine's real `require` (captured before globals are stripped ~pcall#6) |
 | `Mods.require_store` | entry + `require_bridge` | per-path array of distinct table identities returned by the engine `require`; the wrapped `require` records them identity-deduped (enables DMF's `hook_require`) |
 | `Mods.lua.io` / `Mods.lua.loadstring` | entry + `file.lua` | the engine's real `io` / `loadstring` (captured before stripped). `io.open`/`io.lines` are wrapped by `file.lua` to root DMF's `./../mods/<rest>` convention at `_mod_path` (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)) |
-| `Mods.lua.os` / `Mods.lua.ffi` | entry | captured for DMF's debug modules (`table_dump`, dev console); `or` so nil-safe if absent |
+| `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable |
 | `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table`; plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
 | `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging |
@@ -466,8 +466,8 @@ attempts). It is NOT a security boundary against a hostile mod:
 - **Symlinks/junctions** inside `<mod_path>` could redirect outside the
   boundary in ways `normpath` doesn't catch (lexical resolution doesn't follow
   links).
-- **FFI / `os.execute` / `io.popen`** bypass the wrapper entirely (the
-  captured `os`/`ffi` are available to DMF for debug modules; a mod that
+- **FFI / `os.execute` / `io.popen`** bypass the wrapper entirely (the published
+  `os`/`ffi` engine modules are available to DMF for debug modules; a mod that
   shells out or calls into native code is unconstrained by this Lua-level
   wrapper).
 
@@ -521,16 +521,29 @@ consecutive offline generations without layered observers, wrappers, or hooks.
   as "reload unavailable": no update failure, a single controlled log per
   unavailable condition (reset on recovery), normal mod updates continue, and the
   manager keeps retrying so late availability can still trigger.
+- **Trigger-detection seam (community contract).** `ModManager:_check_reload()`
+  is the narrow detection-only method that answers whether the built-in gesture
+  (LEFT Ctrl + LEFT Shift + R) is active this update. The update loop calls it
+  by **dynamic dispatch** (`self:_check_reload()`) so a community replacement
+  can return `false` to suppress the built-in gesture or `true` to redirect it;
+  a throwing replacement degrades to `false` (contained by an outer pcall)
+  without breaking the update loop. Detection only — it does not initiate
+  teardown or enforce developer mode. The method is defined on the class at
+  module load (before any mod runs).
 - **Request seam (trigger-neutral).** `Managers.mod:request_reload(source)` is the
-  single public operation the keyboard poll feeds (`request_reload("keyboard")`).
-  A future IPC/control channel would call the same seam; **no IPC is implemented
-  now.** It validates and records one request, returning `(true)` on accepted or
-  `(false, reason)` on rejected (usable by tests/future callers). Requests
-  require the adapter-reported developer mode (`developer_mode_enabled()`), the
-  manager fully loaded (`_state == "done"` via `is_load_done()`), and no
-  request/in-progress reload already active. A request while loading, tearing
-  down, or already requested/in progress is rejected (no stacking) without
-  mutating the active runtime. Developer mode false/default never triggers.
+  single public operation the detection seam forwards to
+  (`request_reload("keyboard")`); it is also the seam a future IPC/control
+  channel would call. **No IPC is implemented now.** It validates and records one
+  request, returning `(true)` on accepted or `(false, reason)` on rejected
+  (usable by tests/future callers). Requests require the adapter-reported
+  developer mode (`developer_mode_enabled()`), the manager fully loaded
+  (`_state == "done"` via `is_load_done()`), and no request/in-progress reload
+  already active. A request while loading, tearing down, or already requested/in
+  progress is rejected (no stacking) without mutating the active runtime.
+  Developer mode false/default never triggers. The legacy direct
+  `_reload_requested = true` field-set path is preserved for compatibility (at
+  least one public extension uses it); `request_reload(source)` is the supported
+  seam for new callers.
 
 ### State machine and frame boundary
 
@@ -703,16 +716,26 @@ The coordinator does exactly two things, each idempotent, driven after each
    - **closure-wrap `StateGame.update` exactly once** → drives
      `Managers.mod:update(dt)` *before* the engine update — the first tick
      LOADs (DMF + every user mod), every tick pumps per-mod `update(dt)`;
-   - **closure-wrap `GameStateMachine._change_state` exactly once** → dispatches
-     `on_game_state_changed("exit", …)` *before* the original transition and
-     `("enter", …)` *after*, reading the outgoing/incoming state from the
-     engine-maintained `self._state` (it never writes a state field).
+    - **closure-wrap `GameStateMachine._change_state` exactly once** → dispatches
+      `on_game_state_changed("exit", …)` *before* the original transition and
+      `("enter", …)` *after*, reading the outgoing/incoming state from the
+      engine-maintained `self._state` (it never writes a state field).
+    - **closure-wrap `GameStateMachine.destroy` exactly once** → dispatches one
+      final `on_game_state_changed("exit", state_name, state_object)` for the
+      current state *before* the original destroy, unless that state was already
+      exited (by `_change_state` or a prior destroy-side dispatch). This closes
+      the community-contract gap where a state destroyed without a preceding
+      `_change_state` exit (the observed shutdown path) would otherwise receive
+      no exit event. The dedup is a private per-state-machine side-track of the
+      last-exited state object (identity-compared), shared between the two
+      wrappers; the engine's `self._state` is never mutated and no public manager
+      fields are added.
 
 `GameStateMachine` contract (engine-facing, not synthesized here): the engine
 holds the current state as `self._state` and exposes a `current_state_name()`
-method. The wrapper only reads those.
+method. Both wrappers only read those.
 
-Once all three steps complete, a `completed` flag short-circuits later calls of
+Once all four steps complete, a `completed` flag short-circuits later calls of
 the coordinator. Wrapping uses direct `(owner_table, method_key)` references —
 no dotted strings, no global hook registries, no chains, no enable/disable, no
 dynamic code generation.
@@ -726,9 +749,17 @@ shell/ subsection.
 
 ## Intentional shutdown
 
-There is **no** `GameStateMachine.destroy` state-exit shim — the loader does not
-synthesize an engine state change to force a teardown. Shutdown cleanup is
-intentionally two paths:
+The `GameStateMachine.destroy` wrapper dispatches **exactly one** final
+`on_game_state_changed("exit", state_name, state_object)` for the active state
+before the engine destroys it — but only if no exit for that state has already
+been dispatched (deduplicated per state machine against `_change_state` via a
+private last-exited side-track). On the observed shutdown path `_change_state`
+does not exit the final state, so this wrapper supplies the missing exit; a
+destroy that internally changes state does not produce a duplicate. This is a
+**state exit** (the same event the state machine fires on every transition),
+distinct from mod unload.
+
+Shutdown cleanup is intentionally two paths:
 
 - **`ModManager:destroy()`** — DMF hooks this (`dmf_loader.lua` calls
   `CLASS.ModManager.destroy`). It calls `on_unload` on each outer-driven mod
@@ -737,8 +768,11 @@ intentionally two paths:
 - **DMF's own unload event** — DMF fires its own `on_unload`/shutdown to its
   registered user mods through its inner loop.
 
-So an outer-driven mod gets `on_unload` from `ModManager:destroy()`, and a
-DMF-driven mod (nil-return) gets it from DMF — the same two-level split as the
+So an outer-driven mod gets a final state-exit event from the
+`GameStateMachine.destroy` wrapper (the same `on_game_state_changed("exit", …)`
+it receives on every transition) and `on_unload` from `ModManager:destroy()`,
+and a DMF-driven mod (nil-return) gets the state exit forwarded to its
+`on_game_state_changed` and unload from DMF — the same two-level split as the
 update loop (see [Two-level driving](#two-level-driving)).
 
 ## Status
@@ -781,7 +815,8 @@ described here is unchanged.
 - `src/mod_loader/mod_manager.lua` — the generic loader driver (`ModManager:init`
   SCAN + adapter establish/observer registration, `ModManager:update` load +
   per-frame drive + the reload state machine (`request_reload` /
-  `_poll_reload_shortcut` / `_begin_reload`), reverse-order `destroy`, pcall fault
+  `_check_reload` (trigger-detection seam) / `_poll_reload_shortcut` /
+  `_begin_reload`), reverse-order `destroy`, pcall fault
   isolation). Owns `_mods`, ordering, `.mod` execution, run/init sequencing, the
   outer callback driving, reload-data association, and the keyboard trigger
   plumbing.
@@ -797,7 +832,9 @@ described here is unchanged.
   re-adapted), and `retire_stale_generation_globals`.
 - `src/mod_loader/lifecycle.lua` — the bootstrap coordinator + the
   `BootStateRequireGameScripts._state_update` / `StateGame.update` /
-  `GameStateMachine._change_state` closure-wraps.
+  `GameStateMachine._change_state` / `GameStateMachine.destroy`
+  closure-wraps (the destroy wrap dispatches a deduplicated final state exit
+  before destruction).
 - `src/mod_loader/{file,class_registry,require_bridge}.lua` — the loader API
   surface (file ops + observer, the CLASS registry, the require store + bridge).
 - `src/mod_loader/tests/test_hot_reload.lua` — the focused hot-reload behavior
