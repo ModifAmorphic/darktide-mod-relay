@@ -11,8 +11,9 @@ into the shipped runtime:
 
 ## Using a probe
 
-1. Copy `<probe>.mod` to `<mod_path>/mods/<probe>/<probe>.mod` in your staging
-   mod directory.
+1. Copy the probe's `<probe>/` folder (containing `<probe>.mod`) into
+   `<mod_path>/mods/` in your staging mod directory — i.e. the standard mod
+   layout `<mod_path>/mods/<probe>/<probe>.mod`.
 2. Add a line `<probe>` to `<mod_path>/mods/mods.lst`.
 3. Launch the game under Relay, exercise the scenario, then exit.
 4. Read the probe's log (location per probe below) and/or grep the Darktide
