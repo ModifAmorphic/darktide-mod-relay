@@ -55,14 +55,12 @@ INCLUDES  := -I shell/include -I shell/vendor/minhook/include
 # This is the runtime-controlled root, staged next to the launcher/DLL so the
 # shell self-locates `<dll-dir>/mod_loader/` and opens init.lua. The tests/
 # harness is NOT runtime code.
-MOD_LOADER_LUA := mod_loader/init.lua \
-                  mod_loader/path.lua \
-                  mod_loader/file.lua \
-                  mod_loader/class_registry.lua \
-                  mod_loader/lifecycle.lua \
-                  mod_loader/require_bridge.lua \
-                  mod_loader/mod_manager.lua \
-                  mod_loader/dmf_adapter.lua
+# Glob the runtime modules — new .lua files added to mod_loader/ are picked
+# up automatically. make's `*` is non-recursive, so mod_loader/tests/*.lua
+# (the offline LuaJIT test harness) is excluded. Combined with the
+# stage-mod_loader recipe's `rm -f $(MOD_LOADER_DIR)/*.lua` (which clears
+# stale files first), the staged dir is exactly the current source set.
+MOD_LOADER_LUA := $(wildcard mod_loader/*.lua)
 MOD_LOADER_DIR := $(BIN)/mod_loader
 
 # Root legal notices staged beside the executables so every distributable

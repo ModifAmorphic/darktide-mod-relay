@@ -21,7 +21,7 @@
       build, all            dll + launcher + stage-mod_loader + stage-legal
       dll                   Rust staticlib + C shell + MinHook -> relay_shell.dll
       launcher              -> mod_relay.exe
-      stage-mod_loader      7 runtime Lua modules -> bin\mod_loader\
+      stage-mod_loader      runtime Lua modules -> bin\mod_loader\
       stage-legal           LICENSE + THIRD_PARTY_NOTICES.md -> bin\
       check                 verify relay_shell.dll is a valid PE with the
                             production seam (DllMain + relay_discover +
@@ -299,7 +299,7 @@ function Invoke-Launcher {
 }
 
 function Invoke-StageModLoader {
-    Write-Host "=== stage-mod_loader: 8 runtime Lua modules -> bin\mod_loader\ ===" -ForegroundColor Cyan
+    Write-Host "=== stage-mod_loader: all runtime Lua modules -> bin\mod_loader\ ===" -ForegroundColor Cyan
     Ensure-Bin
 
     $dst = 'bin\mod_loader'
@@ -308,26 +308,21 @@ function Invoke-StageModLoader {
     }
     # Clear stale .lua files so the staged dir is exactly the current module
     # set, never a superset carrying obsolete files (matches Makefile's
-    # `rm -f $(MOD_LOADER_DIR)/*.lua`). Idempotent.
+    # `rm -f $(MOD_LOADER_DIR)/*.lua`). Idempotent. This "wipe" half of
+    # wipe+glob is what makes the staged dir exactly the source set.
     Remove-Item -Path "$dst\*.lua" -Force -ErrorAction SilentlyContinue
 
-    # Runtime modules only — NOT the tests/ harness.
-    $modules = @(
-        'mod_loader\init.lua',
-        'mod_loader\path.lua',
-        'mod_loader\file.lua',
-        'mod_loader\class_registry.lua',
-        'mod_loader\lifecycle.lua',
-        'mod_loader\require_bridge.lua',
-        'mod_loader\mod_manager.lua',
-        'mod_loader\dmf_adapter.lua'
-    )
-    foreach ($m in $modules) {
-        if (-not (Test-Path -LiteralPath $m)) {
-            throw "Missing mod loader module: $m"
-        }
-    }
-    Copy-Item -LiteralPath $modules -Destination $dst
+    # Runtime modules only — NOT the tests/ harness. Get-ChildItem -Path is
+    # non-recursive by default; the *.lua glob matches files directly under
+    # mod_loader/, never mod_loader/tests/*.lua. Combined with the
+    # Remove-Item above, the staged dir is exactly the current source set —
+    # new modules are picked up automatically (the previous explicit-list
+    # approach drifted from source and shipped an incomplete mod_loader/
+    # in v0.1.0).
+    $src = 'mod_loader'
+    $modules = Get-ChildItem -Path "$src\*.lua"
+    if (-not $modules) { throw "No .lua files found in $src\" }
+    Copy-Item -Path $modules.FullName -Destination $dst
 
     Write-Host "stage-mod_loader: $($modules.Count) modules staged" -ForegroundColor Green
 }
