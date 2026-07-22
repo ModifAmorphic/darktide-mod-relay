@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.1.1...v0.2.0) (2026-07-22)
+
+
+### Features
+
+* **mod-loader:** publish engine ffi; add reload + final-exit seams ([#5](https://github.com/ModifAmorphic/darktide-mod-relay/issues/5)) ([b97686f](https://github.com/ModifAmorphic/darktide-mod-relay/commit/b97686f4c3222ae3c9cd650372ae39a0429d0a45))
+
 ## [0.1.1](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.1.0...v0.1.1) (2026-07-22)
 
 
