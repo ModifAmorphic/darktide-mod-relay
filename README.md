@@ -98,7 +98,8 @@ Proton layer handles the Windows runtime:
 
 `PROTON_LOG=1` is handy while verifying setup. Note the **log split**: the
 launcher's C-side shell/trampoline log lands in `relay.log` next to the launcher
-(its one-line `OK`/`FAIL` is the reliable bootstrap check); Darktide's **own**
+(its pcall#1 status/failure diagnostic is the reliable bootstrap check);
+Darktide's **own**
 engine Lua output — the mod loader's `[mod_loader] …` lines, DMF, and mods —
 lands in Darktide's **console log**, not the Proton log. On Linux/Proton that is
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/console-*.log`
@@ -115,7 +116,9 @@ Darktide Lua output.
 > authoritative. It is off by default, and `--log-level warn`/`error` filters
 > the copied lines out of `relay.log` while the console log is unaffected. See
 > [`src/README.md`](src/README.md#launcher-cli) for the boundary of what it
-> captures.
+> captures, and [`docs/reference/relay/logging.md`](docs/reference/relay/logging.md)
+> for the full logging reference (destinations, the line format, and the tee
+> contract).
 
 ### 4. Where mods go
 

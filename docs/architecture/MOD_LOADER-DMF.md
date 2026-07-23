@@ -1,7 +1,7 @@
 # mod_loader ↔ DMF — integration
 
-> **Audience:** a future dev (or the operator) who needs to understand and
-> maintain the integration between the mod loader and DMF
+> **Audience:** maintainers and operators working on the integration between
+> the mod loader and DMF
 > (the Darktide Mod Framework). This is the dedicated reference for *how the
 > two fit together*, especially the IO adaptation and the load timing.
 >
@@ -166,7 +166,7 @@ helpers, no direct writes to `_state` / `_mod_load_index` / `_settings`, and no
 `DMFMod:io_*` overrides. The adapter is the single place to audit when stock
 DMF's contract changes.
 
-### Why load is deferred to the first `StateGame.update` tick
+### Deferred load timing
 
 `init()` runs inside the `BootStateRequireGameScripts._state_update`
 closure-wrap — **before `Managers.input` and other boot-complete globals
@@ -196,7 +196,7 @@ because no valid outer object exists.
 For outer tables Relay owns the complete lookup+invocation operation for
 `init`, `update`, and `on_game_state_changed`. The first escaped error (including
 an `__index` lookup error) atomically disables that entry for the generation,
-detaches it from future driving, logs one display-safe full diagnostic with the
+detaches it from later driving, logs one display-safe full diagnostic with the
 target generation and bootstrap-captured traceback when available, and queues
 one protected best-effort `on_unload`. There is no automatic retry. A standalone
 entry failure remains local and healthy siblings continue.
@@ -225,6 +225,8 @@ take precedence over standalone summaries. Missing/throwing event infrastructure
 is nonfatal and retried without per-frame log spam. Notices continue until
 process exit or a completed user-requested hot reload; when developer mode is
 false they require restart rather than offering hot reload.
+The engine-side Crashify and notification contracts are pinned in
+[`docs/reference/darktide/darktide-binary.md`](../reference/darktide/darktide-binary.md#engine-diagnostic-surfaces).
 
 ### Crash metadata
 
@@ -305,7 +307,7 @@ logic is the loader **logic**.
 | `Mods.original_require` | entry | the engine's real `require` (captured before globals are stripped ~pcall#6) |
 | `Mods.require_store` | entry + `require_bridge` | per-path array of distinct table identities returned by the engine `require`; the wrapped `require` records them identity-deduped (enables DMF's `hook_require`) |
 | `Mods.lua.io` / `Mods.lua.loadstring` | entry + `file.lua` | the engine's real `io` / `loadstring` (captured before stripped). `io.open`/`io.lines` are wrapped by `file.lua` to root DMF's `./../mods/<rest>` convention at `_mod_path` (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)) |
-| `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable |
+| `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable. See the [pinned FFI contract](../reference/darktide/darktide-binary.md#ffi-module-loading). |
 | `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table`; plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
 | `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--lua-logs` / `RELAY_LUA_LOGS=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
@@ -324,13 +326,14 @@ pcall#1 code reach classes that don't exist until late in boot.
 
 ## Lua print tee
 
-The optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off;
-see `docs/architecture/MOD-RELAY.md` → Logging for the native side) is
+The optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off) is
 **process-lifetime bootstrap plumbing**, installed in `init.lua` at pcall#1 —
 **not** generation policy, so it lives in the entry, not the DMF adapter or mod
 manager. When a valid sink is present, the entry installs wrappers on global
-`print` and `__print`; when the tee is off (or no sink was published), today's
-behavior is exactly preserved (`__print = __print or print` still resolves).
+`print` and `__print`; when the tee is off (or no sink was published), the entry
+retains `__print = __print or print` and installs no tee wrapper.
+The observable logging contract is in `docs/reference/relay/logging.md`; the
+native mechanism is in `docs/architecture/MOD-RELAY.md` → Logging.
 
 **Capture and retirement.** The entry snapshots the trampoline's temporary
 private global `__mod_relay_lua_log_sink` into a **private local** only when it
@@ -348,9 +351,9 @@ and trailing nils) via a count-explicit pack/unpack. Render/sink failures are
 swallowed — they never change a successful call's results. The renderer is
 total over every Lua type: strings pass through byte-for-byte, numbers/
 booleans/nil use ordinary textual forms, and tables/functions/threads/cdata/userdata
-use **stable type placeholders** (`<table>` etc.) so a user `__tostring`
-metamethod (already invoked once by the original `print`) is never invoked a
-second time. Multiline splitting, control-byte sanitization, chunking, and
+use **stable type placeholders** (`<table>` etc.). The relay renderer never
+invokes `__tostring`; the original print surface is solely responsible for its
+console rendering. Multiline splitting, control-byte sanitization, chunking, and
 truncation remain native-sink policy — not duplicated in Lua.
 
 **Non-stacking, process-lifetime.** A Relay-private marker
@@ -458,8 +461,8 @@ DMFMod:io_exec_unsafe_with_return            -> Mods.file.exec_unsafe_with_retur
 DMFMod:io_read_content / io_read_content_to_table -> Mods.file.read_content(_to_table)
 ```
 
-Each adapted method preserves DMF's developer-facing logging without reusing
-DMF's implementation: a `Loading <path>` debug line before each operation, and
+Each adapted method preserves DMF's developer-facing logging: a `Loading <path>`
+debug line before each operation, and
 a concise error line on safe-op failure. Unsafe operations log the attempted
 path via debug but preserve their throwing semantics (errors are not swallowed
 merely to log them). The exact DMF wording is not contractual — only the
@@ -498,11 +501,8 @@ mod loads:
 - Phase-2 `dmf:io_dofile(...)` then uses the adapted method → resolves from the
   mod root.
 
-This is the window an earlier approach missed: adapting in a post-init call
-*inside the load loop* landed only after DMF's whole `init()` had run — by which
-time Phase-2 had already used the stale `./../mods` method. The observer fires
-on the exact execution that defines `DMFMod:io_*`, so the adaptation lands
-between Phase 1 and Phase 2.
+The observer fires on the execution that defines `DMFMod:io_*`, so the
+adaptation lands between Phase 1 and Phase 2.
 
 **Scope + safety.** The override touches *only* the mod-facing IO surface
 (`DMFMod:io_*`). DMF's *own Phase-1 internal* module loads use the
@@ -513,19 +513,8 @@ updates. If DMFMod never surfaces (no DMF / DMF load failed), the observer
 callback stays registered and fires harmlessly on every execution without ever
 adapting anything — it never fabricates `DMFMod`.
 
-**Why this approach (and the alternatives).** The runtime-override choice keeps
-DMF vendored unmodified — no fork to maintain, no reapply-on-update burden, and
-the override targets a stable DMF API. The alternatives, considered and
-rejected for now:
-
-- **(a) Fork/patch the vendored DMF** to read its mod directory from a global
-  (a one-line change in `core/io.lua`). Simple, but diverges from upstream and
-  must be reapplied on every DMF update.
-- **(b) Upstream a PR to DMF** making `_mod_directory` configurable. The
-  cleanest long-term answer, but depends on DMF's maintainers and timing.
-
-The runtime override is the current choice; (b) remains a future option if DMF
-upstream is open to it.
+The runtime override keeps stock DMF unmodified and applies the external mod
+root at the stable mod-facing IO boundary.
 
 ### Raw `Mods.lua.io` redirection
 
@@ -622,16 +611,16 @@ canonical example.
 
 ## Hot reload
 
-Relay implements official-DMF-compatible in-game hot reload, gated by DMF's
-developer-mode setting. The keyboard trigger is the established parity edge:
+Relay implements DMF-compatible in-game hot reload, gated by DMF's
+developer-mode setting. The keyboard trigger is:
 **LEFT Ctrl + LEFT Shift + R** (held simultaneously). Reload is destructive and
 **non-transactional** — there is no shadow load and no rollback; a failed reload
-completes best-effort and recommends a game restart. It works for at least three
-consecutive offline generations without layered observers, wrappers, or hooks.
+completes best-effort and recommends a game restart. Repeated offline and live
+generations complete without layered observers, wrappers, or hooks.
 
 ### Trigger and request seam
 
-- **Keyboard (exact parity).** Polled only from the manager `update()` path. The
+- **Keyboard contract.** Polled only from the manager `update()` path. The
   shortcut fires when `Keyboard.pressed(button_index("r"))` **AND** the numeric
   sum `Keyboard.button(button_index("left shift")) + Keyboard.button(button_index
   ("left ctrl")) == 2` (both LEFT modifiers held). Right-side modifiers do **not**
@@ -652,12 +641,14 @@ consecutive offline generations without layered observers, wrappers, or hooks.
   without breaking the update loop. Detection only — it does not initiate
   teardown or enforce developer mode. The method is defined on the class at
   module load (before any mod runs).
+  A current community reload-control extension uses this seam together with
+  `_reload_requested`; see
+  [`docs/reference/community-tools/darktide-framework-analysis.md`](../reference/community-tools/darktide-framework-analysis.md#loader-surfaces-consumed-by-dmf-and-community-mods).
 - **Request seam (trigger-neutral).** `Managers.mod:request_reload(source)` is the
   single public operation the detection seam forwards to
-  (`request_reload("keyboard")`); it is also the seam a future IPC/control
-  channel would call. **No IPC is implemented now.** It validates and records one
-  request, returning `(true)` on accepted or `(false, reason)` on rejected
-  (usable by tests/future callers). Requests require the adapter-reported
+  (`request_reload("keyboard")`). It validates and records one request,
+  returning `(true)` on accepted or `(false, reason)` on rejected. Requests
+  require the adapter-reported
   developer mode (`developer_mode_enabled()`), the manager fully loaded
   (`_state == "done"` via `is_load_done()`), and no request/in-progress reload
   already active. A request while loading, tearing down, or already requested/in
@@ -853,10 +844,8 @@ The coordinator does exactly two things, each idempotent, driven after each
     - **closure-wrap `GameStateMachine.destroy` exactly once** → dispatches one
       final `on_game_state_changed("exit", state_name, state_object)` for the
       current state *before* the original destroy, unless that state was already
-      exited (by `_change_state` or a prior destroy-side dispatch). This closes
-      the community-contract gap where a state destroyed without a preceding
-      `_change_state` exit (the observed shutdown path) would otherwise receive
-      no exit event. The dedup is a private per-state-machine side-track of the
+      exited (by `_change_state` or a prior destroy-side dispatch). The dedup is
+      a private per-state-machine side-track of the
       last-exited state object (identity-compared), shared between the two
       wrappers; the engine's `self._state` is never mutated and no public manager
       fields are added.
@@ -883,9 +872,8 @@ The `GameStateMachine.destroy` wrapper dispatches **exactly one** final
 `on_game_state_changed("exit", state_name, state_object)` for the active state
 before the engine destroys it — but only if no exit for that state has already
 been dispatched (deduplicated per state machine against `_change_state` via a
-private last-exited side-track). On the observed shutdown path `_change_state`
-does not exit the final state, so this wrapper supplies the missing exit; a
-destroy that internally changes state does not produce a duplicate. This is a
+private last-exited side-track). A destroy that internally changes state does
+not produce a duplicate. This is a
 **state exit** (the same event the state machine fires on every transition),
 distinct from mod unload.
 
@@ -905,42 +893,19 @@ and a DMF-driven mod (nil-return) gets the state exit forwarded to its
 `on_game_state_changed` and unload from DMF — the same two-level split as the
 update loop (see [Two-level driving](#two-level-driving)).
 
-## Status
+## Validation and distribution
 
-**The loader is independently reimplemented.** The current mod loader is an
-independent implementation for Relay's injected runtime architecture; it is not
-adapted from or derived from any third-party mod loader. It is covered by an
-offline LuaJIT test harness (`make mod-loader-test`, behavior-focused), including the
-scan/load split, the class registry, the require bridge, the lifecycle
-closure-wraps, and the IO observer adaptation.
+The offline LuaJIT harness (`make mod-loader-test`) covers the scan/load split,
+class and require bridges, lifecycle closure-wraps, IO adaptation, reload,
+Crashify metadata, failure containment, alerts, and exactly-once cleanup with
+Relay-owned fakes. Live Linux/Proton validation covers the complete startup
+chain, DMF and user-mod loading, FFI publication, final state exit, Crashify
+metadata and stale-key rotation, standalone/framework failure recovery, alert
+cadence, repeated clean reloads, and normal shutdown.
 
-**Baseline live validation.** On 2026-07-14 the operator launched the game through
-Mod Curator: the game started, and DMF + user mods loaded as expected from
-the configured mod root. The pre-hardening loader plus the
-extracted DMF adapter completed the observed startup/load chain (injection →
-trampoline `OK` at pcall#1 → the mod loader loads → class registry + deferred
-bootstrap fire at `BootStateRequireGameScripts._state_update` → the loader scans
-+ loads DMF + user mods). DMF's Phase-2 modules resolved from the mod root via
-the observer-driven `DMFMod:io_*` adaptation (the `core/io.lua` `./../mods`
-fallback is adapted away). **Repeated in-game hot reload (LEFT Ctrl + LEFT Shift
-+ R) was validated in the same completed session** (Darktide console log
-`console-2026-07-14-23.52.49-…`): clean completions for generations 2, 3, and 4 —
-keyboard requests, DMF `on_reload`/`on_unload` ran each generation, and the live
-mod set (DMF + CuriosChecker, NumericUI, hub_shortcuts, scoreboard-ii)
-reinitialized — with no `./../mods`, localization-return, framework-failure, or
-degraded/restart-recommended errors. This validates the installation-aware IO
-re-adaptation against the reused-`DMFMod`-class-table timing in the live engine.
-The nil/table result contract, Crashify metadata, failure containment, cleanup,
-and alert behavior documented above were added after that session. Their offline
-suite passes, but the live Crashify/alert/failure-path acceptance matrix remains
-operator work. The earlier run also did not claim behavior across every possible
-mod or repeated reload under arbitrarily long sessions.
-
-**Production DMF acquisition is future work.** Today DMF is vendored locally
-at the **mod root** (local only, not committed — point `--mod-path` at it for
-live validation). In production, you (or the app driving the launcher) obtain
-DMF and place it at the mod root; the Relay-runtime side of the integration
-described here is unchanged.
+Relay does not bundle DMF. The operator or calling application places stock DMF
+and user mods under the configured mod root; the runtime loads that staged set
+without modifying DMF.
 
 ## References
 
@@ -980,6 +945,7 @@ described here is unchanged.
   fakes.
 - `docs/architecture/MOD-RELAY.md` — the engine-context mechanism + the
   deferred bootstrap bridge + the launcher/shell contracts.
-- `docs/reference/community-tools/darktide-framework-analysis.md` — how the existing community
-  toolchain (`patch_999` → `mod_loader` → DMF → mods) works (historical
-  technical reference, not provenance for Relay's loader).
+- `docs/reference/community-tools/darktide-framework-analysis.md` — the
+  community toolchain and the DMF/loader surfaces consumed by mods.
+- [LuaJIT FFI documentation](https://luajit.org/ext_ffi.html) — the
+  module-loading contract behind `Mods.lua.ffi`.

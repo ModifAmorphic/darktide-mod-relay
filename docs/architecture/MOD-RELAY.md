@@ -146,23 +146,15 @@ signals hook-ready.
     user-requested hot reload; they do not depend on DMF or expose
     `Mods.message`. The loader exposes itself as `Managers.mod`. Bootstrap setup
     remains pcall-contained so an infrastructure failure degrades to vanilla +
-    a log line rather than crashing the game. **Baseline live validation:** the
-    pre-hardening independently-reimplemented loader plus the extracted DMF
-    adapter completed the observed startup/load
-    chain on 2026-07-14 — the operator launched through Mod Curator, the
-    game started, and DMF + user mods loaded as expected from the configured mod
-    root. Repeated in-game hot reload (LEFT Ctrl + LEFT Shift + R) was validated
-    in the same session: clean completions for generations 2, 3, and 4 (keyboard
-    requests, DMF `on_reload`/`on_unload` each generation, mods reinitializing),
-    with no `./../mods`, localization-return, framework-failure, or
-    degraded/restart-recommended errors in Darktide's console log. Not claimed by
-    this run: the new Crashify metadata, alert transport, lifecycle failure
-    paths, behavior across every possible mod, or repeated reload under
-    arbitrarily long sessions. Those new paths pass offline and still require
-    operator live acceptance.** The offline LuaJIT harness
-    (`make mod-loader-test`) covers the logic. See
+    a log line rather than crashing the game. The full chain is live-validated
+    on Linux/Proton: DMF and user mods load from the configured root; the FFI,
+    final-state-exit, Crashify metadata, standalone/framework failure, alert,
+    cleanup, and hot-reload recovery contracts execute in the game; repeated
+    clean reloads do not stack; and a normal Steam launch remains vanilla. The
+    offline LuaJIT harness (`make mod-loader-test`) covers the same loader
+    contracts with Relay-owned fakes. See
     `docs/architecture/MOD_LOADER-DMF.md` for the DMF integration + the IO
-    adaptation + the load timing + the [hot-reload](../docs/architecture/MOD_LOADER-DMF.md#hot-reload)
+    adaptation + the load timing + the [hot-reload](MOD_LOADER-DMF.md#hot-reload)
     contract.
 - **Bootstrap-only C helpers.** C functions are acceptable only at the
   bootstrap boundary (crossing from DLL injection into the Lua lifecycle) or
@@ -281,6 +273,12 @@ global, so no loader-path env var exists.
 
 ### Logging
 
+> The normative, operator-visible logging contract — destinations,
+> configuration, the `relay.log` line/lifecycle, and the Lua print tee — lives
+> in [`docs/reference/relay/logging.md`](../reference/relay/logging.md). This
+> section keeps the implementation architecture (the structured logger, the
+> native sanitizer, the private C callback, the no-new-hook invariant).
+
 The shell's C-side log is **`relay.log`**. Each line is structured
 `<local ts+UTC offset> <LEVEL> <component>: <msg>` (e.g.
 `2026-07-16T12:34:56-04:00 INFO  trampoline: @ pcall#1: OK`) and goes to both
@@ -290,7 +288,9 @@ ISO-8601 UTC offset** that follows the system time zone (UTC itself shows
 `RELAY_LOG_LEVEL` (default `info`; crank to `debug`/`trace` for
 verbose detail). Default location is next to the launcher exe (resolved by the
 launcher from `--log-file`/`RELAY_LOG_FILE`); the shell itself opens
-`RELAY_LOG_FILE` if set, otherwise falls back to beside the game exe.
+`RELAY_LOG_FILE` if set, otherwise falls back to beside the game exe. The
+shell opens the file with truncate once per game process — **a fresh
+`relay.log` every launch** (no append, no rotation across runs).
 
 Right after the startup banner, the worker logs a `launching <cmdline>` INFO
 line — the host process command line as the game sees it (the quoted exe + the
@@ -304,8 +304,8 @@ destination — Darktide's **console log** (`console-*.log`, at
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
 under Proton) — **not** to the Proton `steam-$APPID.log` (which captures
 Wine/Proton diagnostics only). `relay.log` carries the C-side shell + trampoline
-lines (including the trampoline's one-line `OK`/`FAIL` status, which is the
-reliable bootstrap validation).
+lines (including the trampoline's pcall#1 status/failure diagnostics, which are
+the reliable bootstrap validation).
 
 **Optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off).**
 When enabled, Relay additionally copies Lua `print` / `__print` output into
@@ -323,16 +323,22 @@ surfaces. Coverage is honest and narrower than "all Lua logs":
   coverage depends on whether their runtime path ultimately calls the wrapped
   globals (observed, not guaranteed).
 
-Because captured lines are `INFO`, `RELAY_LOG_LEVEL=warn`/`error` filters them
-out of `relay.log` while the console log is unaffected. The wrapper is
-process-lifetime and non-stacking; see
-`docs/architecture/MOD_LOADER-DMF.md` for the `print` / `__print` surface
-contract.
+Captured lines are emitted at `INFO` with component `lua-print`. `print` /
+`__print` carry no severity metadata, and Relay does **not** infer severity
+from text prefixes — a line whose text says `warning` / `error` is still
+copied at `INFO`. Relay does not identify which game script, Relay module, DMF
+module, or user mod called `print`; it adds no source file, line number, or mod
+name (although the printed text can identify itself). As a consequence,
+`RELAY_LOG_LEVEL=warn`/`error` filters the copied lines out of `relay.log`
+while the console log is unaffected. The wrapper is process-lifetime and
+non-stacking; see `docs/architecture/MOD_LOADER-DMF.md` for the `print` /
+`__print` surface contract, and `docs/reference/relay/logging.md` for the
+observable tee boundary and argument-rendering reference.
 
 **Native sink (no new hook).** The tee adds **no new MinHook detour** — the
 production hook count stays exactly two (`lua_newstate` + `lua_pcall`). The
-sink is a private C callback registered directly in `trampoline_run`, BEFORE
-the staged chunk loads/ runs, using RVAs already in the discovered address
+sink is a private C callback registered directly in `trampoline_run`, before
+the staged chunk loads/runs, using RVAs already in the discovered address
 table:
 
 - `lua_pushcclosure(L, &cb, 0)` pushes one zero-upvalue closure;
@@ -373,8 +379,16 @@ same compile-the-impl pattern as `trampoline.c`):
   mid-line. The sink does not take the lock itself (it reaches `relay_log` via
   the emit bridge, and the lock is non-reentrant).
 
-Any failure (malformed value, missing optional C-API pointer, sink error)
-degrades silently to console-only behavior; mod loading is never blocked.
+Failure behavior is graded, not uniformly silent. If the tee is enabled but
+a required C-API registration pointer is unavailable, the shell records exactly
+**one `WARN` event** through the level-filtered logger and continues
+console-only for that run (mod loading is not blocked). A malformed callback
+invocation (wrong argument count or a non-string argument at the native
+callback) is ignored for that invocation.
+After a successful original `print`, a render or sink failure drops only that
+relay copy; the wrapper remains installed for later calls. None of these
+failures changes the original call's results or blocks the original call, the
+loader, or the game.
 
 ## Runtime patch compatibility
 
@@ -395,10 +409,9 @@ game's Lua lifecycle, but once staged loader/DMF/mod Lua is running it must see 
 same relevant globals, loader behavior, and file/runtime semantics it receives
 when loaded by the engine today.
 
-Runtime-owned replacement behavior is acceptable only at the bootstrap boundary
-or for runtime-private plumbing such as status/logging. Mod Relay should
-not become an ongoing compatibility shim that reimplements Darktide's Lua
-runtime or patch-fixes missing behavior for each mod.
+Runtime-owned replacement behavior stays at the bootstrap boundary or in
+runtime-private plumbing such as status/logging. Mod Relay does not reimplement
+Darktide's Lua runtime or patch individual mods.
 
 ### Bootstrap boundary
 
@@ -480,3 +493,5 @@ gate.
   the load timing).
 - `docs/architecture/README.md` — project architecture.
 - `docs/reference/darktide/darktide-binary.md` — the validated game-binary constraints.
+- `docs/reference/community-tools/darktide-framework-analysis.md` — the
+  community loader/DMF surfaces that the runtime preserves for mods.

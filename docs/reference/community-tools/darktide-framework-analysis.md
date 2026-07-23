@@ -9,6 +9,13 @@
 > **Darktide-Mod-Framework / DMF** (modding API). This is background
 > context for understanding what Mod Relay replaces and what it
 > preserves.
+>
+> Loader facts are pinned to Darktide-Mod-Loader release
+> [`26.06.24`](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Loader/releases/tag/26.06.24)
+> (`4bd075a`). DMF consumer facts are pinned to
+> [`b9cc65f`](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Framework/tree/b9cc65f773cd8aaa974bf5b9312a79f5c5785f90).
+> Verification details are recorded in
+> [`analysis-verification.md`](analysis-verification.md).
 
 ---
 
@@ -73,7 +80,7 @@ The Darktide modding ecosystem is a **three-layer system** that hooks into Warha
 
 ### Purpose
 
-A Rust CLI tool that **patches Darktide's `bundle_database.data`** to register a custom bundle entry (`9ba626afa44a3aa3.patch_999`). Without this patch, the game engine has no knowledge of the mod loader and will not load any mod code.
+A Rust CLI tool that **patches Darktide's `bundle_database.data`** to register a custom bundle entry (`9ba626afa44a3aa3.patch_999`). Without this patch, the game engine has no knowledge of the mod loader and does not load its mod code.
 
 ### How It Works
 
@@ -147,9 +154,14 @@ Darktide-Mod-Loader/
 This is the **heart of the loader**. It implements a `ModManager` class that:
 
 1. **Scanning phase**: Reads `mod_load_order.txt`, prepends `dmf` to the list, builds an internal mod table
-2. **Loading phase**: For each mod, executes its `.mod` file via `_io.exec_with_return()`, then calls its `init()` callback
+2. **Loading phase**: Advances one listed mod per loading update, executes its
+   `.mod` descriptor, calls `run()`, then initializes the returned outer object
 3. **Running phase**: Calls `update(dt)` on each loaded mod every frame
-4. **Supports**: Hot-reload (Shift+Ctrl+R in developer mode), unload, game state change events
+4. **Failure state**: Stops routine callbacks for an outer entry after its first
+   protected callback error; teardown callbacks remain available
+5. **Supports**: Hot reload (left Ctrl + left Shift + R in developer mode),
+   unload, game-state exit/enter dispatch, and final state exit during
+   `GameStateMachine.destroy`
 
 Notable: It **always** inserts DMF as the first mod in the load order (line: `table.insert(mod_load_order, 1, "dmf")`).
 
@@ -180,6 +192,29 @@ Implements `Mods.hook` — a **function hook chain system**:
 - Ensures classes are available in `_G` (global table)
 - This enables hooking into class methods by name rather than by reference
 
+### Loader surfaces consumed by DMF and community mods
+
+The loader establishes these Lua-visible surfaces before DMF and user mods run:
+
+| Surface | Observable contract |
+| --- | --- |
+| `Mods.original_require` / `Mods.require_store` | Preserve the engine module loader and retain required table instances for `hook_require`. |
+| `Mods.lua.io`, `.loadstring`, `.os`, `.ffi` | Preserve engine facilities used by DMF. FFI is the table returned by `require("ffi")`; LuaJIT does not create `_G.ffi`. |
+| `__print` | Retains the engine print function for loader/framework diagnostics. |
+| `CLASS` and class globals | Register class results, return the unresolved class name as a string sentinel, and expose registered classes in `_G`. |
+| `Managers.mod._mods`, `_mod_load_index`, `_state`, `_settings.developer_mode` | Supply the load-entry, completion, and developer-mode state read by DMF. |
+| `ModManager:_check_reload()` | Detects the built-in left Ctrl + left Shift + R gesture. Community reload-control code can replace/hook this method to suppress the built-in trigger. |
+| `_reload_requested` | A direct true value requests reload; current community reload-control code uses this field. |
+| Game-state wrappers | Dispatch exit before `_change_state`, enter after it, and a final exit before `GameStateMachine.destroy`. |
+| Crashify metadata | Publishes a property for accepted mod entries so loaded-mod identity reaches crash reporting. |
+
+Observed direct community use includes
+[`Alfs_DMF_Extensions`](https://github.com/deathbeam/darktide-mods-mine/blob/9e59327fb16297f6d70f014a2577965428ef7cff/mods/Alfs_DMF_Extensions/scripts/mods/Alfs_DMF_Extensions/modules/mod_reload_keybind.lua)
+for `_check_reload` / `_reload_requested`,
+[`PlayerOutlines`](https://github.com/qvex123321/DTModVersionControlRepository/blob/8b7481cd774610669d7a54e16c8d920d91fa46ae/mods/PlayerOutlines/main.lua)
+for `Mods.file.dofile`, and guarded optional `Mods.message` use in
+[`IconBrowser`](https://github.com/deathbeam/darktide-mods-mine/blob/9e59327fb16297f6d70f014a2577965428ef7cff/mods/IconBrowser/scripts/mods/IconBrowser/IconBrowser.lua).
+
 ### Installation Files
 
 When installed into a game directory, the file layout is:
@@ -202,7 +237,7 @@ When installed into a game directory, the file layout is:
 
 ### Purpose
 
-A comprehensive **Lua modding framework** that sits on top of the Mod Loader and provides a rich API for mod authors. It is itself loaded as the first mod. It provides: hook management, event system, keybindings, options GUI, chat commands, localization, package management, networking, and more.
+A comprehensive **Lua modding framework** that sits on top of the Mod Loader and provides a rich API for mod authors. It is itself loaded as the first mod. It provides hook management, events, keybindings, options UI, chat commands, localization, package management, and network scaffolding.
 
 Repo: [Darktide-Mod-Framework](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Framework)
 
@@ -242,7 +277,7 @@ Every mod gets a `DMFMod` object that provides:
 - `get_name()`, `get_readable_name()`, `get_description()`
 - `is_enabled()`, `get_internal_data(key)`
 - Internal state: `name`, `readable_name`, `is_togglable`, `is_mutator`, `is_enabled`
-- Later extended with: `:hook()`, `:hook_safe()`, `:hook_origin()`, `:hook_require()`, `:hook_enable()`, `:hook_disable()`, `:info()`, `:warning()`, `:error()`
+- Hook/logging methods: `:hook()`, `:hook_safe()`, `:hook_origin()`, `:hook_require()`, `:hook_enable()`, `:hook_disable()`, `:info()`, `:warning()`, `:error()`
 
 ### DMF Mod Manager (`dmf_mod_manager.lua`)
 
@@ -264,7 +299,8 @@ Three hook types:
 
 Advanced features:
 - **Delayed hooks**: If the target object doesn't exist yet (not loaded), the hook is queued and applied when the object becomes available
-- **hook_require**: `mod:hook_require(filepath, callback)` — Execute a callback on every past and future instance of a required file
+- **hook_require**: `mod:hook_require(filepath, callback)` — Execute a callback
+  on already-loaded and subsequently loaded instances of a required file
 - **Enable/Disable**: Individual hooks or all hooks for a mod can be toggled at runtime
 - **Rehooking**: Mods can opt-in to allow replacing their own hooks (for development)
 
@@ -290,7 +326,15 @@ Advanced features:
 | `core/misc.lua` | 36 | Utility functions |
 | `core/chat.lua` | 19 | Chat message helpers |
 
-**Total: ~3,526 lines of Lua** in the core framework alone.
+**Total:** about 3,384 lines across the modules listed above.
+
+### Developer console under Proton
+
+DMF's developer console uses the published LuaJIT FFI module for its native
+window-close path. Under Proton, the console is hosted by `wineconsole`; the
+stock close action targets the native Windows `ConsoleWindowClass` and can leave
+the OS window open even though DMF reports it closed. This stock DMF/Proton
+behavior occurs even when `Mods.lua.ffi` is present.
 
 ---
 
@@ -368,7 +412,7 @@ Advanced features:
 
 ### Developer Friction
 10. **Separate toolchain** — Darktide Mod Builder is a separate tool for creating mods
-11. **No hot-reload in production** — Developer mode exists but requires manual enablement
+11. **Developer-mode gate** — Hot reload is available only while DMF developer mode is enabled
 12. **Distributed across 3+ repos** — dtkit-patch, Mod-Loader, Mod-Framework, Mod-Builder are separate
 
 ---
@@ -386,7 +430,10 @@ The entire runtime mod system (Loader + Framework) is **pure Lua** executing ins
 
 ### How `mod_loader` Works (Critical Detail)
 
-The `binaries/mod_loader` file (14,542 bytes, 549 lines) is a **hand-crafted modified copy of Darktide's own `scripts/main.lua`** — the game's primary Lua entry point. The mod loader's source contains the comment `-- chunkname: @scripts/main.lua` confirming its origin.
+The `binaries/mod_loader` file is a modified copy of Darktide's own
+`scripts/main.lua` — the game's primary Lua entry point. The loader release is
+updated alongside game-main changes and adds the community loader surfaces and
+lifecycle integration described above.
 
 **The `patch_999` bundle does NOT contain compiled mod loader code.** Instead, the 524KB bundle contains only a tiny **trampoline script** that:
 
@@ -423,6 +470,7 @@ The modders obtained the original `main.lua` content from the game's compiled bu
 - Creates the global `Mods` table (file I/O, messaging, Lua utilities)
 - Monkey-patches `require()` to intercept module loading
 - Loads the hook chain system and custom `ModManager`
-- Hooks into game state transitions (`GameStateMachine._change_state`) and the update loop (`StateGame.update`)
+- Hooks into game state transitions (`GameStateMachine._change_state`), final
+  state-machine destruction (`GameStateMachine.destroy`), and the update loop
+  (`StateGame.update`)
 - Calls `init_mod_framework()` inside `Main.init()` after the game state machine is set up
-

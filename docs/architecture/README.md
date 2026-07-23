@@ -90,11 +90,15 @@ uniformly-shifted RVAs across binary versions (validated across builds; e.g. a
   injection + hook-ready handshake + resume against a benign stub process.
 - **Mod loader Lua** (`make mod-loader-test`, offline LuaJIT harness — no
   game/wine): the loader + the deferred bootstrap, the IO adaptation, the
-  scan/load split, the `Managers.mod` surface.
+  scan/load split, the `Managers.mod` surface, hot reload, final state exit,
+  Crashify metadata, lifecycle failure containment, alerts, and exactly-once
+  cleanup.
 - **Live** (validated end-to-end on Linux/Proton): game reaches the main menu,
   `lua_newstate` hook fires, `L` captured, `lua_gettop(L)=0` (confirms the
   struct offsets in-process), all 16 discovered in-process matching the
-  offline oracle.
+  offline oracle; DMF and user mods load, failure/recovery probes and Crashify
+  metadata execute, repeated hot reload does not stack, shutdown dispatches the
+  final state exit, and normal Steam launch remains vanilla.
 
 ## Build
 
@@ -122,6 +126,8 @@ attaches the Windows runtime bundle to each release).
   logging.
 - `docs/architecture/MOD_LOADER-DMF.md` — the mod_loader↔DMF integration: the
   loader, the IO adaptation, the load timing, the two-path split.
+- `docs/reference/relay/logging.md` — the normative logging contract: the
+  destinations, the `relay.log` line/lifecycle, and the optional Lua print tee.
 - `docs/reference/darktide/darktide-binary.md` — the validated game-binary
   constraints (addresses, struct offsets, sandboxed `_G`, discovery methodology).
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing
