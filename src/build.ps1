@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Windows native (MSVC) dev build for Mod Relay.
+    Windows native (MSVC) build for Mod Relay — shared by CI and local dev.
 
 .DESCRIPTION
-    Mirrors src/Makefile target-for-target and command-for-command, transcribing
-    the MSVC steps from .github/workflows/pr.yml (the msvc: job) into named
-    PowerShell targets. Gives Windows developers the same make-equivalent loop
-    Linux developers get from `make`.
+    Mirrors src/Makefile target-for-target and command-for-command. This is the
+    single source of truth for MSVC builds — both GitHub CI workflows
+    (.github/workflows/pr.yml and .github/workflows/release-please.yml) invoke it
+    for MSVC builds, and Windows developers use it for local builds.
 
     Targets PowerShell 5.1 (universal on Windows 10/11). No PS 7-only syntax,
     no external modules.
@@ -232,25 +232,19 @@ function Invoke-Dll {
     Ensure-ObjDir
 
     # (a) Rust staticlib. The cc crate auto-discovers MSVC, so no vcvars.
-    # NOTE: cargo writes its `Finished`/`Compiling` progress lines to stderr,
-    # which PS 5.1 surfaces as red NativeCommandError records. This is harmless
-    # — $LASTEXITCODE still reflects the real exit status. (PS 7 doesn't do
-    # this; PS 5.1 native-command error handling is just noisy.)
+    # CRITICAL: GitHub Actions `shell: powershell` prepends `$ErrorActionPreference = 'stop'`,
+    # which causes PowerShell 5.1 to terminate on stderr records from native processes.
+    # cargo writes normal progress to stderr, so a successful build would terminate
+    # before $LASTEXITCODE is checked. Route through cmd /c with 2>&1 so cmd preserves
+    # the native exit code while PS5 receives merged stdout+stderr.
     Write-Host "Building Rust staticlib (x86_64-pc-windows-msvc)..."
-    & cargo build --release -p relay-discovery --target x86_64-pc-windows-msvc
+    cmd /c "cargo build --release -p relay-discovery --target x86_64-pc-windows-msvc 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
 
-    # DEVIATION FROM CI (see "Build deviations from CI" in the report):
-    # CI's cl invocations omit /MD, so they fall to cl's default (/MT — static
-    # CRT), which emits /DEFAULTLIB:LIBCMT directives. capstone-sys (inside
-    # the Rust static lib) is compiled with the dynamic CRT (/MD via the cc
-    # crate, since x86_64-pc-windows-msvc does not set the crt-static target
-    # feature) and so its objects reference CRT functions via the dllimport
-    # form (e.g. __imp_strncpy). Static UCRT (libucrt.lib) provides strncpy
-    # but NOT __imp_strncpy, so the link fails with LNK2019 unresolved
-    # __imp_strncpy. Building the C shell with /MD matches capstone and
-    # resolves the mismatch. (Verified: the unmodified CI commands reproduce
-    # the LNK2019 failure on a standard VS 2022 Build Tools install.)
+    # Compile the C shell + MinHook sources.
+    # /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
+    # inside the Rust staticlib) compiles with /MD; cl's default /MT causes
+    # LNK2019/LNK4217 CRT-mismatch errors at link time.
     Write-Host "Compiling C shell + MinHook sources..."
     Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include /I shell\vendor\minhook\include /Fo:bin\obj\ shell\src\dllmain.c shell\src\log_sink.c shell\vendor\minhook\src\buffer.c shell\vendor\minhook\src\hook.c shell\vendor\minhook\src\trampoline.c shell\vendor\minhook\src\hde\hde64.c'
 
@@ -263,14 +257,10 @@ function Invoke-Dll {
     Write-Host "Compiling shell resource (relay_shell.res)..."
     Invoke-WithVcvars 'rc /nologo /DRELAY_VERSION_MAJOR=%RELAY_VERSION_MAJOR% /DRELAY_VERSION_MINOR=%RELAY_VERSION_MINOR% /DRELAY_VERSION_PATCH=%RELAY_VERSION_PATCH% /fo bin\obj\relay_shell.res shell\src\relay_shell.rc'
 
-    # DEVIATION FROM CI (see report): MSVC link /DLL does NOT auto-export
-    # external symbols from input objects/libs (unlike mingw's -shared). The
-    # CI command produces a DLL with zero exports, which makes the Makefile-
-    # parity `check` (and CI's own verify step, which silently passes on
-    # zero matches via `Select-String`) unable to find the production seam.
-    # Explicit /EXPORT: entries for the production symbols (DllMain + the two
-    # Rust seam functions) make the DLL's export table match the Makefile
-    # build's (mingw auto-exports them) and let `check` verify them.
+    # Link the DLL against the Rust staticlib + system libs.
+    # Explicit /EXPORT: entries are required because MSVC link /DLL does NOT
+    # auto-export from input objects/libs (unlike mingw's -shared). Without these,
+    # the DLL ships with zero exports. Mirror what mingw auto-exports.
     Write-Host "Linking bin\relay_shell.dll..."
     Invoke-WithVcvars 'link /nologo /DLL /OUT:bin\relay_shell.dll bin\obj\dllmain.obj bin\obj\log_sink.obj bin\obj\buffer.obj bin\obj\hook.obj bin\obj\trampoline.obj bin\obj\hde64.obj bin\obj\relay_trampoline.obj bin\obj\relay_shell.res target\x86_64-pc-windows-msvc\release\relay_discovery.lib psapi.lib kernel32.lib user32.lib ws2_32.lib userenv.lib bcrypt.lib ntdll.lib /NODEFAULTLIB:libgcc.lib /EXPORT:DllMain /EXPORT:relay_discover /EXPORT:relay_discover_detail'
 
@@ -437,10 +427,15 @@ function Invoke-CTests {
     Invoke-WithVcvars 'cl /nologo /O2 /I shell\include /Fo:bin\obj\ /Fe:bin\test_log_sink.exe tests\test_log_sink.c bin\obj\test_runner.obj kernel32.lib'
 
     # Run each test exe directly (no wine on Windows native).
+    # CRITICAL: GitHub Actions `shell: powershell` prepends `$ErrorActionPreference = 'stop'`,
+    # which causes PowerShell 5.1 to terminate on stderr records from native processes.
+    # Test failures write actionable output to stderr, and a failing test would terminate
+    # before $LASTEXITCODE is checked. Route through cmd /c with 2>&1 so cmd preserves
+    # the native exit code while PS5 receives merged stdout+stderr.
     Write-Host "=== C unit tests ==="
     foreach ($exe in @('test_steam_env', 'test_injection', 'test_config', 'test_quoting', 'test_trampoline', 'test_log_sink')) {
         Write-Host "--- $exe ---"
-        & ".\bin\$exe.exe"
+        cmd /c ".\bin\$exe.exe 2>&1"
         if ($LASTEXITCODE -ne 0) { throw "$exe failed (exit $LASTEXITCODE)" }
     }
 
@@ -461,7 +456,13 @@ function Invoke-ModLoaderTest {
     # be invoked with forward slashes from CWD=src/. A Windows backslash path
     # makes the match fail and tests can't find their sibling test_*.lua
     # files. Matches the Makefile invocation exactly.
-    & luajit mod_loader/tests/runner.lua
+    #
+    # CRITICAL: GitHub Actions `shell: powershell` prepends `$ErrorActionPreference = 'stop'`,
+    # which causes PowerShell 5.1 to terminate on stderr records from native processes.
+    # Test failures write actionable output to stderr, and a failing test would terminate
+    # before $LASTEXITCODE is checked. Route through cmd /c with 2>&1 so cmd preserves
+    # the native exit code while PS5 receives merged stdout+stderr.
+    cmd /c "luajit mod_loader/tests/runner.lua 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "mod loader tests failed (exit $LASTEXITCODE)" }
 
     Write-Host "mod-loader-test: PASS" -ForegroundColor Green
@@ -472,7 +473,12 @@ function Invoke-Test {
     Invoke-CTests
 
     Write-Host "=== Rust tests (cargo test --features test-hooks -p relay-discovery) ==="
-    & cargo test --features test-hooks -p relay-discovery
+    # CRITICAL: GitHub Actions `shell: powershell` prepends `$ErrorActionPreference = 'stop'`,
+    # which causes PowerShell 5.1 to terminate on stderr records from native processes.
+    # cargo test writes normal progress and failures to stderr, so a failing test run
+    # would terminate before $LASTEXITCODE is checked. Route through cmd /c with 2>&1
+    # so cmd preserves the native exit code while PS5 receives merged stdout+stderr.
+    cmd /c "cargo test --features test-hooks -p relay-discovery 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "cargo test failed (exit $LASTEXITCODE)" }
 
     Invoke-ModLoaderTest
@@ -483,7 +489,12 @@ function Invoke-Test {
 function Invoke-Clean {
     Write-Host "=== clean: cargo clean + remove bin\ ===" -ForegroundColor Cyan
 
-    & cargo clean
+    # CRITICAL: GitHub Actions `shell: powershell` prepends `$ErrorActionPreference = 'stop'`,
+    # which causes PowerShell 5.1 to terminate on stderr records from native processes.
+    # cargo clean writes normal progress to stderr, so a successful clean would terminate
+    # before $LASTEXITCODE is checked. Route through cmd /c with 2>&1 so cmd preserves
+    # the native exit code while PS5 receives merged stdout+stderr.
+    cmd /c "cargo clean 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "cargo clean failed (exit $LASTEXITCODE)" }
 
     if (Test-Path -LiteralPath 'bin') {
