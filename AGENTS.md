@@ -114,7 +114,7 @@ src/                Mod Relay — the injected modding runtime + injector
   tests/            C unit tests (run via wine); includes the pure log_sink.c
                       sanitizer tests (compiled directly, no Windows/Lua deps)
   README.md         the component README (developers / power users)
-docs/               architecture/ + reference/ (darktide/, community-tools/)
+docs/               architecture/ + reference/ (relay/, darktide/, community-tools/)
 .github/workflows/  CI: pr.yml (PR gate: mingw cross-compile + msvc native) +
                       release-please.yml (release pipeline + Windows bundle attach)
 .gitignore          ignores src/target, src/bin, build artifacts
@@ -178,10 +178,10 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   `docs/architecture/MOD-RELAY.md` → `launcher/`
   for the full flag/env/default table + the env-var contract.
 - **Shell log** is `relay.log`, structured + level-filtered via `RELAY_LOG_LEVEL`
-  (default `info`; crank to `debug`/`trace` for verbose output); it carries the
-  C-side shell + trampoline lines only. Each line is timestamped in **local
-  time with an ISO-8601 UTC offset** that follows the system time zone (e.g.
-  `2026-07-16T12:34:56-04:00`), and the worker logs a `launching <cmdline>`
+  (default `info`; crank to `debug`/`trace` for verbose output). By default it
+  carries the C-side shell + trampoline lines only. Each line is timestamped in
+  **local time with an ISO-8601 UTC offset** that follows the system time zone
+  (e.g. `2026-07-16T12:34:56-04:00`), and the worker logs a `launching <cmdline>`
   INFO line (the host process command line as the game sees it — the quoted exe
   + forwarded game args) right after the startup banner. By default the mod
   loader's Lua-side `print` lines (the `[mod_loader] …` lines), DMF, and mods go
@@ -193,7 +193,10 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   Relay additionally copies `print`/`__print` output into `relay.log` as
   `INFO lua-print:` lines (the console log stays complete/authoritative; it is a
   tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua-print`
-  lines out of `relay.log` while the console log is unaffected. See MOD-RELAY.md
+  lines out of `relay.log` while the console log is unaffected. See
+  `docs/reference/relay/logging.md` for the normative logging contract
+  (destinations, line/lifecycle, tee boundary, argument rendering,
+  byte-safety), and MOD-RELAY.md
   → Logging (native sink policy: 4096-byte input budget, 768-byte chunks,
   CR/LF/CRLF split, `\xNN` for controls/NUL/DEL, one truncation marker, no new
   hook — still exactly lua_newstate + lua_pcall).
@@ -243,6 +246,9 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
 
 - `docs/architecture/` — the production architecture (component model, the
   Hybrid, the seam, test strategy, build, launcher flow).
+- `docs/reference/relay/logging.md` — the normative Mod Relay logging contract
+  (destinations, the `relay.log` line/lifecycle, and the optional Lua print
+  tee).
 - `docs/reference/darktide/darktide-binary.md` — validated game-binary constraints.
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing
   modding ecosystem the runtime patch replaces.
@@ -320,7 +326,8 @@ affects repo structure, build, architecture, or ops, update:
 - **`src/README.md`** — for build/dev detail under the component; ensure the
   root links to it.
 - **`docs/architecture/`** for any architecture change.
-- **`docs/reference/`** — categorized: `darktide/` (game-binary facts),
+- **`docs/reference/`** — categorized: `relay/` (Mod Relay-owned normative
+  contracts: logging), `darktide/` (game-binary facts),
   `community-tools/` (existing modding ecosystem).
 
 Then ensure `make build/check/test` + clippy pass. **Outdated docs in a PR are

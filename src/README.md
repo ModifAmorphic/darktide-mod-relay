@@ -215,8 +215,8 @@ Relay writes to **two** separate logs by default:
 
 - **`relay.log`** (next to the launcher; `--log-file`/`RELAY_LOG_FILE`) — the
   C-side shell + trampoline log. Structured `<ts> <LEVEL> <component>: <msg>`,
-  level-filtered by `RELAY_LOG_LEVEL` (default `info`). Its one-line `OK`/`FAIL`
-  is the reliable bootstrap check.
+  level-filtered by `RELAY_LOG_LEVEL` (default `info`). Its pcall#1
+  status/failure diagnostic is the reliable bootstrap check.
 - **Darktide console log** (`console-*.log`, at
   `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows;
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
@@ -254,9 +254,12 @@ Two interactions worth knowing:
 The launcher canonicalizes the child env: it sets `RELAY_LUA_LOGS=1` when
 enabled and **removes** it when disabled (a stale parent value cannot leak in as
 a non-`1`). Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves; that
-is the external non-launcher contract. See
-[`docs/architecture/MOD-RELAY.md`](../docs/architecture/MOD-RELAY.md) → Logging
-for the native sink's serialization/sanitization/budget policy, and
+is the external non-launcher contract. The normative logging contract
+(destinations, the `relay.log` line/lifecycle, the tee boundary, argument
+rendering, and byte-safety) is in
+[`docs/reference/relay/logging.md`](../docs/reference/relay/logging.md). See
+[`docs/architecture/MOD-RELAY.md`](../docs/architecture/MOD-RELAY.md)
+→ Logging for the native sink's serialization/sanitization/budget policy, and
 [`docs/architecture/MOD_LOADER-DMF.md`](../docs/architecture/MOD_LOADER-DMF.md)
 for the wrapper's process-lifetime contract.
 
