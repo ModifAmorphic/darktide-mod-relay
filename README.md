@@ -60,7 +60,12 @@ A minimal `launch.bat` (next to the launcher) makes this easier:
 mod_relay.exe ^
   --game-binary "C:\Games\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries\Darktide.exe" ^
   --mod-path "C:\Path\To\RelayMods"
+rem   --lua-logs
 ```
+
+The `--lua-logs` line (uncomment to enable) optionally copies Lua `print` output
+into `relay.log` too — handy when collecting diagnostics in one place. See the
+[log split](#3-configure-steam-linuxproton) note below.
 
 > On Linux/Proton, use Windows-style `Z:\` paths (the Proton `Z:` drive maps to
 > your Linux filesystem).
@@ -101,6 +106,17 @@ lands in Darktide's **console log**, not the Proton log. On Linux/Proton that is
 The Proton log (`steam-$APPID.log`) captures Wine/Proton diagnostics only, not
 Darktide Lua output.
 
+> **Optional: also capture Lua `print` output in `relay.log`.** By default the
+> Darktide console log is the only place Lua `print` / `__print` output (the
+> mod loader, DMF, and mods) shows up — `relay.log` carries only the C-side
+> shell/trampoline lines. Add `--lua-logs` (or set `RELAY_LUA_LOGS=1`) to also
+> **copy** that Lua `print` output into `relay.log` as `lua-print` lines. It is
+> a **tee, not a redirect**: Darktide's console log stays complete and
+> authoritative. It is off by default, and `--log-level warn`/`error` filters
+> the copied lines out of `relay.log` while the console log is unaffected. See
+> [`src/README.md`](src/README.md#launcher-cli) for the boundary of what it
+> captures.
+
 ### 4. Where mods go
 
 Mods live in the `mods/` subfolder of the directory you point `--mod-path` at
@@ -137,7 +153,9 @@ Ctrl and **left** Shift keys specifically (right-side modifiers won't trigger it
 You can confirm each reload in Darktide's console log (see
 [Configure Steam](#3-configure-steam-linuxproton) for the location): look for
 the `[mod_loader] hot reload generation N …` lines — `completed cleanly` on
-success.
+success. If you launched with `--lua-logs`, those same `[mod_loader]` lines are
+**also** copied into `relay.log` (as `lua-print` lines); the console log always
+has them regardless.
 
 > **If a reload reports errors:** Relay reloads best-effort and is not
 > transactional — once teardown starts, the old generation is gone. If the

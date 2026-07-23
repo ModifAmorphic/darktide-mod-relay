@@ -5,8 +5,12 @@
 -- file and the console. Use it to observe state-exit / reload / unload ordering
 -- in the real game (e.g. verifying the final state-exit fires on shutdown).
 --
--- Install: copy to <mod_path>/mods/shutdown_probe/shutdown_probe.mod and add a
--- `shutdown_probe` line to mods.lst. Launch, exercise the scenario, exit.
+-- Install: this scenario ships a complete bundle — its directory is itself the
+-- <mod_path>. Launch directly with
+--   --mod-path <path-to-observational/shutdown_probe>
+-- (the bundle's mods/mods.lst already lists exactly `shutdown_probe`). See
+-- README.md in the scenario root for the full launch/staging, expected evidence,
+-- and cleanup.
 --
 -- Output: each callback appends one line to shutdown_probe/shutdown_probe.log
 -- (via Mods.lua.io.open, rooted at the mods dir) AND prints a [SHUTDOWN_PROBE]

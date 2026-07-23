@@ -44,7 +44,7 @@ LAUNCHER  := $(BIN)/mod_relay.exe
 SHELL_RES := $(BIN)/shell_res.o
 LAUNCHER_RES := $(BIN)/launcher_res.o
 
-SHELL_SRC := shell/src/dllmain.c shell/src/trampoline.c
+SHELL_SRC := shell/src/dllmain.c shell/src/trampoline.c shell/src/log_sink.c
 MINHOOK_SRC := shell/vendor/minhook/src/buffer.c \
                shell/vendor/minhook/src/hook.c \
                shell/vendor/minhook/src/trampoline.c \
@@ -108,7 +108,7 @@ STUB_SHELL  := $(BIN)/stub_shell.dll
 # Test executables
 TEST_EXES := $(BIN)/test_steam_env.exe $(BIN)/test_injection.exe \
              $(BIN)/test_config.exe $(BIN)/test_quoting.exe \
-             $(BIN)/test_trampoline.exe
+             $(BIN)/test_trampoline.exe $(BIN)/test_log_sink.exe
 
 .PHONY: all build dll launcher stage-mod_loader stage-legal check test c-tests mod-loader-test clean rust-staticlib
 
@@ -136,6 +136,7 @@ $(SHELL_RES): shell/src/relay_shell.rc ../.release-please-manifest.json | $(BIN)
 $(DLL): $(RUST_LIB) $(SHELL_SRC) $(MINHOOK_SRC) shell/src/relay_shell.rc \
         ../.release-please-manifest.json \
         shell/include/relay_discovery.h shell/include/trampoline.h \
+        shell/include/log_sink.h \
         $(SHELL_RES) | $(BIN)
 	$(CROSS_CC) -shared -static-libgcc -O2 -DRELAY_VERSION='"$(RELAY_VERSION)"' -o $@ \
 	  $(SHELL_SRC) $(MINHOOK_SRC) $(INCLUDES) $(SHELL_RES) \
@@ -242,6 +243,14 @@ $(BIN)/test_trampoline.exe: tests/test_trampoline.c \
 	  -DRELAY_VERSION='"$(RELAY_VERSION)"' -o $@ $< \
 	  $(TEST_RUNNER_OBJ) $(TEST_LIBS)
 
+# test_log_sink compiles the pure log_sink.c inline (via #include), so it needs
+# only the test runner + kernel32 (no Lua/hook deps).
+$(BIN)/test_log_sink.exe: tests/test_log_sink.c \
+                          shell/src/log_sink.c shell/include/log_sink.h \
+                          tests/test_runner.h $(TEST_RUNNER_OBJ) | $(BIN)
+	$(TEST_CC) $(TEST_CFLAGS) $(TEST_INCLUDES) -o $@ $< \
+	  $(TEST_RUNNER_OBJ) $(TEST_LIBS)
+
 c-tests: $(TEST_EXES) $(STUB_TARGET) $(STUB_SHELL)
 	@echo "=== C unit tests (via wine) ==="
 	$(WINE) $(BIN)/test_steam_env.exe
@@ -249,6 +258,7 @@ c-tests: $(TEST_EXES) $(STUB_TARGET) $(STUB_SHELL)
 	$(WINE) $(BIN)/test_config.exe
 	$(WINE) $(BIN)/test_quoting.exe
 	$(WINE) $(BIN)/test_trampoline.exe
+	$(WINE) $(BIN)/test_log_sink.exe
 
 test: c-tests mod-loader-test
 	$(CARGO) test --features test-hooks -p relay-discovery

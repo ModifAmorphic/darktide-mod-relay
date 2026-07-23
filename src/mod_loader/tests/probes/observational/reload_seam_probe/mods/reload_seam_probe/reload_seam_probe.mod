@@ -5,9 +5,12 @@
 -- built-in LEFT Ctrl + LEFT Shift + R gesture is suppressed while this is
 -- loaded). Use it to verify the seam works in the real game.
 --
--- Install: copy to <mod_path>/mods/reload_seam_probe/reload_seam_probe.mod and
--- add a `reload_seam_probe` line to mods.lst. Launch in developer mode; the
--- built-in reload gesture should NOT fire. Remove the line to restore it.
+-- Install: this scenario ships a complete bundle — its directory is itself the
+-- <mod_path>. Launch directly with
+--   --mod-path <path-to-observational/reload_seam_probe>
+-- in developer mode (the bundle's mods/mods.lst already lists exactly
+-- `reload_seam_probe`); the built-in reload gesture should NOT fire while it is
+-- loaded. See README.md in the scenario root for recovery/removal and safety.
 return {
     run = function()
         if CLASS and type(CLASS.ModManager) == "table" then

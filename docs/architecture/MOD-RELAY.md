@@ -52,7 +52,10 @@ signals hook-ready.
    (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`) plus a temporary private handoff of the
    same manifest-derived full product version used by launcher `--version`,
    `io.open` the staged entry
-  (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. The mod loader
+   (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. (When the Lua
+   print tee is enabled, the trampoline also registers the private
+   `__mod_relay_lua_log_sink` callback immediately before loading the chunk —
+   see [Logging](#logging); this adds **no new hook**.) The mod loader
   Lua is **packaged with the Relay runtime** (staged into `bin/mod_loader/`
   by `make build`, deployed next to the launcher/DLL; the shell self-locates it
   from its own DLL path as `<dll-dir>\mod_loader\` and publishes that dir as the
@@ -189,6 +192,7 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
   | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
   | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
+  | `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; only the exact env value `1` enables) |
   | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game, in order) |
   | `--version` | — (none) | — (value-less; prints the build-injected version and exits 0) |
 
@@ -196,17 +200,22 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   self-locates the mod loader (`<dll-dir>\mod_loader\`); neither path is
   configurable. The launcher resolves the config, then publishes the
   shell-contract values (`SteamAppId`/`SteamGameId`, `RELAY_MOD_PATH`,
-  `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`) into the child env
-  before `CreateProcess`, so the injected shell inherits them. Game arguments
-  are NOT published to the env — they go on the child command line: the quoted
-  exe as argv[0] (byte-for-byte the legacy form), followed by every token after
-  the end-of-options `--` separator, each rendered with the MSVC CRT quoting
-  algorithm. A bare `--` ends option parsing; Relay's own flags must precede it,
-  and a flag-looking token after `--` is a raw game arg (no `--` is the legacy
-  exe-only launch). The command line is ANSI only (active code page; Darktide
-  args are ASCII) and capped at `RELAY_CMDLINE_MAX` (32,767 chars incl. NUL —
-  the `CreateProcessA` ceiling); oversize is rejected before any process is
-  created. `-h`/`--help` prints the full table.
+  `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`, and — only when enabled —
+  `RELAY_LUA_LOGS=1`) into the child env before `CreateProcess`, so the
+  injected shell inherits them. `RELAY_LUA_LOGS` is canonicalized: the launcher
+  sets it to exactly `1` when the resolved config enables the Lua print tee
+  (`--lua-logs` or `RELAY_LUA_LOGS=1`), and **removes** it (not set to `0`)
+  when disabled, so a stale parent value cannot leak into the child as a
+  non-`1`. Game arguments are NOT published to the env — they go on the child
+  command line: the quoted exe as argv[0] (byte-for-byte the legacy form),
+  followed by every token after the end-of-options `--` separator, each
+  rendered with the MSVC CRT quoting algorithm. A bare `--` ends option
+  parsing; Relay's own flags must precede it, and a flag-looking token after
+  `--` is a raw game arg (no `--` is the legacy exe-only launch). The command
+  line is ANSI only (active code page; Darktide args are ASCII) and capped at
+  `RELAY_CMDLINE_MAX` (32,767 chars incl. NUL — the `CreateProcessA` ceiling);
+  oversize is rejected before any process is created. `-h`/`--help` prints the
+  full table.
 
 ## Contracts
 
@@ -267,6 +276,7 @@ global, so no loader-path env var exists.
 | `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod-path boundary** — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here) and `Mods._mod_path` as the containment boundary for the `Mods.lua.io` wrapper. Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
 | `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
+| `RELAY_LUA_LOGS` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LUA_LOGS=1` when the resolved config enables it (`--lua-logs` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves — that is the external non-launcher contract. |
 | `SteamAppId` / `SteamGameId` | launcher | Steam | the real Darktide app id (`1361210`); without it `SteamAPI_Init` is denied under a non-Steam shortcut |
 
 ### Logging
@@ -292,10 +302,79 @@ exact arguments that reached the game are captured.
 destination — Darktide's **console log** (`console-*.log`, at
 `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
-under Proton) — **not** to `relay.log` and **not** to the Proton
-`steam-$APPID.log` (which captures Wine/Proton diagnostics only). `relay.log`
-carries the C-side shell + trampoline lines (including the trampoline's one-line
-`OK`/`FAIL` status, which is the reliable bootstrap validation).
+under Proton) — **not** to the Proton `steam-$APPID.log` (which captures
+Wine/Proton diagnostics only). `relay.log` carries the C-side shell + trampoline
+lines (including the trampoline's one-line `OK`/`FAIL` status, which is the
+reliable bootstrap validation).
+
+**Optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off).**
+When enabled, Relay additionally copies Lua `print` / `__print` output into
+`relay.log` as structured `INFO  lua-print:` lines. It is a **tee, never a
+redirect**: the engine's console `print` still runs first and authoritatively,
+and the tee only adds `relay.log` copies of what traverses those wrapped
+surfaces. Coverage is honest and narrower than "all Lua logs":
+
+- **Captured:** `print` / `__print` calls made after the wrapper installs at
+  pcall#1 — Relay loader output, and any DMF/mod path routed through those
+  globals.
+- **Not captured:** a `print` reference captured before Relay wraps the
+  globals, DMF/mod APIs that bypass those globals, native/engine/Wine/Proton
+  output, or every `console-*.log` line. DMF `mod:info`/`warning`/`error`
+  coverage depends on whether their runtime path ultimately calls the wrapped
+  globals (observed, not guaranteed).
+
+Because captured lines are `INFO`, `RELAY_LOG_LEVEL=warn`/`error` filters them
+out of `relay.log` while the console log is unaffected. The wrapper is
+process-lifetime and non-stacking; see
+`docs/architecture/MOD_LOADER-DMF.md` for the `print` / `__print` surface
+contract.
+
+**Native sink (no new hook).** The tee adds **no new MinHook detour** — the
+production hook count stays exactly two (`lua_newstate` + `lua_pcall`). The
+sink is a private C callback registered directly in `trampoline_run`, BEFORE
+the staged chunk loads/ runs, using RVAs already in the discovered address
+table:
+
+- `lua_pushcclosure(L, &cb, 0)` pushes one zero-upvalue closure;
+- `lua_setfield(L, LUA_GLOBALSINDEX, "__mod_relay_lua_log_sink")` sets it as a
+  **temporary private global** (`LUA_GLOBALSINDEX = -10002`, grounded against
+  `/usr/include/luajit-2.1/lua.h` for LuaJIT 2.1 / Lua 5.1; `lua_setglobal` is
+  a macro over this `setfield`). Zero net stack effect (`+1` push, `−1` setfield
+  pop), so the chunk still loads at the same base.
+
+The closure (`lua_log_sink_cb`) expects exactly one Lua string (`lua_type`
+guards; non-string/wrong-arity calls are ignored, never errored), reads it with
+`lua_tolstring` + explicit length, and never calls back into Lua or retains the
+pointer. `init.lua` snapshots the closure into a **private local** and clears
+the global **before its idempotency guard**, so community code never sees it. It
+is runtime-private logging plumbing — **not** a mod API (`Mods.log`,
+`Mods.message`, etc. are deliberately absent).
+
+The line-sanitization policy lives in the pure, I/O-free helper `log_sink.c`
+(declared `log_sink.h`; unit-tested directly by `tests/test_log_sink.c`, the
+same compile-the-impl pattern as `trampoline.c`):
+
+- **4096-byte input budget** per sink call (`LOG_SINK_INPUT_BUDGET`); input
+  past that is dropped after exactly **one** trailing truncation-marker line.
+- **768-byte output chunks** (`LOG_SINK_LINE_BUDGET`); a longer physical line
+  is emitted as consecutive width-bounded lines, each with its own prefix.
+- **CR/LF/CRLF splitting** (CRLF is one break); empty lines are emitted
+  faithfully.
+- **`\xNN` escaping** for control bytes `0x00-0x1f` (except the terminators)
+  and `0x7f` (DEL) — so embedded NUL cannot terminate a buffer and no control
+  byte can forge line structure. `%` and UTF-8 bytes (`0x80-0xff`) pass through
+  unchanged as data.
+- **No format-string exposure:** the emit bridge uses a literal `"%.*s\n"`
+  with the sanitized line as the data argument, so a `%` in the data is
+  literal.
+- **Fixed buffers, no heap** proportional to the input string; bounded stack.
+- **Logger-wide SRW lock** (`g_log_lock`) serializes the `OutputDebugStringA` +
+  file-write pair so worker-thread and Lua-thread (sink) lines never interleave
+  mid-line. The sink does not take the lock itself (it reaches `relay_log` via
+  the emit bridge, and the lock is non-reentrant).
+
+Any failure (malformed value, missing optional C-API pointer, sink error)
+degrades silently to console-only behavior; mod loading is never blocked.
 
 ## Runtime patch compatibility
 

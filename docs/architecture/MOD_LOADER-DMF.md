@@ -308,7 +308,7 @@ logic is the loader **logic**.
 | `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable |
 | `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table`; plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
-| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging |
+| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--lua-logs` / `RELAY_LUA_LOGS=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
 
 There is **no** `Mods.hook` — the loadstring-driven hook chain (`set`/`enable`/
 `remove`/`set_on_file`/`enable_by_file`, the `MODS_HOOKS`/`MODS_HOOKS_BY_FILE`
@@ -321,6 +321,55 @@ The wrapped global `require` (`require_bridge.lua`) additionally advances the
 lifecycle coordinator after every successful `require` (see
 [Deferred bootstrap](#deferred-bootstrap)). That coordinator is what lets
 pcall#1 code reach classes that don't exist until late in boot.
+
+## Lua print tee
+
+The optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off;
+see `docs/architecture/MOD-RELAY.md` → Logging for the native side) is
+**process-lifetime bootstrap plumbing**, installed in `init.lua` at pcall#1 —
+**not** generation policy, so it lives in the entry, not the DMF adapter or mod
+manager. When a valid sink is present, the entry installs wrappers on global
+`print` and `__print`; when the tee is off (or no sink was published), today's
+behavior is exactly preserved (`__print = __print or print` still resolves).
+
+**Capture and retirement.** The entry snapshots the trampoline's temporary
+private global `__mod_relay_lua_log_sink` into a **private local** only when it
+is a function, then clears the global **before its own idempotency guard** — so
+community code (DMF/mods) never sees the bridge. The snapshot is never
+published under `Mods`, `_G`, or any community surface; only the wrapper
+closures retain it.
+
+**Original stays authoritative.** Each wrapper calls its own original **first,
+directly** (not under `pcall`), so any error escapes with its natural value and
+provenance (a `pcall`+rethrow would unwind the original's frame first). Only
+after a successful original call does a **protected** render+sink step run.
+Originals' result cardinality is preserved exactly (zero, multiple, interior
+and trailing nils) via a count-explicit pack/unpack. Render/sink failures are
+swallowed — they never change a successful call's results. The renderer is
+total over every Lua type: strings pass through byte-for-byte, numbers/
+booleans/nil use ordinary textual forms, and tables/functions/threads/cdata/userdata
+use **stable type placeholders** (`<table>` etc.) so a user `__tostring`
+metamethod (already invoked once by the original `print`) is never invoked a
+second time. Multiline splitting, control-byte sanitization, chunking, and
+truncation remain native-sink policy — not duplicated in Lua.
+
+**Non-stacking, process-lifetime.** A Relay-private marker
+(`Mods._relay._print_tee_installed`) makes the wrap idempotent: a partial or
+repeated entry cannot stack a second wrapper, and hot reload (which reuses the
+same Lua state but never re-runs this one-shot entry) neither removes nor
+reinstalls it. If `print` and `__print` refer to the same function, they share
+**one** wrapper (no nested/double capture); if distinct, each wraps its own
+original. A mod that later replaces global `print` **wins** — the wrapper does
+not fight it.
+
+**Honest DMF coverage boundary.** The tee sees exactly the wrapped `print` /
+`__print` surfaces. Relay loader output (routed through `__print`) is captured;
+a DMF/mod path is captured **only if** its runtime ultimately calls one of those
+wrapped globals. DMF's `mod:info` / `mod:warning` / `mod:error` and other
+logging APIs may bypass them — whether they are tee'd is a black-box
+observation (the operator can confirm with the `lua_logs_probe`), never an
+assumption. The tee never wraps DMF methods directly and introduces no public
+mod logging interface.
 
 ## The DMF load sequence
 

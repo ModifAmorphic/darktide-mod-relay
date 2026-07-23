@@ -21,6 +21,8 @@
  *   --log-level <level>        [RELAY_LOG_LEVEL]                  info
  *   --steam-app-id <id>        [RELAY_STEAM_APP_ID]               1361210
  *   --version                  (value-less)                      print version and exit
+ *   --lua-logs                 (value-less)                      tee Lua print output into relay.log
+ *                                                                [RELAY_LUA_LOGS=1] (default: off)
  *   --                         (end-of-options separator)        rest-of-line forwarded to the game
  *
  * `--` ends Relay's option parsing: EVERY token after it is forwarded to the
@@ -74,6 +76,7 @@
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
+#define ENV_LUA_LOGS     "RELAY_LUA_LOGS"   /* exact value "1" enables the lua-print sink */
 
 /* Named event for the launcher<->shell hook-ready handshake. Created
  * session-local (no Global\ prefix — avoids SeCreateGlobalPrivilege; launcher
@@ -385,6 +388,17 @@ static int read_env(const char *env_name, char *out, size_t outsz) {
     return 1;
 }
 
+/* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
+ * empty, "0", "true", whitespace, oversized (would truncate the probe buffer),
+ * and all other values return 0. This is the exact-match policy for the
+ * value-less RELAY_LUA_LOGS switch: only the canonical "1" enables. */
+static int env_is_exact_one(const char *env_name) {
+    char buf[16];
+    DWORD n = GetEnvironmentVariableA(env_name, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return 0;
+    return strcmp(buf, "1") == 0 ? 1 : 0;
+}
+
 /* Fills dir_buf with the launcher exe's directory (no trailing backslash), or
  * "." if it can't be determined (GetModuleFileNameA failed/truncated, or no
  * path separator present). */
@@ -446,6 +460,16 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
          * main() prints the build-injected version and exits 0. */
         if (strcmp(flag, "--version") == 0) {
             out->show_version = 1;
+            continue;
+        }
+
+        /* --lua-logs: value-less flag. Does NOT consume the following token
+         * (so {"--lua-logs","--game-binary","G"} still parses --game-binary).
+         * Sets the parsed lua_logs_enabled field; relay_resolve_config turns
+         * it into the resolved cfg->lua_logs_enabled (flag > env > default).
+         * Only recognized before `--` (after `--` it is a raw game arg). */
+        if (strcmp(flag, "--lua-logs") == 0) {
+            out->lua_logs_enabled = 1;
             continue;
         }
 
@@ -517,6 +541,12 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
         ? args->steam_app_id
         : (read_env(ENV_STEAM_APP_ID, g_steam_app_id_buf, sizeof(g_steam_app_id_buf))
               ? g_steam_app_id_buf : RELAY_DEFAULT_STEAM_APPID);
+
+    /* lua_logs_enabled: an explicit --lua-logs flag enables; otherwise only the
+     * exact env value RELAY_LUA_LOGS=1 enables. Default off. No negative
+     * switch — unset/empty/"0"/"true"/whitespace/oversized/all-other-values
+     * all resolve to disabled. */
+    cfg->lua_logs_enabled = args->lua_logs_enabled ? 1 : env_is_exact_one(ENV_LUA_LOGS);
 }
 
 /* ---- usage --------------------------------------------------------------- */
@@ -546,6 +576,11 @@ static void print_usage(FILE *out, const char *prog) {
         "  --steam-app-id <id>    Steam app id\n"
         "                         [env: RELAY_STEAM_APP_ID]\n"
         "                         [default: 1361210]\n"
+        "\n"
+        "  --lua-logs              include Lua print output in relay.log\n"
+        "                         (value-less; only the exact env value\n"
+        "                         RELAY_LUA_LOGS=1 enables)\n"
+        "                         [env: RELAY_LUA_LOGS=1] [default: off]\n"
         "\n"
         "  --                     end-of-options separator: every token after\n"
         "                         -- is forwarded to the game verbatim, in\n"
@@ -620,6 +655,16 @@ int main(int argc, char **argv) {
     SetEnvironmentVariableA(ENV_LOG_LEVEL, cfg.log_level);
     if (cfg.mod_path) {
         SetEnvironmentVariableA(ENV_MOD_PATH, cfg.mod_path);
+    }
+    /* Canonical child inheritance for the value-less lua-print switch: set the
+     * exact "1" when enabled, or REMOVE it when disabled so a stale parent
+     * value can't leak into the child as a non-"1" (the shell snapshots only
+     * the exact "1"). Preserves flag > env > default: the resolved boolean is
+     * the single source of truth re-exported here. */
+    if (cfg.lua_logs_enabled) {
+        SetEnvironmentVariableA(ENV_LUA_LOGS, "1");
+    } else {
+        SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
     }
 
     /* The injected DLL is hardcoded next to the launcher. Existence of

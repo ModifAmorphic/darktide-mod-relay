@@ -63,6 +63,7 @@
 
 #include "relay_discovery.h"
 #include "trampoline.h"
+#include "log_sink.h"
 #include "MinHook.h"
 
 #ifndef RELAY_VERSION
@@ -84,6 +85,28 @@ typedef int  (*loadbuffer_t)(lua_State *L, const char *buf, size_t size, const c
 typedef int  (*pcall_t)(lua_State *L, int nargs, int nresults, int errfunc);
 typedef const char *(*tolstring_t)(lua_State *L, int idx, size_t *len);
 
+/* ---- lua-print sink: LuaJIT 2.1 / Lua 5.1 C-API constants + types ----
+ * Grounded against /usr/include/luajit-2.1/lua.h (LuaJIT 2.1.1784580905,
+ * tracking Lua 5.1). Defined locally — the shell does not link lua.h — and
+ * consumed only via RVAs already present in the discovered address table (no
+ * new discovery, dependency, hook, or trampoline-chunk contract):
+ *   LUA_GLOBALSINDEX = -10002   (lua.h:38, the pseudo-index for the globals
+ *                                table; lua_setglobal is a macro over
+ *                                lua_setfield(L, LUA_GLOBALSINDEX, s) per
+ *                                lua.h:278, so we call setfield directly)
+ *   LUA_TSTRING = 4             (lua.h:79)
+ *   lua_CFunction = int(*)(lua_State*)               (lua.h:53)
+ *   lua_pushcclosure(L, fn, n) -> void               (lua.h:169)
+ *   lua_setfield(L, idx, k) -> void                  (lua.h:192; pops top into t[k])
+ *   lua_type(L, idx) -> int                          (lua.h:140)
+ *   lua_tolstring(L, idx, &len) -> const char*       (lua.h:150; already resolved) */
+#define LUA_GLOBALSINDEX (-10002)
+#define LUA_TSTRING      4
+typedef int  (*lua_CFunction)(lua_State *L);
+typedef void (*pushcclosure_t)(lua_State *L, lua_CFunction fn, int n);
+typedef void (*setfield_t)(lua_State *L, int idx, const char *k);
+typedef int  (*type_t)(lua_State *L, int idx);
+
 /* ---- resolved from the discovered RVAs ----
  * Only the C-API pointers the production trampoline consumes. The other
  * discovered anchors (lua_getfield/getfenv/setfenv/openlibs/type, the engine
@@ -96,6 +119,13 @@ static gettop_t     g_lua_gettop = NULL;
 static settop_t     g_lua_settop = NULL;
 static loadbuffer_t g_lua_loadbuffer = NULL;   /* loads the staged chunk */
 static tolstring_t  g_lua_tolstring = NULL;    /* reads the chunk's status-string return */
+
+/* lua-print sink pointers (existing discovered RVAs, no new discovery). Only
+ * dereferenced when the sink is enabled; their absence is nonfatal (the sink
+ * logs one warning and mod loading continues). */
+static type_t         g_lua_type = NULL;
+static pushcclosure_t g_lua_pushcclosure = NULL;
+static setfield_t     g_lua_setfield = NULL;
 
 static uint8_t   *g_module_base = NULL;      /* Darktide.exe base */
 static HMODULE    g_hmodule = NULL;          /* this DLL's handle (self-locate mod_loader) */
@@ -135,6 +165,27 @@ static char            g_trampoline_chunk[4096];   /* NUL-terminated chunk; len 
 static size_t          g_trampoline_chunk_len = 0;
 static volatile LONG   g_trampoline_done = 0;      /* one-shot: trampoline fired at pcall#1 */
 
+/* ---- lua-print sink ----
+ * Default-off opt-in: snapshot the exact RELAY_LUA_LOGS=1 once at worker
+ * startup. When enabled and the required C-API pointers resolve, the trampoline
+ * registers a private C callback as the temporary Lua global
+ * __mod_relay_lua_log_sink (consumed by init.lua's wrapper in a later task).
+ * This slice implements only the native callback + safe structured emission.
+ * When disabled, nothing is published and there is no per-print cost. */
+#define ENV_LUA_LOGS        "RELAY_LUA_LOGS"             /* exact value "1" enables */
+#define LUA_LOG_SINK_GLOBAL "__mod_relay_lua_log_sink"   /* temp global set on the VM */
+static int g_lua_log_sink_enabled = 0;   /* snapshot of RELAY_LUA_LOGS=1 at startup */
+
+/* Serializes every relay_log physical-line emission (OutputDebugStringA + the
+ * fputs/fflush pair) so worker-thread and Lua-thread (sink) lines never
+ * interleave mid-line — this is the single logger-wide critical section.
+ * SRWLOCK is zero-initialized ({0} == SRWLOCK_INIT), so no explicit init.
+ * Acquired and released ONLY inside relay_log (one acquire, one release, no
+ * early return between them). lua_log_sink_cb does NOT take this lock itself:
+ * it reaches relay_log through the shell_log_sink_emit bridge, so holding this
+ * non-reentrant SRWLOCK across that call would self-deadlock. */
+static SRWLOCK g_log_lock = {0};
+
 /* ---- structured logging ----
  * Every line: "<local ts+UTC offset> <LEVEL> <component>: <message>\n" to both
  * OutputDebugStringA and g_log. The timestamp is local time with an ISO-8601
@@ -172,6 +223,16 @@ static int resolve_log_level(void) {
     if (log_name_ieq(buf, "debug")) return RELAY_LOG_DEBUG;
     if (log_name_ieq(buf, "trace")) return RELAY_LOG_TRACE;
     return RELAY_LOG_INFO;
+}
+
+/* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
+ * empty, "0", "true", whitespace, oversized, and all other values return 0.
+ * This is the exact-match policy for the value-less RELAY_LUA_LOGS switch. */
+static int env_is_exact_one(const char *env_name) {
+    char buf[16];
+    DWORD n = GetEnvironmentVariableA(env_name, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return 0;
+    return strcmp(buf, "1") == 0 ? 1 : 0;
 }
 
 static void relay_log(int level, const char *component, const char *fmt, ...) {
@@ -226,11 +287,21 @@ static void relay_log(int level, const char *component, const char *fmt, ...) {
     int n = snprintf(line, sizeof(line), "%s %s %s: %s", ts, lname, component, msg);
     if (n < 0) return;
 
+    /* Emission critical section: serialize OutputDebugStringA + the file write
+     * together under g_log_lock so concurrent callers (the worker thread and
+     * the Lua-thread sink callback, both of which reach here) never interleave
+     * a single physical line. All earlier work (level filter, timestamp, format)
+     * runs lock-free on local buffers; the two format-error returns above happen
+     * before the lock is taken, so no early-return path can leak it. The lock is
+     * non-reentrant — lua_log_sink_cb intentionally does not hold it across the
+     * relay_log call it makes via shell_log_sink_emit. */
+    AcquireSRWLockExclusive(&g_log_lock);
     OutputDebugStringA(line);
     if (g_log) {
         fputs(line, g_log);
         fflush(g_log);
     }
+    ReleaseSRWLockExclusive(&g_log_lock);
 }
 
 static void open_log(void) {
@@ -358,6 +429,46 @@ static void trampoline_stage_chunk(void) {
               g_trampoline_chunk_len);
 }
 
+/* ---- lua-print sink callback + emission bridge ---- */
+
+/* log_sink_render → relay_log bridge. log_sink_render has stripped every
+ * CR/LF/NUL/control byte from the line, so this is safe format-string use: the
+ * format string is a literal ("%.*s\n"), and `line` is only ever the %.*s data
+ * argument — raw bytes can never become the format string, and any % in the
+ * data is preserved as a literal byte by %.*s. Honors the explicit callback
+ * length: log_sink_render guarantees `len` sanitized bytes with no embedded
+ * NUL, and len <= LOG_SINK_LINE_BUDGET (768), so the int narrowing is safe and
+ * the precision caps the write at exactly `len` (the contract's authoritative
+ * boundary, not the incidental terminator). Runs under g_log_lock (taken per
+ * line inside relay_log); `ud` is unused. */
+static void shell_log_sink_emit(const char *line, size_t len, void *ud) {
+    (void)ud;
+    if (len > LOG_SINK_LINE_BUDGET) len = LOG_SINK_LINE_BUDGET;  /* defensive */
+    relay_log(RELAY_LOG_INFO, "lua-print", "%.*s\n", (int)len, line);
+}
+
+/* The native callback published to Lua as __mod_relay_lua_log_sink. Expects
+ * exactly one actual Lua string; uses lua_type (no hostile-value coercion — a
+ * number/nil/table/extra-args call is ignored, not errored). Reads it with
+ * lua_tolstring + explicit length, emits it through log_sink_render (which
+ * splits/sanitizes into structured INFO lua-print lines), and returns zero
+ * values. Never calls into Lua (no lua_error longjmp), never retains L or the
+ * string (the pointer is only valid for the duration of the call). Does NOT
+ * take g_log_lock itself: serialization happens per physical line inside
+ * relay_log (reached via shell_log_sink_emit), and holding that non-reentrant
+ * SRWLOCK across the call would self-deadlock. */
+static int lua_log_sink_cb(lua_State *L) {
+    if (g_lua_gettop(L) != 1 || g_lua_type(L, 1) != LUA_TSTRING) {
+        return 0;  /* malformed call: wrong arg count or not a string */
+    }
+    size_t len = 0;
+    const char *s = g_lua_tolstring(L, 1, &len);
+    if (!s) return 0;  /* defensive: tolstring on a string should not fail */
+
+    log_sink_render(s, len, shell_log_sink_emit, NULL);
+    return 0;
+}
+
 /*
  * Execute the staged trampoline chunk on the engine's Lua thread at pcall#1.
  * Reads back the chunk's status-string return and logs it as
@@ -382,6 +493,40 @@ static void trampoline_run(lua_State *L) {
     }
 
     int base = g_lua_gettop(L);
+
+    /* Register the lua-print sink (when enabled) as the temporary Lua global
+     * __mod_relay_lua_log_sink, BEFORE loading/running the chunk. The chunk's
+     * init.lua is the consumer in a later task; this slice only publishes the
+     * callback. Done before the chunk so the wrapper can rely on the global
+     * existing from the loader's first instruction.
+     *
+     * Zero net stack effect (provably, against the grounded LuaJIT 2.1 ABI):
+     * lua_pushcclosure(fn, 0) pushes exactly one value (the 0-upvalue closure),
+     * and lua_setfield(L, LUA_GLOBALSINDEX, k) pops exactly that one value
+     * (setfield does globals[k] = top-of-stack; pop). So +1 -1 = 0, and the
+     * chunk load below still sees the stack at `base`.
+     *
+     * If a required C-API pointer is unavailable (defensive — these RVAs are
+     * always in the canonical table), log one warning and continue; mod loading
+     * must never depend on the optional print sink. tolstring + gettop are
+     * already guaranteed non-NULL by the trampoline_run guard above. */
+    if (g_lua_log_sink_enabled) {
+        if (g_lua_pushcclosure && g_lua_setfield && g_lua_type) {
+            g_lua_pushcclosure(L, &lua_log_sink_cb, 0);
+            g_lua_setfield(L, LUA_GLOBALSINDEX, LUA_LOG_SINK_GLOBAL);
+            /* Component is "trampoline", not "lua-print": this is the pcall#1
+             * setup step (plumbing), not a captured Lua line — "lua-print" is
+             * reserved for captured print output emitted via the sink. */
+            relay_log(RELAY_LOG_INFO, "trampoline",
+                      "lua-print sink registered as global %s\n",
+                      LUA_LOG_SINK_GLOBAL);
+        } else {
+            relay_log(RELAY_LOG_WARN, "trampoline",
+                      "lua-print sink not registered: a required C-API pointer "
+                      "is NULL (pushcclosure/setfield/type); lua-print disabled "
+                      "this run\n");
+        }
+    }
 
     /* Load the chunk (pushes a function at base+1). On parse failure the error
      * message is on top; log it and bail with a clean stack. */
@@ -481,8 +626,13 @@ static int install_hook(void *target, void *detour, void **original, const char 
 static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     g_log_level = resolve_log_level();
+    g_lua_log_sink_enabled = env_is_exact_one(ENV_LUA_LOGS);
     open_log();
     relay_log(RELAY_LOG_INFO, "shell", "=== DllMain worker started (pid=%lu) ===\n", GetCurrentProcessId());
+
+    if (g_lua_log_sink_enabled) {
+        relay_log(RELAY_LOG_INFO, "shell", "lua-print sink enabled (RELAY_LUA_LOGS=1)\n");
+    }
 
     /* The host process command line as the game sees it — the authoritative
      * child-side view of what the launcher built: the quoted exe + the
@@ -543,6 +693,13 @@ static DWORD WINAPI worker(LPVOID arg) {
     g_lua_settop     = (settop_t)(g_module_base + tbl.lua_settop);
     g_lua_loadbuffer = (loadbuffer_t)(g_module_base + tbl.lual_loadbuffer);
     g_lua_tolstring  = (tolstring_t)(g_module_base + tbl.lua_tolstring);
+
+    /* lua-print sink pointers: existing discovered RVAs (no new discovery).
+     * Only dereferenced when the sink is enabled; resolved unconditionally so
+     * the registration check is a simple NULL test. */
+    g_lua_type         = (type_t)(g_module_base + tbl.lua_type);
+    g_lua_pushcclosure = (pushcclosure_t)(g_module_base + tbl.lua_pushcclosure);
+    g_lua_setfield     = (setfield_t)(g_module_base + tbl.lua_setfield);
 
     /* Install the two production hooks. Both are required/fatal: without
      * lua_newstate the Lua state is never captured, and without lua_pcall the

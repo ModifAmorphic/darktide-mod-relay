@@ -53,7 +53,10 @@ src/                Mod Relay — the injected modding runtime + injector
   target/           cargo build artifacts (gitignored)
   discovery/        Rust crate: LuaJIT discovery engine (pure library, C-ABI staticlib)
   shell/            C shell — the injected DLL (DllMain, MinHook, lua_newstate +
-                      lua_pcall hooks, production trampoline @ pcall#1)
+                      lua_pcall hooks, production trampoline @ pcall#1; log_sink.c
+                      is the pure, I/O-free lua-print line-sanitization helper for
+                      the optional print tee, compiled into both the DLL and the
+                      C unit tests)
   launcher/         C launcher — CreateRemoteThread injector + hook-ready handshake
   mod_loader/       the mod loader — Relay's runtime-staged Lua loader (LuaJIT):
                       init.lua entry + modules (path/file/class_registry/
@@ -63,7 +66,14 @@ src/                Mod Relay — the injected modding runtime + injector
                       LuaJIT FFI module via the pre-wrap module loader
                       (Mods.original_require("ffi") — require("ffi") creates no
                       global in LuaJIT 2.1; bootstrap-private, degrades to nil +
-                      one diagnostic if unavailable); lifecycle.lua is the
+                      one diagnostic if unavailable); init.lua also owns the
+                      OPTIONAL Lua print tee (the process-lifetime, non-stacking
+                      print/__print wrapper that copies Lua print output into
+                      relay.log when --lua-logs/RELAY_LUA_LOGS=1 — retires the
+                      trampoline's private __mod_relay_lua_log_sink temp global
+                      before its idempotency guard; originals stay authoritative;
+                      covered by tests/test_lua_logs.lua + the
+                      tests/probes/observational/lua_logs_probe/ live probe); lifecycle.lua is the
                       bootstrap coordinator + the direct closure-wraps
                       (BootStateRequireGameScripts._state_update,
                       StateGame.update, GameStateMachine._change_state exit/enter
@@ -101,7 +111,8 @@ src/                Mod Relay — the injected modding runtime + injector
                       `make build` stages the entry + modules into bin/mod_loader/
                       (the Relay-controlled loader root, self-located by the
                       shell from its own DLL path and set as MOD_LOADER_DIR).
-  tests/            C unit tests (run via wine)
+  tests/            C unit tests (run via wine); includes the pure log_sink.c
+                      sanitizer tests (compiled directly, no Windows/Lua deps)
   README.md         the component README (developers / power users)
 docs/               architecture/ + reference/ (darktide/, community-tools/)
 .github/workflows/  CI: pr.yml (PR gate: mingw cross-compile + msvc native) +
@@ -159,7 +170,11 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   flag-looking token after `--` is a raw game arg. No `--` is the legacy
   exe-only launch. `--version` prints the build-injected product version (read
   from `.release-please-manifest.json` at build time) and exits — callers like
-  Curator use it for version comparison. See
+  Curator use it for version comparison. `--lua-logs` (env `RELAY_LUA_LOGS=1`,
+  exact value `1` only; default off) is a value-less switch that tees Lua
+  `print`/`__print` output into `relay.log` as `INFO lua-print:` lines (a tee,
+  never a redirect — console stays authoritative); the launcher canonicalizes
+  the child env to `1` or removes it. See
   `docs/architecture/MOD-RELAY.md` → `launcher/`
   for the full flag/env/default table + the env-var contract.
 - **Shell log** is `relay.log`, structured + level-filtered via `RELAY_LOG_LEVEL`
@@ -168,13 +183,20 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   time with an ISO-8601 UTC offset** that follows the system time zone (e.g.
   `2026-07-16T12:34:56-04:00`), and the worker logs a `launching <cmdline>`
   INFO line (the host process command line as the game sees it — the quoted exe
-  + forwarded game args) right after the startup banner. The mod loader's
-  Lua-side `print` lines (the `[mod_loader] …` lines), DMF, and mods go to
-  Darktide's **console log** (`console-*.log`, at
+  + forwarded game args) right after the startup banner. By default the mod
+  loader's Lua-side `print` lines (the `[mod_loader] …` lines), DMF, and mods go
+  to Darktide's **console log** (`console-*.log`, at
   `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
   under Proton) — NOT to `relay.log` and NOT to the Proton `steam-$APPID.log`
-  (Wine/Proton diagnostics only). See MOD-RELAY.md → Logging.
+  (Wine/Proton diagnostics only). With `--lua-logs`/`RELAY_LUA_LOGS=1` on,
+  Relay additionally copies `print`/`__print` output into `relay.log` as
+  `INFO lua-print:` lines (the console log stays complete/authoritative; it is a
+  tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua-print`
+  lines out of `relay.log` while the console log is unaffected. See MOD-RELAY.md
+  → Logging (native sink policy: 4096-byte input budget, 768-byte chunks,
+  CR/LF/CRLF split, `\xNN` for controls/NUL/DEL, one truncation marker, no new
+  hook — still exactly lua_newstate + lua_pcall).
 - **Loader failure diagnostics** are in Darktide's console log. Relay disables
   a standalone outer entry after its first escaped lifecycle error; an escaped
   `dmf` outer boundary stops the current generation without attributing an
