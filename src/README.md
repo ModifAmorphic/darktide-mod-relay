@@ -164,6 +164,7 @@ shell DLL, log file, and mod loader root all default next to the launcher exe.
 | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
 | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
+| `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; exact env value `1` enables) |
 | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game) |
 | `--version` | — (none) | — (prints the build-injected version; see below) |
 
@@ -207,6 +208,57 @@ mod_relay.exe --game-binary <exe> -- --lua-heap-mb-size 2048
 
 See [`docs/architecture/MOD-RELAY.md`](../docs/architecture/MOD-RELAY.md)
 → `launcher/` for the full table, the env-var contract, and logging details.
+
+### Logging (the two destinations + the optional Lua tee)
+
+Relay writes to **two** separate logs by default:
+
+- **`relay.log`** (next to the launcher; `--log-file`/`RELAY_LOG_FILE`) — the
+  C-side shell + trampoline log. Structured `<ts> <LEVEL> <component>: <msg>`,
+  level-filtered by `RELAY_LOG_LEVEL` (default `info`). Its one-line `OK`/`FAIL`
+  is the reliable bootstrap check.
+- **Darktide console log** (`console-*.log`, at
+  `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows;
+  `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
+  under Proton) — the mod loader's `[mod_loader] …` lines, DMF, and mods.
+  **Authoritative and complete** for Lua output; Relay never redirects or
+  suppresses it.
+
+**Optional Lua print tee** — `--lua-logs` (or `RELAY_LUA_LOGS=1`, exact value
+`1`; default off). When enabled, Relay wraps the engine's global `print` and
+`__print` **once per process** so every successful call through those surfaces
+is **also** copied into `relay.log` as structured `INFO  lua-print:` lines
+(after the original still goes to the console). It is a **tee, never a
+redirect**: the console log remains complete and authoritative.
+
+Coverage is **narrower than all Lua logs** — exactly what the wrapped `print` /
+`__print` surfaces see:
+
+- **Captured:** `print` / `__print` calls made after the wrapper installs at
+  pcall#1 — Relay's own loader output, plus any DMF/mod path routed through
+  those globals.
+- **Not captured:** a `print` reference captured before Relay wraps the globals,
+  DMF/mod APIs that bypass those globals (e.g. direct engine logging), native /
+  engine / Wine / Proton output, or every `console-*.log` line. DMF
+  `mod:info`/`warning`/`error` coverage depends on whether their black-box
+  runtime path ultimately calls the wrapped globals — observe, don't assume.
+
+Two interactions worth knowing:
+
+- Because captured lines are emitted at `INFO`, `--log-level warn`/`error`
+  filters them out of `relay.log` while the console log is unaffected.
+- The wrapper installs once (process-lifetime) and does not stack across hot
+  reload; a mod that later replaces global `print` wins (Relay does not fight
+  it).
+
+The launcher canonicalizes the child env: it sets `RELAY_LUA_LOGS=1` when
+enabled and **removes** it when disabled (a stale parent value cannot leak in as
+a non-`1`). Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves; that
+is the external non-launcher contract. See
+[`docs/architecture/MOD-RELAY.md`](../docs/architecture/MOD-RELAY.md) → Logging
+for the native sink's serialization/sanitization/budget policy, and
+[`docs/architecture/MOD_LOADER-DMF.md`](../docs/architecture/MOD_LOADER-DMF.md)
+for the wrapper's process-lifetime contract.
 
 ## Two roots
 

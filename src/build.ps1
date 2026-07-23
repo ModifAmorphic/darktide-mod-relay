@@ -26,7 +26,7 @@
       check                 verify relay_shell.dll is a valid PE with the
                             production seam (DllMain + relay_discover +
                             relay_discover_detail; test-only symbol absent)
-      c-tests               build + run the 5 C unit-test exes
+      c-tests               build + run the 6 C unit-test exes
       mod-loader-test       luajit mod_loader/tests/runner.lua (offline)
       test                  c-tests + cargo test + mod-loader-test
       clean                 cargo clean + remove bin\
@@ -252,7 +252,7 @@ function Invoke-Dll {
     # resolves the mismatch. (Verified: the unmodified CI commands reproduce
     # the LNK2019 failure on a standard VS 2022 Build Tools install.)
     Write-Host "Compiling C shell + MinHook sources..."
-    Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include /I shell\vendor\minhook\include /Fo:bin\obj\ shell\src\dllmain.c shell\vendor\minhook\src\buffer.c shell\vendor\minhook\src\hook.c shell\vendor\minhook\src\trampoline.c shell\vendor\minhook\src\hde\hde64.c'
+    Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include /I shell\vendor\minhook\include /Fo:bin\obj\ shell\src\dllmain.c shell\src\log_sink.c shell\vendor\minhook\src\buffer.c shell\vendor\minhook\src\hook.c shell\vendor\minhook\src\trampoline.c shell\vendor\minhook\src\hde\hde64.c'
 
     Write-Host "Compiling trampoline (relay_trampoline.obj to avoid MinHook name clash)..."
     Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include shell\src\trampoline.c /Fo:bin\obj\relay_trampoline.obj'
@@ -272,7 +272,7 @@ function Invoke-Dll {
     # Rust seam functions) make the DLL's export table match the Makefile
     # build's (mingw auto-exports them) and let `check` verify them.
     Write-Host "Linking bin\relay_shell.dll..."
-    Invoke-WithVcvars 'link /nologo /DLL /OUT:bin\relay_shell.dll bin\obj\dllmain.obj bin\obj\buffer.obj bin\obj\hook.obj bin\obj\trampoline.obj bin\obj\hde64.obj bin\obj\relay_trampoline.obj bin\obj\relay_shell.res target\x86_64-pc-windows-msvc\release\relay_discovery.lib psapi.lib kernel32.lib user32.lib ws2_32.lib userenv.lib bcrypt.lib ntdll.lib /NODEFAULTLIB:libgcc.lib /EXPORT:DllMain /EXPORT:relay_discover /EXPORT:relay_discover_detail'
+    Invoke-WithVcvars 'link /nologo /DLL /OUT:bin\relay_shell.dll bin\obj\dllmain.obj bin\obj\log_sink.obj bin\obj\buffer.obj bin\obj\hook.obj bin\obj\trampoline.obj bin\obj\hde64.obj bin\obj\relay_trampoline.obj bin\obj\relay_shell.res target\x86_64-pc-windows-msvc\release\relay_discovery.lib psapi.lib kernel32.lib user32.lib ws2_32.lib userenv.lib bcrypt.lib ntdll.lib /NODEFAULTLIB:libgcc.lib /EXPORT:DllMain /EXPORT:relay_discover /EXPORT:relay_discover_detail'
 
     Write-Host "dll: complete" -ForegroundColor Green
 }
@@ -411,7 +411,7 @@ function Invoke-Check {
 }
 
 function Invoke-CTests {
-    Write-Host "=== c-tests: build + run the 5 C unit-test exes ===" -ForegroundColor Cyan
+    Write-Host "=== c-tests: build + run the 6 C unit-test exes ===" -ForegroundColor Cyan
     Ensure-Bin
     Ensure-ObjDir
 
@@ -434,10 +434,11 @@ function Invoke-CTests {
     Invoke-WithVcvars 'cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fo:bin\obj\ /Fe:bin\test_config.exe tests\test_config.c bin\obj\test_runner.obj bin\obj\launcher_test.obj kernel32.lib shell32.lib'
     Invoke-WithVcvars 'cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fo:bin\obj\ /Fe:bin\test_quoting.exe tests\test_quoting.c bin\obj\test_runner.obj bin\obj\launcher_test.obj kernel32.lib shell32.lib'
     Invoke-WithVcvars 'cl /nologo /O2 /DRELAY_VERSION=\"%RELAY_VERSION%\" /I shell\include /Fo:bin\obj\ /Fe:bin\test_trampoline.exe tests\test_trampoline.c bin\obj\test_runner.obj kernel32.lib'
+    Invoke-WithVcvars 'cl /nologo /O2 /I shell\include /Fo:bin\obj\ /Fe:bin\test_log_sink.exe tests\test_log_sink.c bin\obj\test_runner.obj kernel32.lib'
 
     # Run each test exe directly (no wine on Windows native).
     Write-Host "=== C unit tests ==="
-    foreach ($exe in @('test_steam_env', 'test_injection', 'test_config', 'test_quoting', 'test_trampoline')) {
+    foreach ($exe in @('test_steam_env', 'test_injection', 'test_config', 'test_quoting', 'test_trampoline', 'test_log_sink')) {
         Write-Host "--- $exe ---"
         & ".\bin\$exe.exe"
         if ($LASTEXITCODE -ne 0) { throw "$exe failed (exit $LASTEXITCODE)" }

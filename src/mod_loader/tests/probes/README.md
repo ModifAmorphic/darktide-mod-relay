@@ -19,11 +19,11 @@ They do not reproduce or imitate any third-party loader, framework, or mod.
 
 ## Categories
 
-| Category | Path | Shape | Safety |
-| --- | --- | --- | --- |
-| **observational** | `observational/` | single probe folder | read-only / behavioral |
-| **metadata** | `metadata/crashify/` | complete scenario bundle | read-only |
-| **failure_injection** | `failure_injection/standalone/`, `failure_injection/framework_boundary/` | complete scenario bundle | **injects one intended error** |
+| Category | Path | Safety |
+| --- | --- | --- |
+| **observational** | `observational/<scenario>/` | read-only / behavioral |
+| **metadata** | `metadata/crashify/` | read-only |
+| **failure_injection** | `failure_injection/standalone/`, `failure_injection/framework_boundary/` | **injects one intended error** |
 
 - **observational** — passive recorders that observe loader callback sequences
   and seams. No injected failures.
@@ -33,40 +33,39 @@ They do not reproduce or imitate any third-party loader, framework, or mod.
   error to exercise Relay's outer-entry failure containment. Stage only into
   isolated mod roots; never overlay onto a profile you care about.
 
-## Two staging shapes
+## One staging shape — the complete scenario bundle
 
-A probe is staged into `<mod_path>/mods/` (where `<mod_path>` is the value of
-Relay's `--mod-path` flag — the directory that *contains* a `mods/` subdir).
+Every probe under `probes/` ships as the **same self-contained scenario
+bundle**. A scenario's root directory *is* the `<mod_path>` (the directory that
+*contains* a `mods/` subdir). The layout is uniform:
 
-### Shape A — single observational folder
+```
+<scenario>/
+  README.md            scenario launch, evidence, cleanup, safety
+  mods/
+    mods.lst           authoritative order (one entry per probe folder)
+    <probe>/
+      <probe>.mod
+```
 
-Use for `observational/` probes. Each probe is one folder:
+To stage a scenario:
 
-1. Copy the probe's leaf folder (e.g. `observational/shutdown_probe/`) into
-   `<mod_path>/mods/shutdown_probe/` (i.e. the folder whose name matches the
-   `.mod`/`mods.lst` entry).
-2. Add (or merge) a line `<probe>` into `<mod_path>/mods/mods.lst`.
-3. Launch, exercise, exit.
-4. Read the probe's log and/or grep the console log for its prefix.
-5. Remove the line from `mods.lst` when done.
+1. Either point `--mod-path` straight at the scenario root:
+   ```
+   mod_relay.exe --game-binary <exe> --mod-path <path-to-probes>/<category>/<scenario>
+   ```
+   …or copy the prepared **scenario root** (as a unit) into your own staging
+   directory and point `--mod-path` at the copy.
+2. Launch, exercise the scenario per its README, then exit.
+3. Read the probe's scenario log and/or grep the Darktide console log for its
+   `[PREFIX]`.
 
-### Shape B — complete scenario bundle
-
-Use for `metadata/` and `failure_injection/` scenarios. The bundle ships a
-ready-to-copy `mods/` subtree (the authoritative `mods.lst` + every probe
-folder + any mode files + replacement `.lst` files). The operator copies the
-whole subtree into an **isolated** `<mod_path>/mods/` with no merging and no
-Lua editing:
-
-1. Create an empty staging root containing a `mods/` subdir.
-2. Copy the bundle's `mods/` contents into `<mod_path>/mods/`.
-3. Launch with `--mod-path <mod_path>`.
-4. Follow the scenario README for evidence, expected counts, and the
-   file-copy-only recovery procedures.
-
-For scenario bundles, **never hand-edit `mods.lst`** when the scenario ships a
-ready replacement `.lst` (e.g. `mods-without-alpha.lst`) — copy the supplied
-file over the staged one.
+There is **no** per-probe folder copying, **no** manual `mods.lst` line
+editing, and **no** list merging at staging time — each scenario ships its own
+authoritative `mods.lst` so the order it was validated against is the order
+that loads. For scenarios that ship a ready replacement `.lst` for a recovery
+step (e.g. `mods-without-alpha.lst`), copy that supplied file over the staged
+`mods.lst` rather than hand-editing it.
 
 ## Console + log locations
 
@@ -78,9 +77,15 @@ file over the staged one.
 - **Scenario logs** (per-probe or shared, depending on the probe). Written via
   the rooted `Mods.lua.io.open` (rooted at `<mod_path>/mods/`), append+flushed
   per line so evidence survives console-log truncation at process exit.
-- **Relay shell log** is `relay.log`; **neither** the probes' `[PREFIX]` lines
-  **nor** Relay's `[mod_loader]` lines go there — they go to the Darktide
-  console log and the scenario logs above.
+- **Relay shell log** is `relay.log`. By default (`--lua-logs` off) **neither**
+  the probes' `[PREFIX]` lines **nor** Relay's `[mod_loader]` lines go there —
+  they go to the Darktide console log and the scenario logs above. When the user
+  opts in with `--lua-logs` (or `RELAY_LUA_LOGS=1`), Relay tees Lua `print` /
+  `__print` output into `relay.log` as structured `INFO  lua-print:` lines too —
+  so probe/loader lines that traverse those wrapped surfaces ALSO appear in
+  `relay.log`. The Darktide console log remains authoritative and unchanged
+  either way; the tee only adds `relay.log` copies. See
+  [`observational/lua_logs_probe/README.md`](observational/lua_logs_probe/README.md).
 
 ## Safety labels
 
@@ -89,7 +94,7 @@ file over the staged one.
   clean pattern).
 - **behavioral** — the probe overrides a loader seam to demonstrate hookability
   (e.g. suppresses the built-in reload gesture while loaded). Reversible by
-  removing the entry from `mods.lst`.
+  removing the scenario from `--mod-path`.
 - **injects one intended error** — the probe **intentionally** raises one
   lifecycle error. This is the behavior under test. Stage only into an
   isolated mod root and follow the scenario README's recovery procedure. The
@@ -100,10 +105,11 @@ file over the staged one.
 
 ### observational/
 
-| Probe | Prefix | Log | Purpose |
-| --- | --- | --- | --- |
-| [`shutdown_probe/`](observational/shutdown_probe/shutdown_probe.mod) | `[SHUTDOWN_PROBE]` | `shutdown_probe/shutdown_probe.log` | Records the public lifecycle-callback sequence (`on_game_state_changed` / `on_reload` / `on_unload`, plus `init`) to verify state-exit / reload / unload ordering (e.g. that a final state-exit dispatches before `on_unload` on shutdown). |
-| [`reload_seam_probe/`](observational/reload_seam_probe/reload_seam_probe.mod) | (console only) | — | Overrides `CLASS.ModManager._check_reload` to return `false`, demonstrating the reload trigger-detection seam is hookable (the built-in LEFT Ctrl + LEFT Shift + R gesture is suppressed while this is loaded). |
+| Scenario | Prefix | Log | Purpose | README |
+| --- | --- | --- | --- | --- |
+| `shutdown_probe/` | `[SHUTDOWN_PROBE]` | `shutdown_probe/shutdown_probe.log` | Records the public lifecycle-callback sequence (`on_game_state_changed` / `on_reload` / `on_unload`, plus `init`) to verify state-exit / reload / unload ordering (e.g. that a final state-exit dispatches before `on_unload` on shutdown). | [`shutdown_probe/README.md`](observational/shutdown_probe/README.md) |
+| `reload_seam_probe/` | (console only) | — | Overrides `CLASS.ModManager._check_reload` to return `false`, demonstrating the reload trigger-detection seam is hookable (the built-in LEFT Ctrl + LEFT Shift + R gesture is suppressed while this is loaded). | [`reload_seam_probe/README.md`](observational/reload_seam_probe/README.md) |
+| `lua_logs_probe/` | `[LUA_LOGS_PROBE]` | `lua_logs_probe/lua_logs_probe.log` | Observes Relay's optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`): emits unique markers through `print` and `__print` across one case per tee policy (simple, multi-arg, multiline+CRLF, `%` text, control bytes, over-budget truncation). Read-only. | [`lua_logs_probe/README.md`](observational/lua_logs_probe/README.md) |
 
 ### metadata/
 
@@ -121,12 +127,12 @@ file over the staged one.
 ## Operator workflow at a glance
 
 1. Pick a scenario from the table above.
-2. Create an empty `<mod_path>/mods/` (or, for observational single-folder
-   probes, use an existing staging profile and add one line to its `mods.lst`).
-3. Copy the prepared assets. No prompt copy/paste, no Lua editing.
-4. Launch with `--mod-path <mod_path>`; reach the main menu.
-5. Read the scenario log (and/or grep the Darktide console log for the prefix).
-6. For failure-injection recovery or stale-key reload, copy the supplied
+2. Point `--mod-path` at the scenario root (or copy the scenario root as a unit
+   into your own staging directory and point `--mod-path` at the copy). No
+   prompt copy/paste, no Lua editing, no `mods.lst` line editing.
+3. Launch with `--mod-path <mod_path>`; reach the main menu.
+4. Read the scenario log (and/or grep the Darktide console log for the prefix).
+5. For failure-injection recovery or stale-key reload, copy the supplied
    `.lst` / mode file over the staged one, then hot reload
    (Left Ctrl + Left Shift + R) — developer mode must already be persisted true
    for in-process recovery; otherwise restart is the expected path.

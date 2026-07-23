@@ -44,6 +44,7 @@ typedef struct {
     const char *steam_app_id;     /* default: 1361210                           */
     const char **game_arguments;  /* no env/default: borrowed `--` tail or NULL */
     int          game_argument_count;
+    int          lua_logs_enabled; /* default off (RELAY_LUA_LOGS=1 or --lua-logs) */
 } relay_config;
 
 /*
@@ -64,6 +65,7 @@ typedef struct {
     const char **game_arguments;  /* borrowed argv tail after `--` (NULL if none) */
     int          game_argument_count;
     int          show_version;  /* set by the value-less --version flag        */
+    int          lua_logs_enabled; /* set by the value-less --lua-logs flag    */
 } relay_parsed_args;
 
 /*
