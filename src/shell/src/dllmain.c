@@ -19,7 +19,8 @@
  * Production trampoline (the proven engine-context entry):
  *   On the FIRST lua_pcall (pcall #1) — one-shot, BEFORE the original pcall —
  *   the pcall detour runs the staged chunk. The chunk sets MOD_LOADER_DIR +
- *   RELAY_MOD_PATH, io.opens the staged entry (`<MOD_LOADER_DIR>/init.lua`),
+ *   RELAY_MOD_PATH, hands off the build-injected product version privately,
+ *   io.opens the staged entry (`<MOD_LOADER_DIR>/init.lua`),
  *   reads it, loadstrings it, and runs it. This captures the engine's
  *   io/loadstring before the engine strips them from globals (~pcall#10); a
  *   chunk injected at pcall#1 sees the globals table directly (no setfenv
@@ -63,6 +64,10 @@
 #include "relay_discovery.h"
 #include "trampoline.h"
 #include "MinHook.h"
+
+#ifndef RELAY_VERSION
+#define RELAY_VERSION "0.0.0-dev"
+#endif
 
 /* Named event for the launcher<->shell hook-ready handshake. The launcher
  * creates this (session-local; no Global\ prefix) before injecting the DLL
@@ -335,8 +340,8 @@ static void trampoline_stage_chunk(void) {
         return;
     }
 
-    int n = trampoline_build_chunk(mod_loader_dir, mod_path, path,
-                                   g_trampoline_chunk, sizeof(g_trampoline_chunk));
+    int n = trampoline_build_chunk(mod_loader_dir, mod_path, path, RELAY_VERSION,
+                                    g_trampoline_chunk, sizeof(g_trampoline_chunk));
     if (n < 0) {
         relay_log(RELAY_LOG_INFO, "trampoline", "chunk build failed (escape/overflow); trampoline will be SKIPPED\n");
         return;

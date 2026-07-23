@@ -8,9 +8,10 @@
  * the mod loader root (init.lua + its modules — runtime-controlled, self-
  * located by the shell next to the DLL) joined with init.lua into the entry
  * path, plus the mod root (DMF + user mods — user/mod-manager-controlled,
- * optional). trampoline_build_chunk takes all three: it sets MOD_LOADER_DIR
- * from the mod loader root, RELAY_MOD_PATH from the mod root (empty string
- * if NULL/empty), and bakes the joined entry path into the io.open call. This
+ * optional). trampoline_build_chunk takes both roots, the entry, and the
+ * build-injected product version: it sets MOD_LOADER_DIR from the mod loader
+ * root, RELAY_MOD_PATH from the mod root (empty string if NULL/empty), hands off
+ * the private version value, and bakes the joined entry path into io.open. This
  * file has NO Windows, Lua, or hook dependencies — only string ops — so it
  * compiles directly into both the shell DLL and the C unit-test exes.
  */
@@ -19,19 +20,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The trampoline chunk template. The three `%s` receive, in order: the escaped
+/* The trampoline chunk template. The four `%s` receive, in order: the escaped
  * mod loader root (set as MOD_LOADER_DIR — an internal global, NOT a user env
  * var), the escaped mod root (set as RELAY_MOD_PATH — the empty string when
- * the mod root is unset), and the escaped entry-file path (opened + loaded +
+ * the mod root is unset), the complete version assignment value (a quoted,
+ * escaped string or nil), and the escaped entry-file path (opened + loaded +
  * run). The chunk returns "OK" or a "FAIL <step>: <err>" status string.
  * Verbatim step order (io.open -> read -> loadstring -> run), guarded at each
  * step so the only way it propagates an error is an unguarded step (e.g.
  * f:read, which the outer pcall then catches and reports as CHUNK PCALL
- * FAILED). The two globals are the path handoff to the loader — not a
- * Lua-facility shim. */
+ * FAILED). These globals are a private bootstrap handoff — not a Lua-facility
+ * shim or public compatibility surface. */
 static const char TRAMPOLINE_CHUNK_FMT[] =
     "MOD_LOADER_DIR = \"%s\"\n"
     "RELAY_MOD_PATH = \"%s\"\n"
+    "MOD_RELAY_VERSION = %s\n"
     "local f, err = io.open(\"%s\", \"r\")\n"
     "if not f then return \"FAIL io.open: \" .. tostring(err) end\n"
     "local data = f:read(\"*all\"); f:close()\n"
@@ -57,7 +60,8 @@ int trampoline_escape_path(const char *path, size_t path_len,
 }
 
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
-                           const char *entry_path, char *out, size_t out_cap) {
+                           const char *entry_path, const char *relay_version,
+                           char *out, size_t out_cap) {
     if (!mod_loader_dir || !entry_path || !out || out_cap == 0) return -1;
     size_t loader_len = strlen(mod_loader_dir);
     size_t entry_len = strlen(entry_path);
@@ -74,7 +78,7 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
     if (xn < 0) return -1;
 
     /* The mod root is optional: NULL/empty yields the empty-string global so
-     * the rite treats it as "no mods" gracefully (it does not abort the chunk). */
+     * the loader treats it as "no mods" gracefully. */
     char esc_mod[2048];
     esc_mod[0] = '\0';
     if (mod_path && mod_path[0] != '\0') {
@@ -83,8 +87,49 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
         if (mn < 0) return -1;
     }
 
+    /* Product-version handoff is deliberately non-fatal. The 256-byte input
+     * ceiling is only a bounded C transport limit; Lua applies the tighter
+     * 128-byte metadata policy. The fixed escape/output buffers keep stack use
+     * bounded, and a control-heavy value that cannot fit fails safely to nil.
+     * Control bytes are decimal-escaped so Lua can reject the original bytes. */
+    char version_value[768];
+    strcpy(version_value, "nil");
+    if (relay_version && relay_version[0] != '\0') {
+        size_t vn = strlen(relay_version);
+        if (vn <= 256) {
+            char escaped[700];
+            size_t off = 0;
+            int valid = 1;
+            for (size_t i = 0; i < vn; i++) {
+                unsigned char c = (unsigned char)relay_version[i];
+                if (c == '\\' || c == '"') {
+                    if (off + 2 >= sizeof(escaped)) { valid = 0; break; }
+                    escaped[off++] = '\\';
+                    escaped[off++] = (char)c;
+                } else if (c < 0x20 || c == 0x7f) {
+                    if (off + 4 >= sizeof(escaped)) { valid = 0; break; }
+                    int written = snprintf(escaped + off, sizeof(escaped) - off,
+                                           "\\%03u", (unsigned)c);
+                    if (written != 4) { valid = 0; break; }
+                    off += 4;
+                } else {
+                    if (off + 1 >= sizeof(escaped)) { valid = 0; break; }
+                    escaped[off++] = (char)c;
+                }
+            }
+            if (valid) {
+                escaped[off] = '\0';
+                int written = snprintf(version_value, sizeof(version_value),
+                                       "\"%s\"", escaped);
+                if (written < 0 || (size_t)written >= sizeof(version_value)) {
+                    strcpy(version_value, "nil");
+                }
+            }
+        }
+    }
+
     int n = snprintf(out, out_cap, TRAMPOLINE_CHUNK_FMT,
-                     esc_loader, esc_mod, esc_entry);
+                     esc_loader, esc_mod, version_value, esc_entry);
     if (n < 0 || (size_t)n >= out_cap) return -1;  /* encoding error or overflow */
     return n;
 }

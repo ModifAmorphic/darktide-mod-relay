@@ -18,6 +18,9 @@
 --                            <mod_path>/mods/. Mods.file.* roots at
 --                            Mods._mod_root (= _mod_path .. "/mods"); the
 --                            Mods.lua.io wrapper contains reads at _mod_path.
+--   - MOD_RELAY_VERSION — runtime-controlled, INTERNAL one-shot handoff of the
+--                         manifest-derived product version. Snapshotted below
+--                         and immediately retired; it is not a community API.
 --
 -- The mod-path boundary contract:
 --   - Mods._mod_path  = RELAY_MOD_PATH (the boundary; parent of `mods/`).
@@ -50,6 +53,22 @@ end
 --       debug modules read os/ffi)
 --   - __print                (DMF aliases the engine print via __print)
 Mods = Mods or {}
+-- Relay-private bootstrap snapshot. Keep the narrow capabilities needed by
+-- later loader modules without publishing the debug library or retaining the
+-- temporary C-trampoline global. The manager validates version content before
+-- using it; malformed metadata must not abort this entry.
+Mods._relay = Mods._relay or {}
+Mods._relay.version = MOD_RELAY_VERSION
+MOD_RELAY_VERSION = nil
+do
+    local ok, traceback_fn = pcall(function()
+        if type(debug) == "table" and type(debug.traceback) == "function" then
+            return debug.traceback
+        end
+        return nil
+    end)
+    Mods._relay.traceback = ok and traceback_fn or nil
+end
 Mods.original_require = require
 Mods.require_store = {}
 Mods.lua = Mods.lua or {}

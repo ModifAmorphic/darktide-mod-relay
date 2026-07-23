@@ -109,10 +109,11 @@ Loading is split across two `ModManager` entry points:
 - **`ModManager:update(dt)`** — **LOAD on the first call**, then drive per-frame
   callbacks on every call. On the first call (`not self._mods_loaded`): run the
   LOAD loop — for each entry, in order, ask the adapter to set the current load
-  index → validate the entry shape via the adapter → `exec_with_return` the
-  mod's `.mod` file → call its `run()` (pcall-guarded) → if it returns an
-  object, store it and call `object:init()` synchronously, **before the next
-  mod loads** — then ask the adapter to clear the load index, set
+   index → validate the entry shape via the adapter → `exec_with_return` the
+   mod's `.mod` file → call its `run()` (pcall-guarded) → accept only nil
+   (DMF-driven side-effect registration) or a table (an outer object) → for a
+   table, store it and call `object:init()` synchronously, **before the next
+   mod loads** — then ask the adapter to clear the load index, set
   `_mods_loaded = true`, and ask the adapter to publish `_state = "done"`. On
   every call (including the first, after the load): poll the reload shortcut,
   drive the reload state machine (if a request is pending or a replacement is
@@ -129,6 +130,13 @@ nil-before-done is the contract. The loader's own "have I loaded?" flag is the
 **separate** instance field `_mods_loaded` (loader-internal; DMF never reads
 it). Clean separation: `_state` = DMF's, written via the adapter on the
 manager's request; `_mods_loaded` = the loader's.
+
+Initial and replacement load attempts share the same unconditional-finalization
+standard: the pass is protected, `_mod_load_index` is cleared on every exit,
+the target generation is published once, and `_state` reaches `"done"` even for
+empty, all-failed, malformed-return, framework-stopped, or unexpectedly aborted
+passes. Private failure state controls whether outer callbacks may run; the
+DMF-visible completion field is never left wedged.
 
 `Managers.mod:update(dt)` and `Managers.mod:on_game_state_changed(status,
 state_name, state_object)` are driven by direct closure-wraps of
@@ -171,14 +179,79 @@ no engine globals, only `Mods.file`), so it stays in `init()` — pre-building t
 full `_mods` table there means every entry exists before any mod's `run()`/`init()`
 reads it (see [The `Managers.mod` shape contract](#the-managersmod-shape-contract-dmf-requires)).
 
-### Fault isolation
+### Load contracts, diagnostics, and outer failure containment
 
-Every mod's `run()`/`init()`/`update()`/`on_game_state_changed()` is
-pcall-guarded. One bad mod logs (`[mod_loader] mod '<name>' <phase> failed: …`)
-and the load continues to the next; a missing/unreadable `.mod` or a `.mod`
-without `run()` is logged and skipped. The whole bootstrap is itself wrapped in
-a pcall in `lifecycle.lua`, so a DMF/mod failure degrades to vanilla + a log
-line, never a boot crash.
+A successful `.mod` `run()` has a deliberately narrow return contract:
+
+- **nil** — successful DMF-driven registration; Relay stores no outer object;
+- **table** — successful outer object; Relay owns its optional lifecycle calls;
+- **every other Lua type** — an entry-local load-contract failure, rejected
+  before assignment, member lookup, metatable behavior, or value formatting.
+
+Missing/malformed descriptors, throwing `run()` calls, and invalid results mark
+only that entry `failed`; later entries continue. A malformed `dmf` load result
+remains a load-contract failure, not an outer framework-boundary failure,
+because no valid outer object exists.
+
+For outer tables Relay owns the complete lookup+invocation operation for
+`init`, `update`, and `on_game_state_changed`. The first escaped error (including
+an `__index` lookup error) atomically disables that entry for the generation,
+detaches it from future driving, logs one display-safe full diagnostic with the
+target generation and bootstrap-captured traceback when available, and queues
+one protected best-effort `on_unload`. There is no automatic retry. A standalone
+entry failure remains local and healthy siblings continue.
+
+The outer entry named exactly `dmf` is the framework boundary. If one of those
+three lifecycle calls escapes, Relay stops the current generation: the failed
+entry is `disabled`, other attached outer entries are `stopped`, not-yet-attempted
+load entries are `skipped`, and detached objects receive reverse-order,
+exactly-once best-effort cleanup. Relay then retires the existing DMF generation
+globals through the adapter. It does not inspect or modify DMF's inner event
+dispatcher, registered mods, safe calls, hooks, or enable/disable policy, and it
+does not attribute the escape to an inner user mod. `_state` still finalizes to
+`"done"`; a user-requested developer-mode reload remains the recovery path.
+
+`on_reload` and `on_unload` stay teardown operations: errors are logged and
+cleanup continues without recursively entering lifecycle disablement. Cleanup
+is cooperative, so arbitrary hooks, globals, engine mutations, and unmanaged
+side effects may still require a process restart.
+
+Failure alerts are independent of DMF. Relay feature-detects and protects
+`Managers.event:trigger("event_add_notification_message", "alert",
+{ text = message })`. Each failure gets an immediate attempt; consolidated
+reminders use manager update time, no more often than every 15 seconds, with a
+later state-enter retry eligible after two seconds. Framework-stop reminders
+take precedence over standalone summaries. Missing/throwing event infrastructure
+is nonfatal and retried without per-frame log spam. Notices continue until
+process exit or a completed user-requested hot reload; when developer mode is
+false they require restart rather than offering hot reload.
+
+### Crash metadata
+
+Crashify integration is optional, feature-detected, and fully protected. At the
+first load boundary Relay publishes `ModRelay:Version` once per process using
+the exact full product version compiled from `.release-please-manifest.json`
+(including prerelease suffixes). The C trampoline hands the same
+`RELAY_VERSION` used by launcher `--version` to `init.lua`; the entry snapshots
+it privately and deletes the temporary global. Relay does not read release
+metadata at runtime, execute the launcher, use Cargo package metadata, or accept
+an environment override.
+
+After a descriptor has returned a table with callable `run`, immediately before
+invoking it, Relay publishes `Mod:<entry-name> = true` at most once per key per
+generation. That milestone means throwing, nil-returning, and invalid-result
+`run()` calls retain their earned property, while missing/malformed descriptors
+do not. Metadata names must be non-empty strings, contain no control characters,
+and be at most 120 bytes; invalid names skip metadata only and are diagnosed by
+numeric entry id without printing the raw name.
+
+Published per-mod keys stay present while their generation is active. During
+hot reload, after old cleanup and before replacement loading, Relay attempts to
+remove every tracked old `Mod:*` key, clears the tracker, and publishes keys for
+the replacement generation as descriptors are accepted. It never removes
+`ModRelay:Version`, including during hot reload or shutdown. Missing or throwing
+Crashify methods cannot alter load order, entry state, finalization, or reload
+status; operations retry at the next generation boundary.
 
 ## Control flow
 
@@ -572,24 +645,28 @@ outer updates):
    scripts redefine them and overwrite individual `CLASS` entries. Does **not**
    clear `CLASS`, `Managers.dmf`, `Managers.dmf.persistent_tables`,
    `Mods.require_store`, `Mods.file`, the observer list, or any Relay global.
-5. Drop old `_mods`; `_scan_mods()` rereads authoritative `mods.lst` (wrapped so
+5. Remove every tracked old-generation `Mod:*` Crashify property (never
+   `ModRelay:Version`) and clear the generation tracker. Optional Crashify
+   failures do not make the reload degraded.
+6. Drop old `_mods`; `_scan_mods()` rereads authoritative `mods.lst` (wrapped so
    a rescan throw can't wedge: `_mods` ends up empty, degraded). The loader still
    injects nothing — DMF loads only if listed.
-6. Mark replacement pending (`_reload_in_progress`); **return immediately** from
+7. Mark replacement pending (`_reload_in_progress`); **return immediately** from
    that update. No old updates or new loads run in the teardown frame.
 
 **Replacement frame** (next `update`):
 
-7. `_load_all(reload_data)` — synchronous full pass in order, with existing
-   per-mod isolation. For each outer object, `init(reload_data_for_same_name)`
+8. `_load_all(reload_data)` — synchronous full pass in order, with entry-local
+   load isolation and one-strike outer lifecycle containment. For each outer
+   object, `init(reload_data_for_same_name)`
    runs **before** the next entry loads. Startup `init` receives `nil`;
    newly-added mods receive `nil`; removed data is discarded; reordered same-name
    mods receive **their own** data (Relay keys by stable mod NAME — never
    numeric position). Per-mod `.mod`/`run`/`init` failure isolates and
-   marks degraded. If the listed `dmf` framework entry fails during replacement
-   loading, an unmistakable `DMF FRAMEWORK LOAD FAILURE` line emits in addition
-   to the normal phase diagnostics; isolation continues.
-8. Clear reload data; `adapter:mark_load_done()`; clear request/in-progress;
+   marks degraded. A `dmf` descriptor/run/result failure remains an isolated
+   framework-load failure; an escaped `dmf` outer `init` failure stops and
+   reverse-cleans the replacement generation.
+9. Clear reload data; `adapter:mark_load_done()`; clear request/in-progress;
    increment + report the generation (distinguishing clean completion from
    completion with errors); then drive new-generation updates **in that same
    completed frame**.
@@ -622,7 +699,8 @@ and never register another file observer.**
 authoritative `mods.lst`): `_mods` collection + entry state/object references,
 `_mod_load_index`, `_state` (nil during teardown → `done` after completion),
 reload request/in-progress flags, and stock-DMF generation globals
-(`DMFMod`/`new_mod`/`get_mod` — redefined by the new DMF scripts). The DMFMod
+(`DMFMod`/`new_mod`/`get_mod` — redefined by the new DMF scripts), private
+outer-failure/alert state, and tracked `Mod:*` crash-property keys. The DMFMod
 **method surface** is re-adapted each generation (the installation-aware
 observer re-adapts before Phase 2 — fresh table by table mismatch, reused table
 by wrapper mismatch), but the adapter's private table+wrapper **markers are
@@ -668,8 +746,10 @@ There is no shadow load or rollback.
 - Missing/unreadable/rescan error: old runtime already gone; use an empty new
   set, mark degraded, complete without wedging.
 - Per-mod `.mod`/`run`/`init` failure: existing isolation continues the pass;
-  mark degraded. A listed `dmf` framework failure emits the unmistakable
-  framework-load log in addition.
+  mark degraded. Invalid non-nil `run()` values are rejected before inspection.
+  A listed `dmf` descriptor/run/result failure emits the unmistakable
+  framework-load log in addition; an escaped outer lifecycle error instead
+  stops the current generation.
 - Internal reload finalization guarantees `_reload_requested`,
   `_reload_in_progress`, the load index, and `_state` always settle — a later
   valid reload request remains possible after a failed reload.
@@ -677,8 +757,9 @@ There is no shadow load or rollback.
   generation (old objects were already unloaded in their teardown frame) — never
   a double-unload.
 
-Relay does **not** expose/restore the broad `Mods.message` API. Controlled
-diagnostics are `[mod_loader]`-prefixed log lines; none spam per-frame.
+Relay does **not** expose/restore the broad `Mods.message` API or
+`Mods.lua.debug`. Controlled diagnostics are `[mod_loader]`-prefixed console
+lines plus private guarded engine alerts; none spam per-frame.
 
 ## Deferred bootstrap
 
@@ -784,9 +865,9 @@ offline LuaJIT test harness (`make mod-loader-test`, behavior-focused), includin
 scan/load split, the class registry, the require bridge, the lifecycle
 closure-wraps, and the IO observer adaptation.
 
-**Live validation.** On 2026-07-14 the operator launched the game through
+**Baseline live validation.** On 2026-07-14 the operator launched the game through
 Mod Curator: the game started, and DMF + user mods loaded as expected from
-the configured mod root. The current independently-reimplemented loader plus the
+the configured mod root. The pre-hardening loader plus the
 extracted DMF adapter completed the observed startup/load chain (injection →
 trampoline `OK` at pcall#1 → the mod loader loads → class registry + deferred
 bootstrap fire at `BootStateRequireGameScripts._state_update` → the loader scans
@@ -800,9 +881,11 @@ mod set (DMF + CuriosChecker, NumericUI, hub_shortcuts, scoreboard-ii)
 reinitialized — with no `./../mods`, localization-return, framework-failure, or
 degraded/restart-recommended errors. This validates the installation-aware IO
 re-adaptation against the reused-`DMFMod`-class-table timing in the live engine.
-Not claimed by this run: behavior across every possible mod, every failure path,
-or repeated reload under arbitrarily long sessions — the offline harness covers
-the logic, and broader-corpus / failure-path live validation remains future work.
+The nil/table result contract, Crashify metadata, failure containment, cleanup,
+and alert behavior documented above were added after that session. Their offline
+suite passes, but the live Crashify/alert/failure-path acceptance matrix remains
+operator work. The earlier run also did not claim behavior across every possible
+mod or repeated reload under arbitrarily long sessions.
 
 **Production DMF acquisition is future work.** Today DMF is vendored locally
 at the **mod root** (local only, not committed — point `--mod-path` at it for
@@ -842,6 +925,10 @@ described here is unchanged.
   ordering, reload-data keying, identity survival across three generations,
   installation-aware IO + single observer, global retirement, failure/best-effort
   contract, no-double-unload shutdown invariant). Run via `make mod-loader-test`.
+- `src/mod_loader/tests/test_loader_hardening.lua` — malformed result,
+  unconditional-finalization, Crashify lifecycle, standalone/framework failure,
+  cleanup, diagnostics, alert cadence, and recovery coverage using Relay-owned
+  fakes.
 - `docs/architecture/MOD-RELAY.md` — the engine-context mechanism + the
   deferred bootstrap bridge + the launcher/shell contracts.
 - `docs/reference/community-tools/darktide-framework-analysis.md` — how the existing community

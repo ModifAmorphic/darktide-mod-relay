@@ -79,8 +79,13 @@ src/                Mod Relay — the injected modding runtime + injector
                       dynamic dispatch so a community replacement can suppress or
                       redirect the built-in gesture), LEFT Ctrl+Shift+R keyboard
                       trigger, two-frame teardown/replacement sequencing,
-                      reload-data association keyed by name, failure isolation,
-                      no stacking);
+                      reload-data association keyed by name, nil/table-only
+                      run-result validation, unconditional load finalization,
+                      generation-aware Crashify metadata (`Mod:<name>` plus
+                      process-lifetime `ModRelay:Version`), one-strike outer
+                      lifecycle containment (standalone disable vs framework-
+                      boundary generation stop), guarded engine-event alerts,
+                      exactly-once cleanup, failure isolation, no stacking);
                       dmf_adapter.lua is the stock-DMF compatibility boundary
                       (persisted developer-mode restoration from
                       Application.user_setting, DMF-visible contract fields +
@@ -170,6 +175,12 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
   under Proton) — NOT to `relay.log` and NOT to the Proton `steam-$APPID.log`
   (Wine/Proton diagnostics only). See MOD-RELAY.md → Logging.
+- **Loader failure diagnostics** are in Darktide's console log. Relay disables
+  a standalone outer entry after its first escaped lifecycle error; an escaped
+  `dmf` outer boundary stops the current generation without attributing an
+  inner culprit. Guarded in-game alerts repeat at a controlled cadence until a
+  completed developer-mode hot reload or process exit. Cleanup is best effort;
+  restart remains the safe recovery when side effects may survive.
 - **CI** runs on PRs to `main` (`.github/workflows/pr.yml`: mingw Linux
   cross-compile + wine tests, and msvc Windows native). Pushes to `main` run
   the release pipeline (`.github/workflows/release-please.yml`: release-please

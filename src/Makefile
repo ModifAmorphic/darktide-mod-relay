@@ -71,9 +71,10 @@ LEGAL_NOTICES := ../LICENSE ../THIRD_PARTY_NOTICES.md
 
 # Product version: sourced at build time from the release-please manifest (the
 # single file release-please bumps at release time, available before build-assets
-# runs). Injected as -DRELAY_VERSION so --version reports it with no version
-# constant baked into source (which would go stale and is deliberately NOT wired
-# into release-please extra-files). Fall back if the manifest is missing/empty.
+# runs). Injected as -DRELAY_VERSION into both launcher and shell so --version
+# and the private Lua version handoff use the exact same full value, with no
+# source constant that could go stale (and no release-please extra-file).
+# Fall back if the manifest is missing/empty.
 RELAY_VERSION := $(shell sed -n 's/.*"src"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' ../.release-please-manifest.json)
 RELAY_VERSION := $(if $(RELAY_VERSION),$(RELAY_VERSION),0.0.0-dev)
 
@@ -133,9 +134,10 @@ $(SHELL_RES): shell/src/relay_shell.rc ../.release-please-manifest.json | $(BIN)
 	  shell/src/relay_shell.rc -o $@
 
 $(DLL): $(RUST_LIB) $(SHELL_SRC) $(MINHOOK_SRC) shell/src/relay_shell.rc \
+        ../.release-please-manifest.json \
         shell/include/relay_discovery.h shell/include/trampoline.h \
         $(SHELL_RES) | $(BIN)
-	$(CROSS_CC) -shared -static-libgcc -O2 -o $@ \
+	$(CROSS_CC) -shared -static-libgcc -O2 -DRELAY_VERSION='"$(RELAY_VERSION)"' -o $@ \
 	  $(SHELL_SRC) $(MINHOOK_SRC) $(INCLUDES) $(SHELL_RES) \
 	  -l:librelay_discovery.a -L $(REL_DIR) \
 	  $(RUST_SYS) -Wl,--out-implib,$(BIN)/relay_shell.lib
@@ -236,7 +238,8 @@ $(BIN)/test_quoting.exe: tests/test_quoting.c tests/test_runner.h \
 $(BIN)/test_trampoline.exe: tests/test_trampoline.c \
                           shell/src/trampoline.c shell/include/trampoline.h \
                           tests/test_runner.h $(TEST_RUNNER_OBJ) | $(BIN)
-	$(TEST_CC) $(TEST_CFLAGS) $(TEST_INCLUDES) -o $@ $< \
+	$(TEST_CC) $(TEST_CFLAGS) $(TEST_INCLUDES) \
+	  -DRELAY_VERSION='"$(RELAY_VERSION)"' -o $@ $< \
 	  $(TEST_RUNNER_OBJ) $(TEST_LIBS)
 
 c-tests: $(TEST_EXES) $(STUB_TARGET) $(STUB_SHELL)

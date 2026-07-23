@@ -30,6 +30,17 @@ plus the launcher that delivers it.
 | **`tests/`** | C unit tests (run via wine). |
 | **`bin/`** | Build outputs (gitignored). Where `make build` lands everything. |
 
+The mod manager also enforces the loader's failure-hardening contract: only nil
+or table may be returned by a successful `run()`; every initial/replacement pass
+finalizes; accepted descriptors publish guarded generation-aware Crashify
+metadata (`Mod:<name>` plus process-lifetime `ModRelay:Version`); and the first
+escaped outer lifecycle error detaches and best-effort unloads that object. A
+standalone failure remains local, while an escaped `dmf` outer boundary stops
+and reverse-cleans the current generation without inspecting DMF-managed inner
+mods. Guarded engine alerts repeat at a controlled cadence until restart or a
+completed developer-mode hot reload. See the DMF integration architecture doc
+for cleanup limits and recovery behavior.
+
 The workspace root (`Cargo.toml` / `Cargo.lock` / `Makefile`) lives here in
 `src/`, not the repo root — **all build/test commands run from `src/`**.
 
@@ -131,8 +142,10 @@ it, oracle tests skip cleanly. See `AGENTS.md` for the full ops notes.
   restoration, and the full hot-reload state machine (`test_hot_reload.lua`:
   request seam, exact LEFT Ctrl+Shift+R parity, two-frame teardown/replacement
   ordering, reload-data keying, identity survival across three generations,
-  generation-aware IO + single observer, global retirement, the failure/best-
-  effort contract, and the no-double-unload shutdown invariant).
+  generation-aware IO + single observer, global retirement, malformed `run()`
+  results, Crashify generation lifecycle, outer-entry/framework-boundary
+  failure containment, guarded alert cadence, and the no-double-unload shutdown
+  invariant).
 - **`test-hooks` feature** gates the debug panic-boundary symbol out of release
   builds: `cargo test --features test-hooks -p relay-discovery` (and
   `cargo clippy --all-targets --features test-hooks -- -D warnings`). `make
