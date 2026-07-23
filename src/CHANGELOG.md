@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.3.0...v0.4.0) (2026-07-23)
+
+
+### Features
+
+* **logging:** add optional Lua print tee ([#9](https://github.com/ModifAmorphic/darktide-mod-relay/issues/9)) ([79cc20b](https://github.com/ModifAmorphic/darktide-mod-relay/commit/79cc20b5d9be5aca4d629cd26fae02ad53c0b56c))
+
 ## [0.3.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.2.0...v0.3.0) (2026-07-23)
 
 
