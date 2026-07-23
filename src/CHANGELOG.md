@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.2.0...v0.3.0) (2026-07-23)
+
+
+### Features
+
+* **mod-loader:** harden lifecycle failures and diagnostics ([#7](https://github.com/ModifAmorphic/darktide-mod-relay/issues/7)) ([c35dfe8](https://github.com/ModifAmorphic/darktide-mod-relay/commit/c35dfe8a60f5331d08a6feee8c31b5cd9a11f17d))
+
 ## [0.2.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.1.1...v0.2.0) (2026-07-22)
 
 
