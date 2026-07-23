@@ -47,9 +47,11 @@ signals hook-ready.
   an engine global (appears late in boot); **`CLASS`** is never engine-set, so
   the mod loader sets it.
 - **Production trampoline + the mod loader.** The production trampoline is
-  wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
-  engine's pcall) it injects the proven chunk — set the two root globals
-  (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`), `io.open` the staged entry
+   wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
+   engine's pcall) it injects the proven chunk — set the two root globals
+   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`) plus a temporary private handoff of the
+   same manifest-derived full product version used by launcher `--version`,
+   `io.open` the staged entry
   (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. The mod loader
   Lua is **packaged with the Relay runtime** (staged into `bin/mod_loader/`
   by `make build`, deployed next to the launcher/DLL; the shell self-locates it
@@ -104,7 +106,8 @@ signals hook-ready.
     builds the `_mods` table — the order file is authoritative, the loader
     injects nothing — restores persisted manager settings via the adapter, and
     registers the DMF IO observer via the adapter; no mod loaded), and the first
-    `StateGame.update` tick LOADs (per-mod `run()` → object → `init()`, then
+    `StateGame.update` tick LOADs (per-mod `run()` → nil/table validation →
+    optional object `init()`, then
     `_state="done"` via the adapter) — deferred so boot-complete globals like
     `Managers.input` exist. Every `update` tick also polls the developer-mode-
     gated hot-reload shortcut (LEFT Ctrl + LEFT Shift + R) and drives the
@@ -126,10 +129,23 @@ signals hook-ready.
     entry-shape validation, the eight `DMFMod:io_*` overrides, and stale-
     generation-global retirement — is centralized in `dmf_adapter.lua`;
     `mod_manager.lua` stays generic and drives those through the adapter's
-    transition methods. The loader exposes itself as `Managers.mod`. The whole
-    bootstrap is pcall-wrapped so a DMF/mod failure degrades to vanilla + a log
-    line, not a crash. **Live-validated: the current independently-reimplemented
-    loader plus the extracted DMF adapter completed the observed startup/load
+    transition methods. Successful `run()` calls accept only nil (DMF-driven)
+    or a table (outer-driven); malformed values fail only their entry and both
+    initial/replacement attempts finalize unconditionally. Accepted descriptors
+    publish guarded per-generation `Mod:<name> = true` Crashify metadata, while
+    the private version snapshot publishes process-lifetime
+    `ModRelay:Version` exactly once and is never removed during reload.
+    The first escaped outer `init`/`update`/state-change error disables and
+    best-effort unloads that entry for the generation. If the escaped outer
+    boundary is `dmf`, Relay stops and reverse-cleans all current outer objects
+    without inspecting or blaming DMF-managed inner mods. Guarded engine-event
+    alerts remain active at a controlled cadence until restart or completed
+    user-requested hot reload; they do not depend on DMF or expose
+    `Mods.message`. The loader exposes itself as `Managers.mod`. Bootstrap setup
+    remains pcall-contained so an infrastructure failure degrades to vanilla +
+    a log line rather than crashing the game. **Baseline live validation:** the
+    pre-hardening independently-reimplemented loader plus the extracted DMF
+    adapter completed the observed startup/load
     chain on 2026-07-14 — the operator launched through Mod Curator, the
     game started, and DMF + user mods loaded as expected from the configured mod
     root. Repeated in-game hot reload (LEFT Ctrl + LEFT Shift + R) was validated
@@ -137,8 +153,10 @@ signals hook-ready.
     requests, DMF `on_reload`/`on_unload` each generation, mods reinitializing),
     with no `./../mods`, localization-return, framework-failure, or
     degraded/restart-recommended errors in Darktide's console log. Not claimed by
-    this run: behavior across every possible mod, every failure path, or
-    repeated reload under arbitrarily long sessions.** The offline LuaJIT harness
+    this run: the new Crashify metadata, alert transport, lifecycle failure
+    paths, behavior across every possible mod, or repeated reload under
+    arbitrarily long sessions. Those new paths pass offline and still require
+    operator live acceptance.** The offline LuaJIT harness
     (`make mod-loader-test`) covers the logic. See
     `docs/architecture/MOD_LOADER-DMF.md` for the DMF integration + the IO
     adaptation + the load timing + the [hot-reload](../docs/architecture/MOD_LOADER-DMF.md#hot-reload)

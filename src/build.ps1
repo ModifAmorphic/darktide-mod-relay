@@ -55,7 +55,8 @@ param(
 # Product version: build-injected from the release-please manifest so
 # --version reports it (matches the Makefile + CI). Read once at startup and
 # published into the process env so any cmd /c child inherits it (used by the
-# launcher + launcher_test compiles via /DRELAY_VERSION=\"%RELAY_VERSION%\").
+# launcher, shell, and launcher_test compiles via
+# /DRELAY_VERSION=\"%RELAY_VERSION%\").
 # Fall back to '0.0.0-dev' if the manifest is missing or '.src' is empty.
 # Resolves the manifest from $PSScriptRoot (always src/) so it works whether
 # the script is invoked from src\ or the repo root — the read happens before
@@ -251,10 +252,10 @@ function Invoke-Dll {
     # resolves the mismatch. (Verified: the unmodified CI commands reproduce
     # the LNK2019 failure on a standard VS 2022 Build Tools install.)
     Write-Host "Compiling C shell + MinHook sources..."
-    Invoke-WithVcvars 'cl /nologo /O2 /MD /c /I shell\include /I shell\vendor\minhook\include /Fo:bin\obj\ shell\src\dllmain.c shell\vendor\minhook\src\buffer.c shell\vendor\minhook\src\hook.c shell\vendor\minhook\src\trampoline.c shell\vendor\minhook\src\hde\hde64.c'
+    Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include /I shell\vendor\minhook\include /Fo:bin\obj\ shell\src\dllmain.c shell\vendor\minhook\src\buffer.c shell\vendor\minhook\src\hook.c shell\vendor\minhook\src\trampoline.c shell\vendor\minhook\src\hde\hde64.c'
 
     Write-Host "Compiling trampoline (relay_trampoline.obj to avoid MinHook name clash)..."
-    Invoke-WithVcvars 'cl /nologo /O2 /MD /c /I shell\include shell\src\trampoline.c /Fo:bin\obj\relay_trampoline.obj'
+    Invoke-WithVcvars 'cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include shell\src\trampoline.c /Fo:bin\obj\relay_trampoline.obj'
 
     # Compile the PE version-info resource (VS_VERSION_INFO) for the shell
     # DLL. Numeric version parts come from %RELAY_VERSION_MAJOR/MINOR/PATCH%
@@ -432,7 +433,7 @@ function Invoke-CTests {
     Invoke-WithVcvars 'cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fo:bin\obj\ /Fe:bin\test_injection.exe tests\test_injection.c bin\obj\test_runner.obj bin\obj\launcher_test.obj kernel32.lib shell32.lib'
     Invoke-WithVcvars 'cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fo:bin\obj\ /Fe:bin\test_config.exe tests\test_config.c bin\obj\test_runner.obj bin\obj\launcher_test.obj kernel32.lib shell32.lib'
     Invoke-WithVcvars 'cl /nologo /O2 /I launcher\src /DRELAY_TEST_BUILD /Fo:bin\obj\ /Fe:bin\test_quoting.exe tests\test_quoting.c bin\obj\test_runner.obj bin\obj\launcher_test.obj kernel32.lib shell32.lib'
-    Invoke-WithVcvars 'cl /nologo /O2 /I shell\include /Fo:bin\obj\ /Fe:bin\test_trampoline.exe tests\test_trampoline.c bin\obj\test_runner.obj kernel32.lib'
+    Invoke-WithVcvars 'cl /nologo /O2 /DRELAY_VERSION=\"%RELAY_VERSION%\" /I shell\include /Fo:bin\obj\ /Fe:bin\test_trampoline.exe tests\test_trampoline.c bin\obj\test_runner.obj kernel32.lib'
 
     # Run each test exe directly (no wine on Windows native).
     Write-Host "=== C unit tests ==="

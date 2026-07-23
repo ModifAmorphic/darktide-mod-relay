@@ -20,6 +20,7 @@ return function(runner)
         local sb = mock.new_sandbox()
         sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
         sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.MOD_RELAY_VERSION = "0.3.0-beta.2"
         sb.require = function() return {} end  -- pre-wrap engine require
         sb.print = function() end
         sb.io = mock.make_io(mock.stage_mod_loader())
@@ -100,6 +101,35 @@ return function(runner)
     runner.register("entry: sets __print", function()
         local sb = setup()
         runner.assert_type("function", sb.__print)
+    end)
+
+    runner.register("entry: snapshots exact Relay version and retires trampoline global", function()
+        local sb = setup()
+        runner.assert_eq("0.3.0-beta.2", sb.Mods._relay.version)
+        runner.assert_nil(sb.MOD_RELAY_VERSION,
+            "temporary trampoline version global must be retired")
+    end)
+
+    runner.register("entry: captures only private traceback function, not debug library", function()
+        local sb = setup()
+        runner.assert_type("function", sb.Mods._relay.traceback)
+        runner.assert_nil(sb.Mods.lua.debug,
+            "debug library must not be published on the compatibility surface")
+    end)
+
+    runner.register("entry: missing traceback capability degrades privately", function()
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.MOD_RELAY_VERSION = "0.2.0"
+        sb.debug = nil
+        sb.require = function() return {} end
+        sb.print = function() end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        local ok, result = pcall(function() return mock.load_module("init", sb)() end)
+        runner.assert_eq(true, ok, tostring(result))
+        runner.assert_nil(sb.Mods._relay.traceback)
+        runner.assert_nil(sb.MOD_RELAY_VERSION)
     end)
 
     runner.register("entry: derives Mods._mod_path + _mod_root from RELAY_MOD_PATH", function()

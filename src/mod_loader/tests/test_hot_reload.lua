@@ -77,8 +77,12 @@ return function(runner)
         sb.__print = opts.print or function() end
         sb.Managers = opts.managers or {}
         sb.Managers.dmf = sb.Managers.dmf or { persistent_tables = { mods = {} } }
-        sb.Mods = { file = {} }
+        sb.Mods = { file = {}, _relay = { version = "0.2.0" } }
         sb.Mods.require_store = {}
+        sb.Crashify = {
+            print_property = function() end,
+            remove_print_property = function() end,
+        }
         sb.Mods.load_module = function(name)
             return mock.run_module(name, sb)
         end

@@ -1,0 +1,6 @@
+-- metadata/crashify scenario: mods.lst (initial — includes crashify_alpha).
+-- Each non-blank, non-comment line is one entry name (mods.lst is read by
+-- Mods.file.read_content_to_table, which trims lines and skips blanks/"--").
+crashify_alpha
+crashify_beta
+crashify_probe

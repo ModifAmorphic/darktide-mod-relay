@@ -1,0 +1,7 @@
+-- framework_boundary scenario: mods.lst.
+-- Authoritative order: prior, dmf, later. The middle entry owns the NAME
+-- "dmf" so Relay's framework-boundary containment path applies to it. This is
+-- a SYNTHETIC Relay-owned probe, not stock DMF — see the scenario README.
+framework_prior_probe
+dmf
+framework_later_probe

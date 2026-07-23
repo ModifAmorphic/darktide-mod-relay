@@ -107,7 +107,7 @@ jobs:
           :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
           :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
           :: LNK2019/LNK4217 CRT-mismatch errors at link time.
-          cl /nologo /O2 /MD /c /I shell\include /I shell\vendor\minhook\include ^
+          cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include /I shell\vendor\minhook\include ^
              shell\src\dllmain.c ^
              shell\vendor\minhook\src\buffer.c ^
              shell\vendor\minhook\src\hook.c ^
@@ -117,7 +117,7 @@ jobs:
           :: /MD (dynamic CRT) is required because capstone-sys (built by the cc crate
           :: inside the Rust staticlib) compiles with /MD; cl's default /MT causes
           :: LNK2019/LNK4217 CRT-mismatch errors at link time.
-          cl /nologo /O2 /MD /c /I shell\include shell\src\trampoline.c /Fo:relay_trampoline.obj
+          cl /nologo /O2 /MD /DRELAY_VERSION=\"%RELAY_VERSION%\" /c /I shell\include shell\src\trampoline.c /Fo:relay_trampoline.obj
           if errorlevel 1 exit /b 1
           :: Explicit /EXPORT: entries are required because MSVC link /DLL does NOT
           :: auto-export from input objects/libs (unlike mingw -shared). Without these,

@@ -16,17 +16,42 @@ local _print = print or __print or function() end
 local _tostring = tostring
 local _select = select
 local _concat = table.concat
+local _pcall = pcall
+local _type = type
 
 local seq = 0
 
-local function emit(line)
-    _print("[SHUTDOWN_PROBE] " .. line)
-    local f = Mods.lua.io.open("shutdown_probe/shutdown_probe.log", "a")
-    if f then
-        f:write(line .. "\n")
-        if f.flush then f:flush() end
-        if f.close then f:close() end
+local LOG_PATH = "shutdown_probe/shutdown_probe.log"
+
+-- Best-effort file append: write and flush are attempted, and close ALWAYS runs
+-- (even when write/flush throws) so a throwing write can never leak a handle.
+local function safe_append(f, file_line)
+    local write_ok = _pcall(function() f:write(file_line .. "\n") end)
+    if write_ok and _type(f.flush) == "function" then
+        _pcall(f.flush, f)
     end
+    if _type(f.close) == "function" then
+        _pcall(f.close, f)
+    end
+end
+
+local function emit(line)
+    _pcall(_print, "[SHUTDOWN_PROBE] " .. line)
+    local ok, f = _pcall(function()
+        local mods = Mods
+        if _type(mods) ~= "table" then return nil end
+        local ml = mods.lua
+        if _type(ml) ~= "table" then return nil end
+        local mio = ml.io
+        if _type(mio) ~= "table" then return nil end
+        local op = mio.open
+        if _type(op) ~= "function" then return nil end
+        return op(LOG_PATH, "a")
+    end)
+    if not ok or f == nil then
+        return
+    end
+    safe_append(f, line)
 end
 
 local function record(tag, ...)

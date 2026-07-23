@@ -10,6 +10,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef RELAY_VERSION
+#define RELAY_VERSION "0.0.0-dev"
+#endif
+
 /* ---- trampoline_escape_path ---- */
 
 void test_escape_plain_path(void) {
@@ -63,13 +67,15 @@ void test_build_chunk_sets_both_path_globals_and_opens_entry(void) {
      * joined path). All three must appear. */
     char out[1024];
     int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
-                                   "Z:\\mod_loader\\t.lua", out, sizeof(out));
+                                   "Z:\\mod_loader\\t.lua", "0.3.0-beta.2",
+                                   out, sizeof(out));
     ASSERT_TRUE(n > 0);
 
     /* Loader-root global (MOD_LOADER_DIR — internal, trampoline-set), escaped. */
     ASSERT_NOTNULL(strstr(out, "MOD_LOADER_DIR = \"Z:\\\\mod_loader\""));
     /* Mod-root global, escaped. */
     ASSERT_NOTNULL(strstr(out, "RELAY_MOD_PATH = \"Z:\\\\mods\""));
+    ASSERT_NOTNULL(strstr(out, "MOD_RELAY_VERSION = \"0.3.0-beta.2\""));
     /* Entry path baked into io.open(...), escaped. */
     ASSERT_NOTNULL(strstr(out, "io.open(\"Z:\\\\mod_loader\\\\t.lua\", \"r\")"));
     /* Each FAIL step label is present (defines the status vocabulary). */
@@ -83,8 +89,8 @@ void test_build_chunk_sets_both_path_globals_and_opens_entry(void) {
 void test_build_chunk_plain_paths(void) {
     /* Forward-slash roots + entry need no escaping. */
     char out[1024];
-    int n = trampoline_build_chunk("/mod_loader", "/mods", "/mod_loader/x.lua",
-                                   out, sizeof(out));
+    int n = trampoline_build_chunk("/mod_loader", "/mods", "/mod_loader/x.lua", "0.2.0",
+                                    out, sizeof(out));
     ASSERT_TRUE(n > 0);
     ASSERT_NOTNULL(strstr(out, "MOD_LOADER_DIR = \"/mod_loader\""));
     ASSERT_NOTNULL(strstr(out, "RELAY_MOD_PATH = \"/mods\""));
@@ -96,7 +102,7 @@ void test_build_chunk_null_mod_path_emits_empty_global(void) {
      * and is still valid (entry loads from the loader root). */
     char out[1024];
     int n = trampoline_build_chunk("Z:\\mod_loader", NULL,
-                                   "Z:\\mod_loader\\t.lua", out, sizeof(out));
+                                   "Z:\\mod_loader\\t.lua", "0.2.0", out, sizeof(out));
     ASSERT_TRUE(n > 0);
     ASSERT_NOTNULL(strstr(out, "MOD_LOADER_DIR = \"Z:\\\\mod_loader\""));
     ASSERT_NOTNULL(strstr(out, "RELAY_MOD_PATH = \"\""));
@@ -107,31 +113,83 @@ void test_build_chunk_empty_mod_path_emits_empty_global(void) {
     /* An empty-string mod path is treated the same as NULL (no mods). */
     char out[1024];
     int n = trampoline_build_chunk("Z:\\mod_loader", "",
-                                   "Z:\\mod_loader\\t.lua", out, sizeof(out));
+                                   "Z:\\mod_loader\\t.lua", "0.2.0", out, sizeof(out));
     ASSERT_TRUE(n > 0);
     ASSERT_NOTNULL(strstr(out, "RELAY_MOD_PATH = \"\""));
 }
 
+void test_build_chunk_null_version_emits_nil_without_skipping_loader(void) {
+    char out[1024];
+    int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
+                                   "Z:\\mod_loader\\t.lua", NULL, out, sizeof(out));
+    ASSERT_TRUE(n > 0);
+    ASSERT_NOTNULL(strstr(out, "MOD_RELAY_VERSION = nil"));
+    ASSERT_NOTNULL(strstr(out, "io.open(\"Z:\\\\mod_loader\\\\t.lua\", \"r\")"));
+}
+
+void test_build_chunk_empty_version_emits_nil(void) {
+    char out[1024];
+    int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
+                                   "Z:\\mod_loader\\t.lua", "", out, sizeof(out));
+    ASSERT_TRUE(n > 0);
+    ASSERT_NOTNULL(strstr(out, "MOD_RELAY_VERSION = nil"));
+}
+
+void test_build_chunk_version_is_lua_escaped(void) {
+    char out[1024];
+    int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
+                                   "Z:\\mod_loader\\t.lua", "1.2\\\"x\ny",
+                                   out, sizeof(out));
+    ASSERT_TRUE(n > 0);
+    ASSERT_NOTNULL(strstr(out, "MOD_RELAY_VERSION = \"1.2\\\\\\\"x\\010y\""));
+}
+
+void test_build_chunk_overlong_version_emits_nil_without_skipping_loader(void) {
+    char version[258];
+    memset(version, 'x', sizeof(version) - 1);
+    version[sizeof(version) - 1] = '\0';
+    char out[1024];
+    int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
+                                   "Z:\\mod_loader\\t.lua", version,
+                                   out, sizeof(out));
+    ASSERT_TRUE(n > 0);
+    ASSERT_NOTNULL(strstr(out, "MOD_RELAY_VERSION = nil"));
+    ASSERT_NOTNULL(strstr(out, "return \"OK\""));
+}
+
+void test_build_chunk_hands_off_exact_compiled_product_version(void) {
+    char out[1024];
+    int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
+                                   "Z:\\mod_loader\\t.lua", RELAY_VERSION,
+                                   out, sizeof(out));
+    ASSERT_TRUE(n > 0);
+    char expected[384];
+    int en = snprintf(expected, sizeof(expected),
+                      "MOD_RELAY_VERSION = \"%s\"", RELAY_VERSION);
+    ASSERT_TRUE(en > 0 && (size_t)en < sizeof(expected));
+    ASSERT_NOTNULL(strstr(out, expected));
+}
+
 void test_build_chunk_empty_loader_dir_rejected(void) {
     char out[64];
-    ASSERT_EQ(-1, trampoline_build_chunk("", "Z:\\mods", "Z:\\t.lua", out, sizeof(out)));
+    ASSERT_EQ(-1, trampoline_build_chunk("", "Z:\\mods", "Z:\\t.lua", "0.2.0", out, sizeof(out)));
 }
 
 void test_build_chunk_empty_entry_rejected(void) {
     char out[64];
-    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "", out, sizeof(out)));
+    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "", "0.2.0", out, sizeof(out)));
 }
 
 void test_build_chunk_null_args(void) {
     char out[64];
     /* mod_loader_dir NULL -> rejected. */
-    ASSERT_EQ(-1, trampoline_build_chunk(NULL, "Z:\\mods", "Z:\\t.lua", out, sizeof(out)));
+    ASSERT_EQ(-1, trampoline_build_chunk(NULL, "Z:\\mods", "Z:\\t.lua", "0.2.0", out, sizeof(out)));
     /* entry_path NULL -> rejected. */
-    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", NULL, out, sizeof(out)));
+    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", NULL, "0.2.0", out, sizeof(out)));
     /* out NULL -> rejected. */
-    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "Z:\\t.lua", NULL, sizeof(out)));
+    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "Z:\\t.lua", "0.2.0", NULL, sizeof(out)));
     /* zero cap -> rejected. */
-    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "Z:\\t.lua", out, 0));
+    ASSERT_EQ(-1, trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", "Z:\\t.lua", "0.2.0", out, 0));
     /* (mod_path NULL is NOT an error — covered by the empty-global tests.) */
 }
 
@@ -139,7 +197,7 @@ void test_build_chunk_overflow(void) {
     /* A tiny buffer cannot hold the chunk -> reject, no partial write relied on. */
     char out[8];
     int n = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods",
-                                   "Z:\\mod_loader\\t.lua", out, sizeof(out));
+                                   "Z:\\mod_loader\\t.lua", "0.2.0", out, sizeof(out));
     ASSERT_EQ(-1, n);
 }
 
@@ -149,7 +207,7 @@ void test_build_chunk_round_trips_long_paths(void) {
     const char *mods   = "Z:\\very\\deep\\path\\to\\the\\user\\mods\\dir";
     const char *entry  = "Z:\\very\\deep\\path\\to\\the\\mod_loader\\root\\file.lua";
     char out[1024];
-    int n = trampoline_build_chunk(loader, mods, entry, out, sizeof(out));
+    int n = trampoline_build_chunk(loader, mods, entry, "0.2.0", out, sizeof(out));
     ASSERT_TRUE(n > 0);
     /* Every backslash in the original is doubled in the baked chunk. */
     ASSERT_NOTNULL(strstr(out, "Z:\\\\very\\\\deep\\\\path"));
@@ -216,7 +274,7 @@ void test_join_feeds_build_chunk(void) {
     ASSERT_TRUE(jn > 0);
 
     char chunk[1024];
-    int cn = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", path, chunk, sizeof(chunk));
+    int cn = trampoline_build_chunk("Z:\\mod_loader", "Z:\\mods", path, "0.2.0", chunk, sizeof(chunk));
     ASSERT_TRUE(cn > 0);
     ASSERT_NOTNULL(strstr(chunk, "MOD_LOADER_DIR = \"Z:\\\\mod_loader\""));
     ASSERT_NOTNULL(strstr(chunk, "RELAY_MOD_PATH = \"Z:\\\\mods\""));
@@ -237,6 +295,16 @@ int main(void) {
                   test_build_chunk_null_mod_path_emits_empty_global);
     test_register("build_chunk_empty_mod_path_emits_empty_global",
                   test_build_chunk_empty_mod_path_emits_empty_global);
+    test_register("build_chunk_null_version_emits_nil_without_skipping_loader",
+                  test_build_chunk_null_version_emits_nil_without_skipping_loader);
+    test_register("build_chunk_empty_version_emits_nil",
+                  test_build_chunk_empty_version_emits_nil);
+    test_register("build_chunk_version_is_lua_escaped",
+                  test_build_chunk_version_is_lua_escaped);
+    test_register("build_chunk_overlong_version_emits_nil_without_skipping_loader",
+                  test_build_chunk_overlong_version_emits_nil_without_skipping_loader);
+    test_register("build_chunk_hands_off_exact_compiled_product_version",
+                  test_build_chunk_hands_off_exact_compiled_product_version);
     test_register("build_chunk_empty_loader_dir_rejected",
                   test_build_chunk_empty_loader_dir_rejected);
     test_register("build_chunk_empty_entry_rejected",

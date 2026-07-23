@@ -1,0 +1,10 @@
+-- metadata/crashify scenario: replacement mods.lst with crashify_alpha REMOVED.
+-- Copy this file over staged mods.lst to exercise stale-key cleanup:
+--   cp mods-without-alpha.lst mods.lst
+-- then trigger a developer-mode hot reload (Left Ctrl + Left Shift + R).
+-- On the replacement generation, Relay should remove `Mod:crashify_alpha` and
+-- republish only `Mod:crashify_beta` and `Mod:crashify_probe`; the
+-- crashify_probe observation line should show `Mod:crashify_alpha=<absent>`
+-- while the other two remain present. `ModRelay:Version` is never removed.
+crashify_beta
+crashify_probe

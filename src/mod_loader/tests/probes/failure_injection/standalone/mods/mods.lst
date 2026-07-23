@@ -1,0 +1,6 @@
+-- failure_injection/standalone scenario: mods.lst.
+-- Order matters: standalone_failure_probe is listed FIRST so its update runs
+-- before the healthy sibling's, demonstrating that the standalone failure
+-- does not block the sibling that follows it in the same generation.
+standalone_failure_probe
+healthy_sibling_probe

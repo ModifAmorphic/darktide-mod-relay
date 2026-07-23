@@ -103,8 +103,10 @@ local test_files = {
     "test_mod_manager",
     "test_dmf_adapter",
     "test_hot_reload",
+    "test_loader_hardening",
     "test_entry",
     "test_negative",
+    "test_probes",
 }
 for _, name in ipairs(test_files) do
     require(name)(M)

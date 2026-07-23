@@ -54,7 +54,11 @@ return function(runner)
         sb.__print = sb.__print or function() end
         sb.Managers = {}
 
-        sb.Mods = { file = {} }
+        sb.Mods = { file = {}, _relay = { version = "0.2.0" } }
+        sb.Crashify = {
+            print_property = function() end,
+            remove_print_property = function() end,
+        }
 
         -- mod_manager.lua loads dmf_adapter.lua via Mods.load_module at module
         -- top. Wire it to the mock's source loader so the real adapter source
@@ -416,7 +420,7 @@ return function(runner)
         runner.assert_eq("running", mm._mods[2].state)
         -- The invalid entry's object is untouched (no load attempted).
         runner.assert_nil(mm._mods[1].object)
-        runner.assert_eq("not_loaded", mm._mods[1].state)
+        runner.assert_eq("failed", mm._mods[1].state)
         -- The pass completes and the DMF contract fields settle.
         runner.assert_eq("done", mm._state)
         runner.assert_nil(mm._mod_load_index,
