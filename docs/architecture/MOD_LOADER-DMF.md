@@ -554,6 +554,35 @@ the internal `Mods.file.*` operations (which already root paths via `resolve()`
 and must not be double-wrapped). The wrapper installs on `Mods.lua.io.open`/
 `io.lines` *after* that capture, so the internal ops bypass it.
 
+**`io.popen` — relative-path CWD redirection.** A sibling wrapper applies to
+`Mods.lua.io.popen`, installed in its own block under a `_mod_root` guard.
+Mods that shell out via `io.popen("dir ..\\mods\\<mod>\\audio /b /a-d")` lean
+on the same stock-DMF relative-path convention (CWD assumed one level below
+`mods/`); unredirected, those commands miss the same way. Because `popen`'s
+argument is an opaque shell command string — there is no clean path to
+extract, normalize, or contain — the open/lines resolve+contain approach does
+not apply. The only lever is the shell's own CWD, so the wrapper prepends
+`cd /d "<normpath _mod_root>" && ` to the command string:
+
+- **Child-scope CWD:** `io.popen` always spawns `cmd.exe /c <command>`, so the
+  `cd` executes inside the spawned child and sets only that child's CWD to the
+  mods dir. The parent Lua process CWD is never touched — no
+  `SetCurrentDirectory`, no FFI, no thread race (the engine also re-asserts its
+  own CWD at boot, so a process-wide chdir would be futile anyway).
+- **`/d` switches drive AND directory** (plain `cd` only changes dir on the
+  current drive); the mods dir may be on a different drive than `binaries/`.
+  The double-quotes handle spaces; `&&` gates the original command on the `cd`
+  succeeding.
+- **Normalize once:** the mods dir passes through the same `path.normpath` the
+  open/lines wrapper uses (the forward-slash form `init.lua` derives becomes
+  the Windows form `cmd.exe` expects).
+- **Guard:** installs only when `_mod_root` is a non-empty string and
+  `Mods.lua.io.popen` is a function; otherwise `popen` is left untouched. A
+  non-string command (e.g. `nil`) is forwarded to the original unmodified.
+
+This makes the common legitimate convention work; it is **not** a containment
+boundary (see the threat model below).
+
 **Contract change — the mod-path boundary.** This redirection changes the
 `--mod-path` / `RELAY_MOD_PATH` contract:
 
@@ -577,9 +606,14 @@ attempts). It is NOT a security boundary against a hostile mod:
 - **Symlinks/junctions** inside `<mod_path>` could redirect outside the
   boundary in ways `normpath` doesn't catch (lexical resolution doesn't follow
   links).
-- **FFI / `os.execute` / `io.popen`** bypass the wrapper entirely (the published
-  `os`/`ffi` engine modules are available to DMF for debug modules; a mod that
-  shells out or calls into native code is unconstrained by this Lua-level
+- **`io.popen` is now partially covered** (relative paths only): a popen call
+  using the stock-DMF `..\mods\...` convention resolves against the mods dir via
+  the cd-prepend wrapper above. What remains unconstrained: (i) **absolute
+  paths** embedded anywhere in a popen command string (the wrapper does not
+  parse or rewrite them — a mod can still shell out to an arbitrary absolute
+  path), (ii) **`os.execute`** (not wrapped), and (iii) **FFI / native calls**
+  (the published `os`/`ffi` engine modules are available to DMF for debug
+  modules; a mod that calls into native code is unconstrained by any Lua-level
   wrapper).
 
 The wrapper exists to make the common, legitimate DMF path convention work

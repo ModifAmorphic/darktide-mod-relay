@@ -549,4 +549,86 @@ return function(runner)
         runner.assert_eq("C:/staged/mods/inner.lua", opened_with[1],
             "internal dofile must use the resolve()-produced forward-slash path, not a wrapper-normalized one")
     end)
+
+    -- ---------------------------------------------------------------------
+    -- Mods.lua.io.popen wrapper (raw-io redirection, shell-out surface)
+    -- ---------------------------------------------------------------------
+    --
+    -- The popen wrapper prepends `cd /d "<normpath _mod_root>" && ` to the
+    -- command string so relative-path shell-out calls resolve against the
+    -- mods dir (the stock-DMF ..\mods\<mod>\... convention). It installs only
+    -- when _mod_root is a non-empty string and Mods.lua.io.popen is a
+    -- function. These tests use a recording popen mock to verify the
+    -- command-string transformation only (no real cmd.exe is spawned).
+
+    -- Build a wrapper-installed sandbox whose io.popen records what it
+    -- receives. _mod_root is set only when mod_root ~= nil (pass nil or "" to
+    -- exercise the no-install guard). Returns the sandbox + the record table.
+    local function setup_with_popen(mod_root)
+        local received = {}
+        local sb = mock.new_sandbox()
+        local mods = { lua = {}, _mod_path = "C:/staged" }
+        if mod_root ~= nil then mods._mod_root = mod_root end
+        sb.Mods = mods
+        local iot = mock.make_io({})
+        iot.popen = function(cmd, ...)
+            received.cmd = cmd
+            received.extra = { ... }
+            return "FAKE_HANDLE"
+        end
+        sb.Mods.lua.io = iot
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.__print = function() end
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        mock.run_module("file", sb)
+        return sb, received
+    end
+
+    runner.register("popen wrapper: prepends cd /d \"<normpath _mod_root>\" && to relative-path commands", function()
+        -- The wrapper must prepend the cd /d prefix to the command string.
+        -- Compute the expected prefix via path.normpath so the assertion is
+        -- platform-correct in the offline harness (forward slashes on Linux,
+        -- backslashes on Windows — matching what the wrapper produces).
+        local path_mod = mock.run_module("path", mock.new_sandbox())
+        local mod_root = "C:/staged/mods"
+        local sb, received = setup_with_popen(mod_root)
+        local h = sb.Mods.lua.io.popen("dir ..\\mods\\foo\\audio /b /a-d")
+        runner.assert_eq("FAKE_HANDLE", h, "popen must return the original's result")
+        local expected = 'cd /d "' .. path_mod.normpath(mod_root) .. '" && dir ..\\mods\\foo\\audio /b /a-d'
+        runner.assert_eq(expected, received.cmd,
+            "popen must prepend cd /d + normpath root to the command string")
+    end)
+
+    runner.register("popen wrapper: non-string cmd passes through to the original unmodified", function()
+        -- A nil/non-string cmd bypasses the prepend (the wrapper only
+        -- transforms strings) and reaches the original verbatim.
+        local sb, received = setup_with_popen("C:/staged/mods")
+        local h = sb.Mods.lua.io.popen(nil)
+        runner.assert_eq("FAKE_HANDLE", h)
+        runner.assert_eq(nil, received.cmd,
+            "non-string cmd must reach the original unchanged (no prepend)")
+    end)
+
+    runner.register("popen wrapper: does not install when _mod_root is empty/nil (popen stays original)", function()
+        -- The wrapper guard keys on _mod_root; with it missing or empty, the
+        -- wrapper does not install and Mods.lua.io.popen is the original mock
+        -- — the command reaches it unchanged.
+        local sb_nil, received_nil = setup_with_popen(nil)
+        runner.assert_eq("FAKE_HANDLE", sb_nil.Mods.lua.io.popen("dir foo"))
+        runner.assert_eq("dir foo", received_nil.cmd, "nil _mod_root: popen must not be wrapped")
+
+        local sb_empty, received_empty = setup_with_popen("")
+        runner.assert_eq("FAKE_HANDLE", sb_empty.Mods.lua.io.popen("dir bar"))
+        runner.assert_eq("dir bar", received_empty.cmd, "empty _mod_root: popen must not be wrapped")
+    end)
+
+    runner.register("popen wrapper: forwards trailing varargs (mode) to the original", function()
+        -- io.popen(prog, mode): the wrapper forwards everything after cmd.
+        local sb, received = setup_with_popen("C:/staged/mods")
+        sb.Mods.lua.io.popen("dir foo", "r")
+        runner.assert_eq({ "r" }, received.extra,
+            "popen must forward trailing args (mode) to the original")
+        runner.assert_truthy(received.cmd:find('^cd /d "'),
+            "the forwarded command must still carry the cd prepend")
+    end)
 end

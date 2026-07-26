@@ -350,3 +350,31 @@ if Mods._mod_path and Mods._mod_path ~= "" then
         return _original_io_lines(resolved, ...)
     end
 end
+
+-- ---------------------------------------------------------------------------
+-- Mods.lua.io.popen wrapper — relative-path CWD redirection via cd-prepend.
+--
+-- Prepends `cd /d "<normpath _mod_root>" && ` so mod shell-out calls using
+-- RELATIVE paths (stock-DMF `..\mods\<mod>\...`) resolve against the mods
+-- dir. The cd runs inside the spawned cmd.exe child only — the parent Lua
+-- CWD is never touched (no SetCurrentDirectory, no FFI, no race); the opaque
+-- shell string rules out the path-rewrite+containment open/lines applies.
+-- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection".
+-- ---------------------------------------------------------------------------
+do
+    local mod_root = Mods._mod_root
+    if type(mod_root) == "string" and mod_root ~= ""
+       and type(Mods.lua.io) == "table"
+       and type(Mods.lua.io.popen) == "function" then
+        -- _mod_root carries a forward slash (init.lua: _mod_path.."/mods");
+        -- normpath yields the Windows form cd /d expects.
+        local win_root = path.normpath(mod_root)
+        local _orig_popen = Mods.lua.io.popen
+        Mods.lua.io.popen = function(cmd, ...)
+            if type(cmd) == "string" then
+                return _orig_popen('cd /d "' .. win_root .. '" && ' .. cmd, ...)
+            end
+            return _orig_popen(cmd, ...)
+        end
+    end
+end
