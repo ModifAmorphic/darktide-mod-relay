@@ -105,6 +105,13 @@ return function(runner)
                 old_rel = "observational/lua_logs_probe/lua_logs_probe.mod",
                 readme_behavior = { "[LUA_LOGS_PROBE]", "--lua-logs" },
             },
+            {
+                dir = "observational/cwd_probe",
+                probe = "cwd_probe",
+                mod_rel = "observational/cwd_probe/mods/cwd_probe/cwd_probe.mod",
+                old_rel = "observational/cwd_probe/cwd_probe.mod",
+                readme_behavior = { "[CWD_PROBE]", "--lua-logs" },
+            },
         }
         for _, s in ipairs(scenarios) do
             -- mods.lst lists exactly the one probe (authoritative order).
@@ -199,6 +206,58 @@ return function(runner)
         assert_contains(readme, "Coverage is", "lua_logs_probe README (coverage-not-guaranteed)")
         assert_contains(readme, "black-box", "lua_logs_probe README (DMF black-box caveat)")
         assert_contains(readme, "Cleanup", "lua_logs_probe README (cleanup section)")
+    end)
+
+    -- -------------------------------------------------------------------
+    -- observational/cwd_probe: the process-CWD observational probe.
+    -- Structural-only: compile + distinctive case/contract markers. The probe
+    -- is NOT executed here (it only runs staged in the real game). Read-only
+    -- enforcement: asserts it does NOT call SetCurrentDirectory /
+    -- os.execute / Mods.message.
+    -- -------------------------------------------------------------------
+    runner.register("probes: observational/cwd_probe structure + markers", function()
+        local probe = assert_compilable("observational/cwd_probe/mods/cwd_probe/cwd_probe.mod")
+        -- Distinctive prefix + one marker per documented case.
+        assert_contains(probe, "[CWD_PROBE]", "cwd_probe (prefix)")
+        assert_contains(probe, "case=cwd_ffi", "cwd_probe (cwd_ffi case)")
+        assert_contains(probe, "case=exe_path", "cwd_probe (exe_path case)")
+        assert_contains(probe, "case=cwd_popen", "cwd_probe (cwd_popen case)")
+        -- FFI surface + the three Win32 cdef symbols + kernel32 load.
+        assert_contains(probe, "Mods.lua.ffi", "cwd_probe (FFI surface)")
+        assert_contains(probe, "GetCurrentDirectoryW", "cwd_probe (cdef symbol)")
+        assert_contains(probe, "GetModuleFileNameW", "cwd_probe (cdef symbol)")
+        assert_contains(probe, "WideCharToMultiByte", "cwd_probe (cdef symbol)")
+        assert_contains(probe, "ffi.load", "cwd_probe (kernel32 load)")
+        -- popen cross-check surface.
+        assert_contains(probe, "io.popen", "cwd_probe (popen surface)")
+        -- Process-lifetime load index + rooted scenario log path.
+        assert_contains(probe, "_RELAY_CWD_PROBE_LOAD", "cwd_probe (load index global)")
+        assert_contains(probe, "cwd_probe/cwd_probe.log", "cwd_probe (scenario log)")
+        -- Contained-failure marker (any failing case records this and continues).
+        assert_contains(probe, "status=unavailable", "cwd_probe (contained failure marker)")
+        -- Per-case containment: the case() helper runs each body under pcall.
+        assert_contains(probe, "_pcall(body)", "cwd_probe (per-case containment)")
+        -- Read-only enforcement: must NOT change the CWD, must NOT shell out,
+        -- must NOT use forbidden community surfaces.
+        assert_not_contains(probe, "SetCurrentDirectory", "cwd_probe (read-only: no chdir)")
+        assert_not_contains(probe, "os.execute", "cwd_probe (read-only: no shell)")
+        assert_not_contains(probe, "Mods.message", "cwd_probe (no community surface)")
+
+        -- README documents the complete-bundle staging, launch variants, the
+        -- acceptance matrix (incl. the cwd_ffi == cwd_popen agreement check),
+        -- the research question, and cleanup.
+        local readme = assert_present("observational/cwd_probe/README.md")
+        assert_contains(readme, "[CWD_PROBE]", "cwd_probe README (prefix)")
+        assert_contains(readme, "--mod-path", "cwd_probe README (direct --mod-path)")
+        assert_contains(readme, "complete bundle", "cwd_probe README (uniform staging shape)")
+        assert_contains(readme, "--lua-logs", "cwd_probe README (CLI variant)")
+        assert_contains(readme, "RELAY_LUA_LOGS=1", "cwd_probe README (env variant)")
+        assert_contains(readme, "cwd_ffi == cwd_popen", "cwd_probe README (matrix: agreement)")
+        assert_contains(readme, "binaries", "cwd_probe README (research question)")
+        assert_contains(readme, "Cleanup", "cwd_probe README (cleanup section)")
+        -- Legacy staging shape is gone (matches lua_logs_probe).
+        assert_not_contains(readme, "Shape A", "cwd_probe README (legacy shape gone)")
+        assert_not_contains(readme, "Add (or merge)", "cwd_probe README (no list-merge step)")
     end)
 
     -- -------------------------------------------------------------------
