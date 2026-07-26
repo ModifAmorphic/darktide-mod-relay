@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.4.0...v0.5.0) (2026-07-26)
+
+
+### Features
+
+* **mod-loader:** redirect io.popen relative paths to mod root ([#12](https://github.com/ModifAmorphic/darktide-mod-relay/issues/12)) ([e4f8625](https://github.com/ModifAmorphic/darktide-mod-relay/commit/e4f862567f061c9ee5637701c9c912e7e11692dd))
+
 ## [0.4.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.3.0...v0.4.0) (2026-07-23)
 
 
