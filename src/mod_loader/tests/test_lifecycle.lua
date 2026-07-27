@@ -19,6 +19,9 @@ return function(runner)
     local function setup(print_fn)
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        -- lifecycle reads leveled diagnostics from Mods._relay.log_<level> (the
+        -- helper init.lua publishes in production). Isolated test — attach it.
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = print_fn or function() end
 
@@ -276,6 +279,7 @@ return function(runner)
         opts = opts or {}
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = opts.print_fn or function() end
         sb.class = function(name) return { name = name } end
@@ -856,6 +860,7 @@ return function(runner)
         local engine_ran = false
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
@@ -944,6 +949,7 @@ return function(runner)
         local enters = 0
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
@@ -986,6 +992,7 @@ return function(runner)
         local exits = {}
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
@@ -1026,6 +1033,7 @@ return function(runner)
         local destroy_calls = 0
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
@@ -1082,6 +1090,7 @@ return function(runner)
         local logged = {}
         local sb = mock.new_sandbox()
         sb.Mods = {}
+        mock.attach_logger(sb)
         sb.Managers = {}
         sb.__print = function(m) table.insert(logged, m) end
         sb.class = function(name) return { name = name } end
@@ -1151,6 +1160,7 @@ return function(runner)
         local sb = mock.new_sandbox()
         sb.Mods = {}
         sb.Mods._relay = { skip_splash = true }  -- the opt-in (init.lua sets this)
+        mock.attach_logger(sb)  -- adds log_<level> alongside skip_splash
         sb.Managers = {}
         sb.__print = opts.print_fn or function() end
         sb.class = function(name) return { name = name } end

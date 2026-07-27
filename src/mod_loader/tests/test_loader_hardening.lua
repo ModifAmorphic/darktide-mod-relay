@@ -85,6 +85,7 @@ return function(runner)
             },
         }
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        mock.attach_logger(sb)
         sb.Mods.file.add_observer = function() end
         local retire_count = 0
         sb.Mods.retire_class = function(name)

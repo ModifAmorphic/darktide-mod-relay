@@ -216,4 +216,36 @@ function M.run_module(name, sb)
     return M.load_module(name, sb)()
 end
 
+-- Publish the loader's diagnostic logger onto sb.Mods._relay (the test fake of
+-- the helper init.lua publishes in production onto the same surface). Every
+-- loader module reads its leveled prints from Mods._relay.log_<level>; a test
+-- that loads a logging module (file/lifecycle/mod_manager) WITHOUT running
+-- init.lua must call this so those modules resolve real functions instead of
+-- nil. Routes to sb.__print dynamically so a per-test print spy captures the
+-- formatted "{LEVEL} [mod_loader] {message}" line. Preserves any fields already
+-- on Mods / Mods._relay (version, skip_splash, traceback, ...). Idempotent: a
+-- second call keeps the already-attached (or init-published) loggers. Call AFTER
+-- sb.Mods and sb.__print exist and BEFORE mock.run_module loads a logging module.
+function M.attach_logger(sb)
+    local mods = sb.Mods
+    if type(mods) ~= "table" then
+        mods = {}
+        sb.Mods = mods
+    end
+    local relay = mods._relay
+    if type(relay) ~= "table" then
+        relay = {}
+        mods._relay = relay
+    end
+    local function make(level)
+        return function(message)
+            sb.__print(level .. " [mod_loader] " .. tostring(message))
+        end
+    end
+    relay.log_info  = relay.log_info  or make("INFO")
+    relay.log_debug = relay.log_debug or make("DEBUG")
+    relay.log_warn  = relay.log_warn  or make("WARN")
+    relay.log_error = relay.log_error or make("ERROR")
+end
+
 return M

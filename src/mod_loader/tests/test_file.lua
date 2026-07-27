@@ -21,6 +21,7 @@ return function(runner)
         sb.Mods.lua.io = iot
         sb.Mods.lua.loadstring = sb.loadstring
         sb.__print = function() end
+        mock.attach_logger(sb)
         -- file.lua loads path.lua via Mods.load_module at its top; wire it to
         -- the mock loader so the existing setup() keeps working. The wrapper
         -- does NOT install here (no _mod_path set), so this sandbox tests the
@@ -48,6 +49,7 @@ return function(runner)
         sb.Mods.lua.io = iot
         sb.Mods.lua.loadstring = sb.loadstring
         sb.__print = function() end
+        mock.attach_logger(sb)
         sb.Mods.load_module = function(name)
             return mock.run_module(name, sb)
         end
@@ -383,6 +385,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function(msg) table.insert(logged, msg) end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         sb.Mods.file.add_observer(function() error("observer boom") end)
         local v = sb.Mods.file.dofile("ok")

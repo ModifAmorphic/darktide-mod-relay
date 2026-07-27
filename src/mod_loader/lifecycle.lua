@@ -53,12 +53,18 @@
 -- controlled log + vanilla degradation, never a game crash.
 
 local _pcall = pcall
-local _print = __print or print
 local _tostring = tostring
 local _unpack = unpack
 local _select = select
 local _rawget = rawget
 local _type = type
+
+-- Leveled diagnostics (the shared helper init.lua publishes on Mods._relay
+-- before this module loads). Each emits "{LEVEL} [mod_loader] {message}".
+local log_info  = Mods._relay.log_info
+local log_debug = Mods._relay.log_debug
+local log_warn  = Mods._relay.log_warn
+local log_error = Mods._relay.log_error
 
 -- Snapshot the optional StateSplash skip ONCE at module-eval time. init.lua
 -- reads the trampoline-baked RELAY_SKIP_SPLASH global and stores the boolean
@@ -86,7 +92,7 @@ local function _resolve_state_title()
             return _state_title
         end
     end
-    _print("[mod_loader] splash skip: StateTitle unavailable; vanilla splash will run")
+    log_warn("splash skip: StateTitle unavailable; vanilla splash will run")
     return nil  -- cached nil
 end
 
@@ -161,7 +167,7 @@ local function advance_bootstrap()
             bs.manager_class_loaded = true
         else
             if not bs.manager_missing_logged then
-                _print("[mod_loader] bootstrap: mod_manager not yet loadable; will retry")
+                log_debug("bootstrap: mod_manager not yet loadable; will retry")
                 bs.manager_missing_logged = true
             end
         end
@@ -193,7 +199,7 @@ local function advance_bootstrap()
                         m:update(dt)
                     end)
                     if not ok then
-                        _print("[mod_loader] Managers.mod:update failed: " .. _tostring(err))
+                        log_error("Managers.mod:update failed: " .. _tostring(err))
                     end
                 end
                 return orig_update(self, dt, ...)
@@ -201,7 +207,7 @@ local function advance_bootstrap()
             bs.state_game_wrapped = true
         else
             if not bs.state_game_missing_logged then
-                _print("[mod_loader] bootstrap: CLASS.StateGame.update not yet available; will retry")
+                log_debug("bootstrap: CLASS.StateGame.update not yet available; will retry")
                 bs.state_game_missing_logged = true
             end
         end
@@ -234,7 +240,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("exit", old_name, old_state)
                     end)
                     if not ok then
-                        _print("[mod_loader] state exit drive failed: " .. _tostring(err))
+                        log_error("state exit drive failed: " .. _tostring(err))
                     end
                 end
                 -- Call the original exactly once with unchanged self/varargs.
@@ -248,7 +254,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("enter", new_name, new_state)
                     end)
                     if not ok then
-                        _print("[mod_loader] state enter drive failed: " .. _tostring(err))
+                        log_error("state enter drive failed: " .. _tostring(err))
                     end
                 end
                 return _unpack(results, 1, results.n)
@@ -256,7 +262,7 @@ local function advance_bootstrap()
             bs.change_state_wrapped = true
         else
             if not bs.change_state_missing_logged then
-                _print("[mod_loader] bootstrap: CLASS.GameStateMachine._change_state not yet available; will retry")
+                log_debug("bootstrap: CLASS.GameStateMachine._change_state not yet available; will retry")
                 bs.change_state_missing_logged = true
             end
         end
@@ -291,7 +297,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("exit", cur_name, cur_state)
                     end)
                     if not ok then
-                        _print("[mod_loader] final state exit drive failed: " .. _tostring(err))
+                        log_error("final state exit drive failed: " .. _tostring(err))
                     end
                 end
                 -- Original runs exactly once with unchanged self/varargs. Its
@@ -302,7 +308,7 @@ local function advance_bootstrap()
             bs.destroy_wrapped = true
         else
             if not bs.destroy_missing_logged then
-                _print("[mod_loader] bootstrap: CLASS.GameStateMachine.destroy not yet available; will retry")
+                log_debug("bootstrap: CLASS.GameStateMachine.destroy not yet available; will retry")
                 bs.destroy_missing_logged = true
             end
         end
@@ -345,7 +351,7 @@ local function advance_bootstrap()
                     if ok then
                         return
                     end
-                    _print("[mod_loader] splash skip failed; falling back to vanilla: " .. _tostring(err))
+                    log_error("splash skip failed; falling back to vanilla: " .. _tostring(err))
                 end
                 -- StateTitle unresolved OR skip errored: vanilla splash.
                 return orig_on_enter(self, parent, params, creation_context)
@@ -353,7 +359,7 @@ local function advance_bootstrap()
             bs.splash_wrapped = true
         else
             if not bs.splash_missing_logged then
-                _print("[mod_loader] bootstrap: CLASS.StateSplash.on_enter not yet available; will retry")
+                log_debug("bootstrap: CLASS.StateSplash.on_enter not yet available; will retry")
                 bs.splash_missing_logged = true
             end
         end
@@ -399,7 +405,7 @@ local function coordinate_bootstrap()
                 local results = _pack(orig_state_update(self, ...))
                 local ok, err = _pcall(advance_bootstrap)
                 if not ok then
-                    _print("[mod_loader] bootstrap failed: " .. _tostring(err))
+                    log_error("bootstrap failed: " .. _tostring(err))
                 end
                 return _unpack(results, 1, results.n)
             end

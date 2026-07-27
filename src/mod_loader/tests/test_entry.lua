@@ -342,4 +342,85 @@ return function(runner)
         runner.assert_eq(1, count_ffi_calls(calls),
             "no additional original_require('ffi') call on second entry")
     end)
+
+    -- -----------------------------------------------------------------
+    -- Mods._relay leveled diagnostic logger (the shared loader print helper)
+    -- -----------------------------------------------------------------
+    --
+    -- The helper init.lua publishes BEFORE the module-bootstrap loop. Every
+    -- loader module reads its leveled prints from it. These tests exercise the
+    -- REAL helper (not the mock.attach_logger test fake used by isolated module
+    -- tests): format, totality over bad input, and the never-a-second-failure
+    -- pcall guard.
+
+    -- Run the entry with a print spy; return (sb, logged) with the spy list
+    -- cleared of bootstrap-time captures so a test observes only its own calls.
+    local function run_init_logged()
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function() return {} end
+        sb.print = function(m) logged[#logged + 1] = m end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        for i = #logged, 1, -1 do logged[i] = nil end
+        return sb, logged
+    end
+
+    runner.register("entry: publishes log_info/log_debug/log_warn/log_error on Mods._relay", function()
+        local sb = run_init_logged()
+        runner.assert_type("function", sb.Mods._relay.log_info)
+        runner.assert_type("function", sb.Mods._relay.log_debug)
+        runner.assert_type("function", sb.Mods._relay.log_warn)
+        runner.assert_type("function", sb.Mods._relay.log_error)
+    end)
+
+    runner.register("entry: each log helper emits '{LEVEL} [mod_loader] {message}'", function()
+        local sb, logged = run_init_logged()
+        sb.Mods._relay.log_info("an info message")
+        sb.Mods._relay.log_debug("a debug message")
+        sb.Mods._relay.log_warn("a warn message")
+        sb.Mods._relay.log_error("an error message")
+        runner.assert_eq("INFO [mod_loader] an info message", logged[1])
+        runner.assert_eq("DEBUG [mod_loader] a debug message", logged[2])
+        runner.assert_eq("WARN [mod_loader] a warn message", logged[3])
+        runner.assert_eq("ERROR [mod_loader] an error message", logged[4])
+    end)
+
+    runner.register("entry: log helpers are total over bad input (non-string / unprintable) and never error", function()
+        local sb, logged = run_init_logged()
+        -- nil / number / table all stringify without raising.
+        local ok = pcall(function()
+            sb.Mods._relay.log_info(nil)
+            sb.Mods._relay.log_debug(42)
+            sb.Mods._relay.log_warn({})
+        end)
+        runner.assert_eq(true, ok, "non-string messages must not raise")
+        runner.assert_truthy(logged[1]:find("nil", 1, true) ~= nil, "nil renders as 'nil'")
+        runner.assert_truthy(logged[2]:find("42", 1, true) ~= nil, "number renders textually")
+        -- A value whose __tostring metamethod errors must yield the safe
+        -- fallback, not propagate (safe_text is tostring-under-pcall).
+        local unprintable = setmetatable({}, { __tostring = function() error("boom") end })
+        local ok2 = pcall(sb.Mods._relay.log_error, unprintable)
+        runner.assert_eq(true, ok2, "an unprintable value must not raise")
+        runner.assert_eq("ERROR [mod_loader] <unprintable error>", logged[#logged],
+            "unprintable message renders as the <unprintable error> fallback")
+    end)
+
+    runner.register("entry: a log helper swallows a failing print surface (never a second failure path)", function()
+        -- If the underlying print errors, the helper must contain it: a
+        -- diagnostic must never break loading. init's own bootstrap-time print
+        -- is swallowed under this failing print too.
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.require = function() return {} end
+        sb.print = function() error("print exploded", 0) end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        local r = mock.load_module("init", sb)()
+        runner.assert_eq(true, r, "entry still succeeds when the print surface errors")
+        local ok = pcall(sb.Mods._relay.log_info, "anything")
+        runner.assert_eq(true, ok, "log_info must not propagate a print-surface error")
+    end)
 end

@@ -303,7 +303,7 @@ forwarded game args, e.g. `"…\Darktide.exe" --lua-heap-mb-size 2048`), so the
 exact arguments that reached the game are captured.
 
 **Log split to be aware of:** the mod loader's Lua-side `print`/`__print` output
-(the `[mod_loader] …` lines), DMF, and mods all go to the **engine's** print
+(the `{LEVEL} [mod_loader] …` lines), DMF, and mods all go to the **engine's** print
 destination — Darktide's **console log** (`console-*.log`, at
 `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`

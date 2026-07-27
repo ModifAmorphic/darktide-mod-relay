@@ -201,7 +201,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   (e.g. `2026-07-16T12:34:56-04:00`), and the worker logs a `launching <cmdline>`
   INFO line (the host process command line as the game sees it — the quoted exe
   + forwarded game args) right after the startup banner. By default the mod
-  loader's Lua-side `print` lines (the `[mod_loader] …` lines), DMF, and mods go
+  loader's Lua-side `print` lines (the `{LEVEL} [mod_loader] …` lines), DMF, and mods go
   to Darktide's **console log** (`console-*.log`, at
   `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`

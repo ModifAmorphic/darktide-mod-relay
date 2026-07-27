@@ -81,7 +81,7 @@ drains at the end of the fan-out — all in the same generation):
 7. `[STANDALONE_FAILURE] update raising injected scratch error ...`
 8. Relay's single full diagnostic:
    ```
-   [mod_loader] mod 'standalone_failure_probe' update failed in generation 1;
+   ERROR [mod_loader] mod 'standalone_failure_probe' update failed in generation 1;
    Relay disabled this entry:
    <full traceback>
    ```

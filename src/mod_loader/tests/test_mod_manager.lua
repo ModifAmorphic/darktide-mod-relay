@@ -55,6 +55,10 @@ return function(runner)
         sb.Managers = {}
 
         sb.Mods = { file = {}, _relay = { version = "0.2.0" } }
+        -- mod_manager reads leveled diagnostics from Mods._relay.log_<level>
+        -- (the helper init.lua publishes in production). This isolated test does
+        -- not run init, so attach the test fake before loading the module.
+        mock.attach_logger(sb)
         sb.Crashify = {
             print_property = function() end,
             remove_print_property = function() end,
@@ -215,6 +219,26 @@ return function(runner)
         end
         runner.assert_eq(true, found,
             "missing mods.lst must log a clear message naming mods.lst as missing")
+    end)
+
+    runner.register("mod_manager: diagnostic lines carry the {LEVEL} [mod_loader] prefix (community format)", function()
+        -- A migrated call site end-to-end: the missing-mods.lst path logs at
+        -- WARN, so its line must carry the full community prefix. Confirms a
+        -- real mod_manager path routes through the leveled helper.
+        local logged = {}
+        local sb = setup({ missing_order = true })
+        sb.__print = function(m) table.insert(logged, m) end
+        load_driver(sb):new()
+        local leveled = nil
+        for _, line in ipairs(logged) do
+            if line:find("^WARN %[mod_loader%] ", 1) then
+                leveled = line
+                break
+            end
+        end
+        runner.assert_not_nil(leveled, "expected a 'WARN [mod_loader] ...' line")
+        runner.assert_truthy(leveled:find("mods%.lst missing") ~= nil,
+            "the leveled line carries the message body")
     end)
 
     runner.register("mod_manager: empty mods.lst -> empty _mods, no crash", function()
@@ -592,6 +616,7 @@ return function(runner)
         sb.__print = function() end
         sb.Managers = {}
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        mock.attach_logger(sb)
         -- mod_manager.lua loads dmf_adapter.lua via Mods.load_module; wire it
         -- to the mock's source loader so the real adapter source runs in the
         -- sandbox.

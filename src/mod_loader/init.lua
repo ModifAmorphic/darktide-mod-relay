@@ -243,6 +243,42 @@ end
 -- os is captured nil-safe (it may be absent in a stripped engine build). `or`
 -- preserves a prior capture if init re-ran.
 Mods.lua.os = Mods.lua.os or os
+
+-- Shared loader diagnostic logger — published on Mods._relay (loader-private)
+-- BEFORE the module-bootstrap loop so every loader module (file/lifecycle/
+-- mod_manager, loaded here or later by the lifecycle bootstrap) reads the same
+-- helper. Each level emits exactly "{LEVEL} [mod_loader] {message}" (the
+-- engine/DMF community shape; single source for ALL loader diagnostics). The
+-- print runs under pcall and the message runs through a tostring-under-pcall
+-- safe_text, so a bad argument or a print failure can NEVER become a second
+-- failure path that breaks loading. Mechanism only — NO level threshold: the
+-- loader's prints go to the authoritative console log (unfiltered), and the
+-- lua-print tee copies everything at INFO; level filtering is the shell/tee's
+-- job, not the loader's. _print resolves to the post-tee __print so loader
+-- diagnostics are tee'd when --lua-logs is on.
+do
+    local _pcall = pcall
+    local _tostring = tostring
+    local _type = type
+    local _print = __print
+    local function safe_text(value)
+        local ok, text = _pcall(_tostring, value)
+        if ok and _type(text) == "string" then
+            return text
+        end
+        return "<unprintable error>"
+    end
+    local function make_logger(level)
+        return function(message)
+            _pcall(_print, level .. " [mod_loader] " .. safe_text(message))
+        end
+    end
+    Mods._relay.log_info  = make_logger("INFO")
+    Mods._relay.log_debug = make_logger("DEBUG")
+    Mods._relay.log_warn  = make_logger("WARN")
+    Mods._relay.log_error = make_logger("ERROR")
+end
+
 -- Publish the engine LuaJIT FFI module at the community contract surface.
 -- require("ffi") creates no global in LuaJIT 2.1, so a global grab yields nil;
 -- the module is obtained from the pre-wrap original require (NOT the wrapped
@@ -255,7 +291,7 @@ if Mods.lua.ffi == nil and type(Mods.original_require) == "function" then
     if ok and type(result) == "table" then
         Mods.lua.ffi = result
     else
-        __print("[mod_loader] ffi module unavailable; Mods.lua.ffi remains nil")
+        Mods._relay.log_warn("ffi module unavailable; Mods.lua.ffi remains nil")
     end
 end
 -- The mod-path boundary (RELAY_MOD_PATH). _mod_path is the boundary — the
@@ -289,14 +325,13 @@ local _loadstring = Mods.lua.loadstring
 local _pcall = pcall
 local _setfenv = setfenv
 local _getfenv = getfenv
-local _print = __print
 
 -- _load_module — the shared dofile-style loader for Relay modules, rooted at
 -- MOD_LOADER_DIR. Reads + compiles + runs the chunk in the entry's env
 -- (setfenv(fn, getfenv(1)) so modules share _G with the entry — the engine's
 -- globals in production, the test sandbox in tests). Returns (ok, result):
 -- ok is true/false; result is the chunk's return value on success or nil on
--- failure. Logs a FATAL line on open/parse/run failure so a mis-staged module
+-- failure. Logs an ERROR line on open/parse/run failure so a mis-staged module
 -- is diagnosable in the shell log.
 local function _load_module(name)
     local base = MOD_LOADER_DIR or ""
@@ -304,7 +339,7 @@ local function _load_module(name)
 
     local f, err = _io_open(path, "r")
     if not f then
-        _print("[mod_loader] FATAL: cannot open " .. path .. ": " .. tostring(err))
+        Mods._relay.log_error("cannot open " .. path .. ": " .. tostring(err))
         return false, nil
     end
     local data = f:read("*all")
@@ -312,14 +347,14 @@ local function _load_module(name)
 
     local fn, lerr = _loadstring(data, path)
     if not fn then
-        _print("[mod_loader] FATAL: cannot parse " .. path .. ": " .. tostring(lerr))
+        Mods._relay.log_error("cannot parse " .. path .. ": " .. tostring(lerr))
         return false, nil
     end
     _setfenv(fn, _getfenv(1))
 
     local ok, rerr = _pcall(fn)
     if not ok then
-        _print("[mod_loader] FATAL: error running " .. path .. ": " .. tostring(rerr))
+        Mods._relay.log_error("error running " .. path .. ": " .. tostring(rerr))
         return false, nil
     end
     return true, rerr
@@ -348,7 +383,7 @@ end
 local modules = { "file", "class_registry", "lifecycle", "require_bridge" }
 for _, mod in ipairs(modules) do
     if not bootstrap_load(mod) then
-        _print("[mod_loader] bootstrap aborted at module '" .. mod .. "'")
+        Mods._relay.log_error("bootstrap aborted at module '" .. mod .. "'")
         return false
     end
 end
@@ -358,6 +393,6 @@ end
 -- coordinator after every successful require.
 Mods.install_require_bridge()
 
-_print("[mod_loader] loaded at pcall#1")
+Mods._relay.log_info("loaded at pcall#1")
 Mods._loaded = true
 return true

@@ -221,7 +221,7 @@ Relay writes to **two** separate logs by default:
 - **Darktide console log** (`console-*.log`, at
   `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows;
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
-  under Proton) — the mod loader's `[mod_loader] …` lines, DMF, and mods.
+   under Proton) — the mod loader's `{LEVEL} [mod_loader] …` lines, DMF, and mods.
   **Authoritative and complete** for Lua output; Relay never redirects or
   suppresses it.
 
