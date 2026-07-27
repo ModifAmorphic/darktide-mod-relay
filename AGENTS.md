@@ -53,7 +53,10 @@ src/                Mod Relay — the injected modding runtime + injector
   target/           cargo build artifacts (gitignored)
   discovery/        Rust crate: LuaJIT discovery engine (pure library, C-ABI staticlib)
   shell/            C shell — the injected DLL (DllMain, MinHook, lua_newstate +
-                      lua_pcall hooks, production trampoline @ pcall#1; log_sink.c
+                      lua_pcall hooks, production trampoline @ pcall#1; the
+                      trampoline bakes MOD_LOADER_DIR + RELAY_MOD_PATH +
+                      MOD_RELAY_VERSION + RELAY_SKIP_SPLASH into the pcall#1
+                      chunk globals; log_sink.c
                       is the pure, I/O-free lua-print line-sanitization helper for
                       the optional print tee, compiled into both the DLL and the
                       C unit tests)
@@ -82,7 +85,16 @@ src/                Mod Relay — the injected modding runtime + injector
                       on_game_state_changed("exit",…) for the active state before
                       destruction, closing the community-contract gap where a
                       state destroyed without a preceding _change_state exit
-                      would otherwise receive none); mod_manager.lua is the generic
+                      would otherwise receive none); when the user opts in via
+                      --skip-splash/RELAY_SKIP_SPLASH=1, lifecycle.lua also
+                      directly wraps CLASS.StateSplash.on_enter (a 5th idempotent
+                      bootstrap step, gated on the opt-in) so the intro splash
+                      state is skipped — it takes the engine's own skip branch
+                      cleanly (sets the same init fields + skip flags, does NOT
+                      call the original on_enter, so the splash view is never
+                      opened — no flash, no orphan), resolving StateTitle via
+                      Mods.original_require and degrading to vanilla splash if
+                      StateTitle is unresolvable); mod_manager.lua is the generic
                       scan/load/lifecycle driver + the hot-reload state machine
                       (request_reload seam, _check_reload trigger-detection seam
                       for the community reload-control contract (detection only,
@@ -174,7 +186,12 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   exact value `1` only; default off) is a value-less switch that tees Lua
   `print`/`__print` output into `relay.log` as `INFO lua-print:` lines (a tee,
   never a redirect — console stays authoritative); the launcher canonicalizes
-  the child env to `1` or removes it. See
+  the child env to `1` or removes it. `--skip-splash` (env `RELAY_SKIP_SPLASH=1`,
+  exact value `1` only; default off) is a value-less switch that skips the
+  `StateSplash` intro splash state (advances directly to `StateTitle` without
+  opening the splash view — a loader-side `on_enter` wrap that takes the
+  engine's own skip branch cleanly); same canonical child-env policy as
+  `--lua-logs`. See
   `docs/architecture/MOD-RELAY.md` → `launcher/`
   for the full flag/env/default table + the env-var contract.
 - **Shell log** is `relay.log`, structured + level-filtered via `RELAY_LOG_LEVEL`

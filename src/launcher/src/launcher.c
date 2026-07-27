@@ -23,6 +23,8 @@
  *   --version                  (value-less)                      print version and exit
  *   --lua-logs                 (value-less)                      tee Lua print output into relay.log
  *                                                                [RELAY_LUA_LOGS=1] (default: off)
+ *   --skip-splash              (value-less)                      skip the StateSplash intro splash
+ *                                                                [RELAY_SKIP_SPLASH=1] (default: off)
  *   --                         (end-of-options separator)        rest-of-line forwarded to the game
  *
  * `--` ends Relay's option parsing: EVERY token after it is forwarded to the
@@ -77,6 +79,7 @@
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
 #define ENV_LUA_LOGS     "RELAY_LUA_LOGS"   /* exact value "1" enables the lua-print sink */
+#define ENV_SKIP_SPLASH  "RELAY_SKIP_SPLASH" /* exact value "1" enables the StateSplash skip */
 
 /* Named event for the launcher<->shell hook-ready handshake. Created
  * session-local (no Global\ prefix — avoids SeCreateGlobalPrivilege; launcher
@@ -473,6 +476,16 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
             continue;
         }
 
+        /* --skip-splash: value-less flag. Does NOT consume the following token
+         * (so {"--skip-splash","--game-binary","G"} still parses --game-binary).
+         * Sets the parsed skip_splash_enabled field; relay_resolve_config turns
+         * it into the resolved cfg->skip_splash_enabled (flag > env > default).
+         * Only recognized before `--` (after `--` it is a raw game arg). */
+        if (strcmp(flag, "--skip-splash") == 0) {
+            out->skip_splash_enabled = 1;
+            continue;
+        }
+
         /* single-value flags */
         const char **target;
         if      (strcmp(flag, "--game-binary")   == 0) target = &out->game_binary;
@@ -547,6 +560,11 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
      * switch — unset/empty/"0"/"true"/whitespace/oversized/all-other-values
      * all resolve to disabled. */
     cfg->lua_logs_enabled = args->lua_logs_enabled ? 1 : env_is_exact_one(ENV_LUA_LOGS);
+
+    /* skip_splash_enabled: an explicit --skip-splash flag enables; otherwise
+     * only the exact env value RELAY_SKIP_SPLASH=1 enables. Default off. Same
+     * exact-match policy as lua_logs_enabled. */
+    cfg->skip_splash_enabled = args->skip_splash_enabled ? 1 : env_is_exact_one(ENV_SKIP_SPLASH);
 }
 
 /* ---- usage --------------------------------------------------------------- */
@@ -581,6 +599,11 @@ static void print_usage(FILE *out, const char *prog) {
         "                         (value-less; only the exact env value\n"
         "                         RELAY_LUA_LOGS=1 enables)\n"
         "                         [env: RELAY_LUA_LOGS=1] [default: off]\n"
+        "\n"
+        "  --skip-splash           skip the StateSplash intro splash state\n"
+        "                         (value-less; only the exact env value\n"
+        "                         RELAY_SKIP_SPLASH=1 enables)\n"
+        "                         [env: RELAY_SKIP_SPLASH=1] [default: off]\n"
         "\n"
         "  --                     end-of-options separator: every token after\n"
         "                         -- is forwarded to the game verbatim, in\n"
@@ -665,6 +688,15 @@ int main(int argc, char **argv) {
         SetEnvironmentVariableA(ENV_LUA_LOGS, "1");
     } else {
         SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
+    }
+    /* Same canonical-child-inheritance policy for the value-less splash skip:
+     * set the exact "1" when enabled, or REMOVE it when disabled so a stale
+     * parent value can't leak into the child as a non-"1" (the shell snapshots
+     * only the exact "1"). */
+    if (cfg.skip_splash_enabled) {
+        SetEnvironmentVariableA(ENV_SKIP_SPLASH, "1");
+    } else {
+        SetEnvironmentVariableA(ENV_SKIP_SPLASH, NULL);
     }
 
     /* The injected DLL is hardcoded next to the launcher. Existence of

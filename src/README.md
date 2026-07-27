@@ -165,6 +165,7 @@ shell DLL, log file, and mod loader root all default next to the launcher exe.
 | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
 | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
 | `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; exact env value `1` enables) |
+| `--skip-splash` | `RELAY_SKIP_SPLASH=1` | off (value-less; exact env value `1` enables; skips the intro splash state) |
 | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game) |
 | `--version` | — (none) | — (prints the build-injected version; see below) |
 
@@ -283,3 +284,10 @@ values:
 The split keeps the loader's own code Relay-owned while the mods it loads are
 user-owned. Detail in
 [`docs/architecture/MOD_LOADER-DMF.md`](../docs/architecture/MOD_LOADER-DMF.md).
+
+> **Splash skip.** The trampoline also bakes `RELAY_SKIP_SPLASH` (from
+> `--skip-splash` / `RELAY_SKIP_SPLASH=1`) as an internal global alongside the
+> two roots; the loader snapshots it once into a private boolean that, when
+> opted in, wraps `StateSplash.on_enter` so the intro splash state advances
+> directly to `StateTitle` without opening the splash view. Default off
+> (vanilla splash).

@@ -21,6 +21,10 @@
 --   - MOD_RELAY_VERSION — runtime-controlled, INTERNAL one-shot handoff of the
 --                         manifest-derived product version. Snapshotted below
 --                         and immediately retired; it is not a community API.
+--   - RELAY_SKIP_SPLASH — runtime-controlled, INTERNAL one-shot handoff of the
+--                         --skip-splash / RELAY_SKIP_SPLASH=1 opt-in. Snapshotted
+--                         below into Mods._relay.skip_splash and immediately
+--                         retired; it is not a community API.
 --
 -- The mod-path boundary contract:
 --   - Mods._mod_path  = RELAY_MOD_PATH (the boundary; parent of `mods/`).
@@ -77,6 +81,13 @@ Mods = Mods or {}
 Mods._relay = Mods._relay or {}
 Mods._relay.version = MOD_RELAY_VERSION
 MOD_RELAY_VERSION = nil
+-- Snapshot the optional StateSplash skip (trampoline-set global from
+-- --skip-splash / RELAY_SKIP_SPLASH=1). Nil-safe: the global may be unset or
+-- empty (disabled). This is the single point that turns the trampoline global
+-- into a loader-internal boolean; lifecycle.lua reads it once at module-eval
+-- time. Internal/private — never consumed by community code.
+Mods._relay.skip_splash = (RELAY_SKIP_SPLASH == "1")
+RELAY_SKIP_SPLASH = nil
 do
     local ok, traceback_fn = pcall(function()
         if type(debug) == "table" and type(debug.traceback) == "function" then

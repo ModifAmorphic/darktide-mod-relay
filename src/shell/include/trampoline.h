@@ -54,15 +54,17 @@ int trampoline_escape_path(const char *path, size_t path_len,
  * Build the trampoline Lua chunk. Sets MOD_LOADER_DIR from `mod_loader_dir`
  * (escaped) and RELAY_MOD_PATH from `mod_path` (escaped, or the empty
  * string when `mod_path` is NULL/empty — the loader treats an empty mod root as
- * "no mods", gracefully), sets MOD_RELAY_VERSION from `relay_version`, then
- * opens + loads + runs `entry_path` (escaped). A NULL, empty, or overlong
- * version emits nil so malformed build metadata can disable only version
- * diagnostics rather than the entire loader.
+ * "no mods", gracefully), sets MOD_RELAY_VERSION from `relay_version`, sets
+ * RELAY_SKIP_SPLASH from `skip_splash` (the string "1" when enabled, "" when
+ * disabled — the loader checks `== "1"`), then opens + loads + runs `entry_path`
+ * (escaped). A NULL, empty, or overlong version emits nil so malformed build
+ * metadata can disable only version diagnostics rather than the entire loader.
  * The chunk:
  *
  *   MOD_LOADER_DIR = "<mod_loader_dir>"
  *   RELAY_MOD_PATH = "<mod_path>"
  *   MOD_RELAY_VERSION = "<relay_version>" -- or nil when unusable
+ *   RELAY_SKIP_SPLASH = "1" -- or "" when skip_splash is 0
  *   local f, err = io.open("<entry_path>", "r")
  *   if not f then return "FAIL io.open: " .. tostring(err) end
  *   local data = f:read("*all"); f:close()
@@ -76,11 +78,17 @@ int trampoline_escape_path(const char *path, size_t path_len,
  * own module loads (bootstrap_load); RELAY_MOD_PATH roots Mods.file.*
  * (DMF/mods/mods.lst). MOD_LOADER_DIR is an INTERNAL global set by the
  * trampoline (not a user env var/flag). MOD_RELAY_VERSION is also internal;
- * init.lua snapshots and retires it before community code loads. (In the
- * production call site
- * `mod_loader_dir` is also the prefix of `entry_path`, so it appears twice in
- * the chunk — once as the global, once inside the io.open path. That is
+ * init.lua snapshots and retires it before community code loads. RELAY_SKIP_SPLASH
+ * is an INTERNAL global (the trampoline form of the --skip-splash /
+ * RELAY_SKIP_SPLASH=1 opt-in); init.lua snapshots it into a private boolean
+ * and the global is never consumed by community code. (In the production call
+ * site `mod_loader_dir` is also the prefix of `entry_path`, so it appears twice
+ * in the chunk — once as the global, once inside the io.open path. That is
  * intended.)
+ *
+ * `skip_splash` is an int (0 or 1): it maps to a fixed Lua string token ("1" or
+ * ""), so unlike `mod_path` it needs no escaping. It matches the shell's
+ * env_is_exact_one boolean return convention.
  *
  * It returns a status string: "OK" if every step succeeded, else "FAIL <step>:
  * <err>" identifying which step broke. Writes the NUL-terminated chunk to `out`.
@@ -91,6 +99,7 @@ int trampoline_escape_path(const char *path, size_t path_len,
  */
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
                            const char *entry_path, const char *relay_version,
+                           int skip_splash,
                            char *out, size_t out_cap);
 
 #ifdef __cplusplus

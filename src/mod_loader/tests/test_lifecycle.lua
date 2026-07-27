@@ -1120,4 +1120,302 @@ return function(runner)
         end
         runner.assert_truthy(destroy_logged, "absent destroy is logged (diagnosable)")
     end)
+
+    -- ---------------------------------------------------------------------
+    -- StateSplash skip (opt-in via Mods._relay.skip_splash, set by init.lua
+    -- from the trampoline-baked RELAY_SKIP_SPLASH global).
+    --
+    -- Engine contract (scripts/game_states/game/state_splash.lua @ 47379fd):
+    --   on_enter sets _creation_context, _next_state = StateTitle,
+    --   _next_state_params = params, params.skip_title_screen_on_invite = true;
+    --   computes should_skip via a LOCAL _should_skip() predicate; if true sets
+    --   _continue = true; else opens splash_view + registers an event.
+    --   update returns _next_state, _next_state_params when _continue.
+    --   on_exit closes the view ONLY when not _should_skip.
+    --
+    -- The wrap takes the engine's OWN skip branch cleanly (sets the same init
+    -- fields + skip flags, does NOT call the original on_enter) so the view is
+    -- never opened. StateTitle is resolved via Mods.original_require.
+    -- ---------------------------------------------------------------------
+
+    -- Full-bootstrap helper for splash tests. Sets up the coordinator + BSR
+    -- wrap + manager + StateGame + GSM (with destroy) AND the splash opt-in,
+    -- so advance_bootstrap can complete all 5 steps. The BSR wrap is installed
+    -- (second coordinate_bootstrap) so a test's bsr._state_update(bsr) tick
+    -- drives advance_bootstrap. StateSplash is NOT declared here — tests
+    -- declare it (or not) before the boot tick. opts.state_title customizes
+    -- the fake StateTitle returned by Mods.original_require. Returns sb, bsr,
+    -- fake_state_title.
+    local function setup_splash(opts)
+        opts = opts or {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        sb.Mods._relay = { skip_splash = true }  -- the opt-in (init.lua sets this)
+        sb.Managers = {}
+        sb.__print = opts.print_fn or function() end
+        sb.class = function(name) return { name = name } end
+        -- Mods.original_require returns the fake StateTitle (cached, like the
+        -- engine's package.loaded). state_splash.lua requires it at module top.
+        local fake_state_title = opts.state_title or { name = "StateTitle" }
+        sb.Mods.original_require = function(path)
+            if path == "scripts/game_states/game/state_title" then
+                return fake_state_title
+            end
+            return nil
+        end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return {
+                    new = function()
+                        return {
+                            update = function() end,
+                            on_game_state_changed = function() end,
+                        }
+                    end,
+                }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()  -- installs class wrapper
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, new_name) self._state = { name = new_name } end
+        gsm.current_state_name = function(self)
+            return self._state and self._state.name or nil
+        end
+        gsm.destroy = function(self, ...) end
+        sb.Mods.coordinate_bootstrap()  -- wraps BSR (now that it exists)
+        return sb, bsr, fake_state_title
+    end
+
+    -- Build a fake StateSplash class matching the engine contract. The view
+    -- state table tracks open/close + event register/unregister so tests can
+    -- assert the view lifecycle is consistent (no orphaned open view). Returns
+    -- the class table + the view-state tracker.
+    local function make_fake_splash_class()
+        local vs = { view_opened = false, view_closed = false,
+                     event_registered = false, event_unregistered = false }
+        local splash = {}
+        splash.on_enter = function(self, parent, params, creation_context)
+            self._creation_context = creation_context
+            self._next_state = "FAKE_StateTitle_unresolved"
+            self._next_state_params = params
+            params.skip_title_screen_on_invite = true
+            self._should_skip = false
+            self._end_duration = 5.0
+            vs.view_opened = true
+            vs.event_registered = true
+        end
+        splash.update = function(self, main_dt, main_t)
+            local context = self._creation_context
+            if context and context.network_receive_function then
+                context.network_receive_function(main_dt)
+            end
+            if context and context.network_transmit_function then
+                context.network_transmit_function()
+            end
+            if self._continue then
+                return self._next_state, self._next_state_params
+            end
+        end
+        splash.on_exit = function(self)
+            if not self._should_skip then
+                vs.event_unregistered = true
+                vs.view_closed = true
+            end
+        end
+        return splash, vs
+    end
+
+    runner.register("lifecycle: splash step NOT installed when opted out (default)", function()
+        -- Default (no Mods._relay.skip_splash): the splash step is never
+        -- attempted, StateSplash.on_enter is untouched, and bs.completed still
+        -- goes true.
+        local sb = setup()  -- default setup: no _relay.skip_splash
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return { update = function() end, on_game_state_changed = function() end }
+                end }
+            end
+        end
+        sb.Mods.coordinate_bootstrap()
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, n) self._state = { name = n } end
+        gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
+        local splash = sb.class("StateSplash")
+        local orig_on_enter = function() end
+        splash.on_enter = orig_on_enter
+        bsr._state_update(bsr)
+        runner.assert_eq(orig_on_enter, splash.on_enter,
+            "StateSplash.on_enter must be untouched when opted out")
+    end)
+
+    runner.register("lifecycle: opted-out splash step does not block bs.completed", function()
+        -- With splash opted out, all 4 standard steps complete and the
+        -- completed flag short-circuits later ticks (proven by no extra
+        -- load_module calls on a second tick).
+        local load_calls = 0
+        local sb = setup()
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                load_calls = load_calls + 1
+                return { new = function()
+                    return { update = function() end, on_game_state_changed = function() end }
+                end }
+            end
+        end
+        sb.Mods.coordinate_bootstrap()
+        sb.class("StateGame").update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, n) self._state = { name = n } end
+        gsm.current_state_name = function() return "X" end
+        gsm.destroy = function() end
+        sb.class("StateSplash").on_enter = function() end
+        bsr._state_update(bsr)  -- completes all 4 steps (splash not attempted)
+        runner.assert_eq(1, load_calls, "one load on the completing tick")
+        bsr._state_update(bsr)  -- short-circuit
+        runner.assert_eq(1, load_calls, "completed flag prevents further loads (splash didn't block)")
+    end)
+
+    runner.register("lifecycle: opted-in splash wraps CLASS.StateSplash.on_enter exactly once", function()
+        local sb, bsr = setup_splash()
+        local splash, vs = make_fake_splash_class()
+        -- Install the fake splash class into CLASS via the coordinator's class().
+        local splash_class = sb.class("StateSplash")
+        local orig_on_enter = splash.on_enter
+        splash_class.on_enter = orig_on_enter
+        bsr._state_update(bsr)  -- wraps on_enter
+        runner.assert_truthy(splash_class.on_enter ~= orig_on_enter,
+            "StateSplash.on_enter must be wrapped when opted in")
+        -- Second boot tick must not re-wrap.
+        bsr._state_update(bsr)
+        local wrapped_fn = splash_class.on_enter
+        bsr._state_update(bsr)
+        runner.assert_eq(wrapped_fn, splash_class.on_enter,
+            "StateSplash.on_enter wrapped exactly once (no layering)")
+    end)
+
+    runner.register("lifecycle: opted-in splash wrap drives StateSplash to StateTitle with consistent view lifecycle", function()
+        -- The wrap must take the engine's skip branch cleanly: set _continue,
+        -- _next_state = resolved StateTitle, _should_skip = true, and NEVER
+        -- open the view. update() returns _next_state, _next_state_params;
+        -- on_exit() does nothing (because _should_skip = true).
+        local sb, bsr, fake_state_title = setup_splash()
+        local splash_class, vs = make_fake_splash_class()
+        -- Register StateSplash in CLASS.
+        local registered = sb.class("StateSplash")
+        registered.on_enter = splash_class.on_enter
+        registered.update = splash_class.update
+        registered.on_exit = splash_class.on_exit
+        bsr._state_update(bsr)  -- wraps on_enter
+
+        -- Drive the wrapped on_enter (the engine calls it when entering StateSplash).
+        local splash_inst = setmetatable({}, { __index = registered })
+        local params = {}
+        local creation_context = { network_receive_function = function() end,
+                                   network_transmit_function = function() end }
+        splash_inst:on_enter(nil, params, creation_context)
+
+        -- The skip branch must have been taken (not the original on_enter).
+        runner.assert_eq(true, splash_inst._continue, "_continue set (skip branch taken)")
+        runner.assert_eq(fake_state_title, splash_inst._next_state,
+            "_next_state is the resolved StateTitle (via original_require)")
+        runner.assert_eq(params, splash_inst._next_state_params, "_next_state_params preserved")
+        runner.assert_eq(true, params.skip_title_screen_on_invite,
+            "params.skip_title_screen_on_invite set (engine skip-branch init)")
+        runner.assert_eq(true, splash_inst._should_skip, "_should_skip = true (on_exit will no-op)")
+        runner.assert_eq(false, vs.view_opened,
+            "view NEVER opened (original on_enter not called — no flash, no orphan)")
+        runner.assert_eq(false, vs.event_registered, "event never registered")
+
+        -- update() must return _next_state, _next_state_params on the first tick.
+        local next_state, next_params = splash_inst:update(0.016, 0)
+        runner.assert_eq(fake_state_title, next_state, "update returns _next_state")
+        runner.assert_eq(params, next_params, "update returns _next_state_params")
+
+        -- on_exit() must do nothing (because _should_skip = true). No close.
+        splash_inst:on_exit()
+        runner.assert_eq(false, vs.view_closed,
+            "on_exit does not close (nothing was opened — consistent lifecycle)")
+        runner.assert_eq(false, vs.view_opened,
+            "view still never opened after on_exit — no orphaned open view")
+    end)
+
+    runner.register("lifecycle: opted-in splash degrades to vanilla when StateTitle unresolved", function()
+        -- If Mods.original_require can't resolve StateTitle (engine contract
+        -- shift), the wrap logs once and falls back to the original on_enter
+        -- (vanilla splash). The view opens as normal.
+        local logged = {}
+        local sb, bsr = setup_splash({ print_fn = function(m) table.insert(logged, m) end })
+        -- Make original_require return nil for StateTitle (contract shift).
+        sb.Mods.original_require = function(path) return nil end
+        local splash_class, vs = make_fake_splash_class()
+        local registered = sb.class("StateSplash")
+        registered.on_enter = splash_class.on_enter
+        registered.update = splash_class.update
+        registered.on_exit = splash_class.on_exit
+        bsr._state_update(bsr)  -- wraps on_enter
+
+        local splash_inst = setmetatable({}, { __index = registered })
+        local params = {}
+        splash_inst:on_enter(nil, params, { network_receive_function = function() end,
+                                            network_transmit_function = function() end })
+
+        -- Fallback: the original on_enter ran (view opened, vanilla behavior).
+        runner.assert_eq(true, vs.view_opened,
+            "original on_enter ran (vanilla fallback when StateTitle unresolved)")
+        runner.assert_nil(splash_inst._continue,
+            "_continue NOT forced (vanilla splash runs normally)")
+        -- StateTitle resolution failure logged once.
+        local st_logged = false
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("StateTitle unavailable") then
+                st_logged = true; break
+            end
+        end
+        runner.assert_truthy(st_logged, "StateTitle resolution failure logged once")
+    end)
+
+    runner.register("lifecycle: opted-in splash step clean degradation when CLASS.StateSplash absent", function()
+        -- StateSplash not declared: the step logs once, no crash, the other 4
+        -- steps still complete, bs.completed goes true.
+        local logged = {}
+        local sb, bsr = setup_splash({ print_fn = function(m) table.insert(logged, m) end })
+        -- NOTE: StateSplash NOT declared.
+        local ok, err = pcall(function() bsr._state_update(bsr) end)
+        runner.assert_eq(true, ok, "bootstrap must not crash when StateSplash is absent: " .. tostring(err))
+        -- The other 4 steps completed (proven by no extra loads on a later tick).
+        local load_calls = 0
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                load_calls = load_calls + 1
+                return { new = function()
+                    return { update = function() end, on_game_state_changed = function() end }
+                end }
+            end
+        end
+        bsr._state_update(bsr)  -- short-circuit if completed; or wraps splash if present
+        runner.assert_eq(0, load_calls,
+            "completed flag set (4 standard steps done; absent splash didn't block)")
+        -- StateSplash missing logged once.
+        local splash_logged = false
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("StateSplash") then
+                splash_logged = true; break
+            end
+        end
+        runner.assert_truthy(splash_logged, "absent StateSplash is logged (diagnosable)")
+    end)
 end
