@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.5.1...v0.6.0) (2026-07-27)
+
+
+### Features
+
+* **mod-loader:** add --skip-splash and level-prefix loader diagnostics ([#16](https://github.com/ModifAmorphic/darktide-mod-relay/issues/16)) ([d113cb4](https://github.com/ModifAmorphic/darktide-mod-relay/commit/d113cb442208a561bb4c9d91174ad8a509f01bc3))
+
 ## [0.5.1](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.5.0...v0.5.1) (2026-07-26)
 
 
