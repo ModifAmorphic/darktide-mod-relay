@@ -100,7 +100,7 @@ Proton layer handles the Windows runtime:
 launcher's C-side shell/trampoline log lands in `relay.log` next to the launcher
 (its pcall#1 status/failure diagnostic is the reliable bootstrap check);
 Darktide's **own**
-engine Lua output — the mod loader's `[mod_loader] …` lines, DMF, and mods —
+engine Lua output — the mod loader's `{LEVEL} [mod_loader] …` lines, DMF, and mods —
 lands in Darktide's **console log**, not the Proton log. On Linux/Proton that is
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/console-*.log`
 (the Windows equivalent is `%APPDATA%\Fatshark\Darktide\console_logs\console-*.log`).
@@ -155,7 +155,7 @@ Reload only fires when Developer Mode is on and the shortcut uses the **left**
 Ctrl and **left** Shift keys specifically (right-side modifiers won't trigger it).
 You can confirm each reload in Darktide's console log (see
 [Configure Steam](#3-configure-steam-linuxproton) for the location): look for
-the `[mod_loader] hot reload generation N …` lines — `completed cleanly` on
+the `INFO [mod_loader] hot reload generation N …` lines — `completed cleanly` on
 success. If you launched with `--lua-logs`, those same `[mod_loader]` lines are
 **also** copied into `relay.log` (as `lua-print` lines); the console log always
 has them regardless.

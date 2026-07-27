@@ -45,6 +45,7 @@ typedef struct {
     const char **game_arguments;  /* no env/default: borrowed `--` tail or NULL */
     int          game_argument_count;
     int          lua_logs_enabled; /* default off (RELAY_LUA_LOGS=1 or --lua-logs) */
+    int          skip_splash_enabled; /* default off (RELAY_SKIP_SPLASH=1 or --skip-splash) */
 } relay_config;
 
 /*
@@ -66,6 +67,7 @@ typedef struct {
     int          game_argument_count;
     int          show_version;  /* set by the value-less --version flag        */
     int          lua_logs_enabled; /* set by the value-less --lua-logs flag    */
+    int          skip_splash_enabled; /* set by the value-less --skip-splash flag */
 } relay_parsed_args;
 
 /*

@@ -20,7 +20,7 @@ Two things are documented here:
 | Destination | Contents | Set by |
 | --- | --- | --- |
 | **`relay.log`** | The C-side shell + trampoline lines (discovery, hook arming, startup diagnostics, and the one-shot trampoline's status/failure diagnostics). When the Lua print tee is enabled, also structured `INFO  lua-print:` copies of captured Lua print output. Every emitted line is also sent to `OutputDebugString`. | `--log-file` / `RELAY_LOG_FILE`. Default `<launcher-dir>\relay.log`. |
-| **Darktide `console-*.log`** | The authoritative engine Lua print destination: the mod loader's `[mod_loader] …` lines, DMF, and mods. Relay never redirects or suppresses it. Windows: `%APPDATA%\Fatshark\Darktide\console_logs\console-*.log`. Proton: `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/console-*.log`. | Darktide itself. |
+| **Darktide `console-*.log`** | The authoritative engine Lua print destination: the mod loader's `{LEVEL} [mod_loader] …` lines, DMF, and mods. Relay never redirects or suppresses it. Windows: `%APPDATA%\Fatshark\Darktide\console_logs\console-*.log`. Proton: `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/console-*.log`. | Darktide itself. |
 | **Proton `steam-$APPID.log`** | Wine/Proton diagnostics only. It does not carry Darktide Lua output. | Proton (`PROTON_LOG=1`). |
 
 ## Configuration contract
@@ -45,7 +45,7 @@ For example:
 
 ```text
 2026-07-16T12:34:56-04:00 INFO  trampoline: @ pcall#1: OK
-2026-07-16T12:34:56-04:00 INFO  lua-print: [mod_loader] loaded at pcall#1
+2026-07-16T12:34:56-04:00 INFO  lua-print: INFO [mod_loader] loaded at pcall#1
 ```
 
 - **Timestamp.** Local time with an ISO-8601 UTC offset that follows the
@@ -116,7 +116,13 @@ adds `relay.log` copies of what traverses the wrapped surfaces.
   metadata, and Relay does **not** infer severity from text prefixes — a line
   whose text begins `error:`, `[WARN]`, etc. is still copied at `INFO`. As a
   consequence, `--log-level warn` or `error` filters the copied lines out of
-  `relay.log` while the console log is unaffected.
+  `relay.log` while the console log is unaffected. The mod loader's OWN
+  diagnostics carry a `{LEVEL} [mod_loader] {message}` token in their printed
+  text (the engine/DMF community format), but that inner level is content, not
+  a signal to the tee: a tee'd loader line therefore carries **two** level
+  tokens — the outer `INFO` (the tee's fixed level) and the inner `{LEVEL}`
+  (the loader's content). This is intended and matches how engine lines like
+  `INFO  lua-print: INFO [StateTitle] …` already look (see the example above).
 - **Not a public mod logging API**, and it does not wrap DMF logging methods.
   There is no `Mods.log` / `Mods.message` surface; the tee is runtime-private
   plumbing.

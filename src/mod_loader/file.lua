@@ -26,7 +26,6 @@ local _loadstring = Mods.lua.loadstring
 local _pcall = pcall
 local _error = error
 local _tostring = tostring
-local _print = __print or print
 
 -- Load the path utilities module (normpath + is_within). Loaded on demand via
 -- Mods.load_module, which reads from MOD_LOADER_DIR. Must load before the
@@ -66,7 +65,7 @@ local function notify_observers(rel_path, args, result)
     for i = 1, #observers do
         local ok, err = _pcall(observers[i], rel_path, args, result)
         if not ok then
-            _print("[mod_loader] file observer failed: " .. _tostring(err))
+            Mods._relay.log_warn("file observer failed: " .. _tostring(err))
         end
     end
 end

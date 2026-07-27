@@ -14,10 +14,19 @@ local _rawget = rawget
 local _ipairs = ipairs
 local _select = select
 local _unpack = unpack
-local _print = __print or print
 local _string_find = string.find
 local _string_gsub = string.gsub
 local _string_sub = string.sub
+
+-- Leveled diagnostics (the shared helper init.lua publishes on Mods._relay).
+-- Captured once at module load — mod_manager loads after init, so these exist.
+-- Each emits "{LEVEL} [mod_loader] {message}"; the helper is pcall-guarded and
+-- runs message content through safe_text, so diagnostics never become a second
+-- failure path.
+local log_info  = Mods._relay.log_info
+local log_debug = Mods._relay.log_debug
+local log_warn  = Mods._relay.log_warn
+local log_error = Mods._relay.log_error
 
 local dmf_adapter = Mods.load_module("dmf_adapter")
 local ModManager = class("ModManager")
@@ -38,11 +47,6 @@ local function safe_text(value)
         return text
     end
     return "<unprintable error>"
-end
-
-local function log(message)
-    -- Diagnostics must never become a second failure path.
-    _pcall(_print, "[mod_loader] " .. safe_text(message))
 end
 
 local function display_name(name)
@@ -136,7 +140,7 @@ function ModManager:_scan_mods()
         end
         return true
     end
-    log("mods.lst missing or unreadable; no mods will load")
+    log_warn("mods.lst missing or unreadable; no mods will load")
     return false
 end
 
@@ -156,7 +160,7 @@ end
 
 function ModManager:_disable_crashify(message)
     self._crashify_disabled = true
-    log(message)
+    log_warn(message)
 end
 
 function ModManager:_crashify_call(method_name, phase, ...)
@@ -184,7 +188,7 @@ function ModManager:_crashify_call(method_name, phase, ...)
     if not available then
         self._crashify_disabled = true
         if not self._crashify_unavailable_logged then
-            log("Crashify unavailable; optional crash metadata will retry next generation")
+            log_debug("Crashify unavailable; optional crash metadata will retry next generation")
             self._crashify_unavailable_logged = true
         end
         return false
@@ -201,7 +205,7 @@ function ModManager:_publish_version_property()
     if _type(version) ~= "string" or version == "" or #version > VERSION_MAX_BYTES
        or _string_find(version, "%c") then
         if not self._version_invalid_logged then
-            log("Relay version crash metadata unavailable (missing or invalid private build value)")
+            log_debug("Relay version crash metadata unavailable (missing or invalid private build value)")
             self._version_invalid_logged = true
         end
         return
@@ -237,7 +241,7 @@ function ModManager:_publish_mod_property(entry)
     local name = entry and entry.name
     if _type(name) ~= "string" or name == "" or #name > MOD_NAME_MAX_BYTES
        or _string_find(name, "%c") then
-        log("Crashify mod metadata skipped for entry id " .. safe_text(entry and entry.id)
+        log_debug("Crashify mod metadata skipped for entry id " .. safe_text(entry and entry.id)
             .. " (name is empty, unsafe, or over 120 bytes)")
         return
     end
@@ -292,7 +296,7 @@ function ModManager:_attempt_alert(message)
         return true
     end
     if not self._alert_unavailable_logged then
-        log("engine alert transport unavailable; failure notice will retry")
+        log_warn("engine alert transport unavailable; failure notice will retry")
         self._alert_unavailable_logged = true
     end
     return false
@@ -364,7 +368,7 @@ function ModManager:_call_teardown(entry, object, phase, ...)
         return true, callback(object, _unpack(args, 1, args.n))
     end, protected_failure_detail)
     if not ok then
-        log("mod '" .. display_name(entry and entry.name) .. "' " .. phase
+        log_warn("mod '" .. display_name(entry and entry.name) .. "' " .. phase
             .. " failed during best-effort teardown: " .. safe_text(implemented))
         return false, nil, true
     end
@@ -401,7 +405,7 @@ function ModManager:_retire_generation_globals(mark_reload_degraded)
         self._adapter:retire_stale_generation_globals()
     end)
     if not ok then
-        log("stale generation global retirement failed; cleanup remains best effort")
+        log_warn("stale generation global retirement failed; cleanup remains best effort")
         if mark_reload_degraded then
             self._reload_degraded = true
         end
@@ -471,14 +475,14 @@ function ModManager:_handle_lifecycle_failure(entry, object, phase, detail)
         self._generation_failed = true
         self._stop_load_pass = true
         self:_rebuild_framework_cleanup_queue(entry, object)
-        log("framework-boundary lifecycle failure at entry '" .. display_name(entry.name)
+        log_error("framework-boundary lifecycle failure at entry '" .. display_name(entry.name)
             .. "' in generation " .. generation .. " during " .. phase
             .. "; Relay stopped the current generation:\n" .. detail)
         self:_attempt_alert("Mod Relay stopped the current mod generation after a framework-boundary error. "
             .. self:_alert_suffix())
     else
         self:_queue_cleanup(entry, object)
-        log("mod '" .. display_name(entry.name) .. "' " .. phase
+        log_error("mod '" .. display_name(entry.name) .. "' " .. phase
             .. " failed in generation " .. generation
             .. "; Relay disabled this entry:\n" .. detail)
         self:_attempt_alert("Mod Relay disabled mod '" .. display_name(entry.name)
@@ -537,7 +541,7 @@ function ModManager:update(dt)
         self._adapter:end_load_pass()
         self._load_target_generation = nil
         if not load_ok then
-            log("hot reload load pass error: " .. safe_text(load_result))
+            log_error("hot reload load pass error: " .. safe_text(load_result))
             self._reload_degraded = true
         elseif load_result then
             self._reload_degraded = true
@@ -546,10 +550,10 @@ function ModManager:update(dt)
         self._generation = target_generation
         self:_prune_old_failure_records(target_generation)
         if self._reload_degraded then
-            log("hot reload generation " .. self._generation
+            log_warn("hot reload generation " .. self._generation
                 .. " completed with errors; game restart recommended")
         else
-            log("hot reload generation " .. self._generation .. " completed cleanly")
+            log_info("hot reload generation " .. self._generation .. " completed cleanly")
         end
         self._reload_degraded = false
         self:_drive_update(dt)
@@ -572,7 +576,7 @@ function ModManager:update(dt)
         self._generation = 1
         self._adapter:mark_load_done()
         if not load_ok then
-            log("initial mod load pass error: " .. safe_text(load_result)
+            log_error("initial mod load pass error: " .. safe_text(load_result)
                 .. "; initial generation finalized with errors")
         end
     end
@@ -592,7 +596,7 @@ function ModManager:request_reload(source)
         return false, "reload already active"
     end
     self._reload_requested = true
-    log("hot reload requested (source: " .. safe_text(source) .. ")")
+    log_info("hot reload requested (source: " .. safe_text(source) .. ")")
     return true
 end
 
@@ -611,7 +615,7 @@ function ModManager:_check_reload()
         end)
         if not ok then
             if not self._kb_unavailable_logged then
-                log("reload shortcut unavailable (keyboard not ready); will retry")
+                log_debug("reload shortcut unavailable (keyboard not ready); will retry")
                 self._kb_unavailable_logged = true
             end
             return false
@@ -627,7 +631,7 @@ function ModManager:_check_reload()
     if not ok then
         self._kb_resolved = false
         if not self._kb_unavailable_logged then
-            log("reload shortcut unavailable (keyboard query failed); will retry")
+            log_debug("reload shortcut unavailable (keyboard query failed); will retry")
             self._kb_unavailable_logged = true
         end
         return false
@@ -686,7 +690,7 @@ function ModManager:_begin_reload()
     end)
     if not scan_ok then
         self._mods = {}
-        log("mods.lst rescan error; loading empty mod set")
+        log_error("mods.lst rescan error; loading empty mod set")
         self._reload_degraded = true
     elseif scan_had_order == false then
         self._reload_degraded = true
@@ -728,7 +732,7 @@ end
 function ModManager:_load_one(entry, reload_data)
     local valid, reason = self._adapter:validate_entry(entry)
     if not valid then
-        log("mod entry invalid (" .. safe_text(reason) .. "); skipped")
+        log_warn("mod entry invalid (" .. safe_text(reason) .. "); skipped")
         return self:_fail_load_entry(entry, "entry invalid")
     end
 
@@ -736,7 +740,7 @@ function ModManager:_load_one(entry, reload_data)
     local shown = display_name(name)
     local mod_data = Mods.file.exec_with_return(name .. "/" .. name .. ".mod")
     if mod_data == false then
-        log("mod '" .. shown .. "' .mod missing or unreadable")
+        log_error("mod '" .. shown .. "' .mod missing or unreadable")
         return self:_fail_load_entry(entry, ".mod missing/unreadable")
     end
     local descriptor_ok, run_function = _pcall(function()
@@ -750,26 +754,26 @@ function ModManager:_load_one(entry, reload_data)
         return nil
     end)
     if not descriptor_ok or run_function == nil then
-        log("mod '" .. shown .. "' .mod invalid (no run function)")
+        log_warn("mod '" .. shown .. "' .mod invalid (no run function)")
         return self:_fail_load_entry(entry, ".mod invalid")
     end
 
     self:_publish_mod_property(entry)
     local ok_run, object = _pcall(run_function)
     if not ok_run then
-        log("mod '" .. shown .. "' run failed: " .. safe_text(object))
+        log_error("mod '" .. shown .. "' run failed: " .. safe_text(object))
         return self:_fail_load_entry(entry, "run failed")
     end
 
     local result_type = _type(object)
     if object == nil then
         entry.state = "dmf_driven"
-        log("mod '" .. shown .. "' DMF-driven (run returned no object)")
+        log_debug("mod '" .. shown .. "' DMF-driven (run returned no object)")
         return true
     end
     if result_type ~= "table" then
         -- Validate before assignment, member lookup, or value formatting.
-        log("mod '" .. shown .. "' run returned invalid type " .. result_type)
+        log_warn("mod '" .. shown .. "' run returned invalid type " .. result_type)
         return self:_fail_load_entry(entry, "run returned invalid type")
     end
 
@@ -785,8 +789,8 @@ end
 
 function ModManager:_log_dmf_framework_failure(entry, phase)
     if entry and entry.name == "dmf" then
-        log("!!! DMF FRAMEWORK LOAD FAILURE ('dmf' " .. phase
-            .. "); load degraded — mods depending on DMF may not work !!!")
+        log_error("DMF FRAMEWORK LOAD FAILURE ('dmf' " .. phase
+            .. "); load degraded — mods depending on DMF may not work")
     end
 end
 
@@ -813,7 +817,7 @@ end
 function ModManager:on_game_state_changed(status, state_name, state_object)
     if not self._adapter:is_load_done() then
         if not self._gsc_ignored_logged then
-            log("on_game_state_changed ignored (reload/load in progress)")
+            log_debug("on_game_state_changed ignored (reload/load in progress)")
             self._gsc_ignored_logged = true
         end
         return

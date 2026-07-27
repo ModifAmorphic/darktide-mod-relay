@@ -78,6 +78,7 @@ return function(runner)
         sb.Managers = opts.managers or {}
         sb.Managers.dmf = sb.Managers.dmf or { persistent_tables = { mods = {} } }
         sb.Mods = { file = {}, _relay = { version = "0.2.0" } }
+        mock.attach_logger(sb)
         sb.Mods.require_store = {}
         sb.Crashify = {
             print_property = function() end,
@@ -656,6 +657,7 @@ return function(runner)
         sb.__print = function() end
         sb.Managers = { dmf = { persistent_tables = {} } }
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT, require_store = {} }
+        mock.attach_logger(sb)
         sb.Mods.load_module = function(n) return mock.run_module(n, sb) end
         -- class_registry owns the _G[class_name] retire surface (production
         -- loads it before dmf_adapter). Seed the contract so reload teardown

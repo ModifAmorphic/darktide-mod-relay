@@ -832,8 +832,9 @@ There is no shadow load or rollback.
   a double-unload.
 
 Relay does **not** expose/restore the broad `Mods.message` API or
-`Mods.lua.debug`. Controlled diagnostics are `[mod_loader]`-prefixed console
-lines plus private guarded engine alerts; none spam per-frame.
+`Mods.lua.debug`. Controlled diagnostics are `{LEVEL} [mod_loader]`-prefixed
+console lines (the engine/DMF community format) plus private guarded engine
+alerts; none spam per-frame.
 
 ## Deferred bootstrap
 

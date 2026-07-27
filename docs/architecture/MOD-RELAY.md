@@ -49,8 +49,11 @@ signals hook-ready.
 - **Production trampoline + the mod loader.** The production trampoline is
    wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
    engine's pcall) it injects the proven chunk — set the two root globals
-   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`) plus a temporary private handoff of the
-   same manifest-derived full product version used by launcher `--version`,
+   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`), the internal `RELAY_SKIP_SPLASH`
+   switch (`"1"`/`""` from `--skip-splash`/`RELAY_SKIP_SPLASH=1`; the loader
+   snapshots it to wrap `StateSplash.on_enter` when opted in), plus a temporary
+   private handoff of the same manifest-derived full product version used by
+   launcher `--version`,
    `io.open` the staged entry
    (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. (When the Lua
    print tee is enabled, the trampoline also registers the private
@@ -185,6 +188,7 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
   | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
   | `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; only the exact env value `1` enables) |
+  | `--skip-splash` | `RELAY_SKIP_SPLASH=1` | off (value-less; only the exact env value `1` enables; skips the intro splash state) |
   | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game, in order) |
   | `--version` | — (none) | — (value-less; prints the build-injected version and exits 0) |
 
@@ -193,12 +197,12 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   configurable. The launcher resolves the config, then publishes the
   shell-contract values (`SteamAppId`/`SteamGameId`, `RELAY_MOD_PATH`,
   `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`, and — only when enabled —
-  `RELAY_LUA_LOGS=1`) into the child env before `CreateProcess`, so the
-  injected shell inherits them. `RELAY_LUA_LOGS` is canonicalized: the launcher
-  sets it to exactly `1` when the resolved config enables the Lua print tee
-  (`--lua-logs` or `RELAY_LUA_LOGS=1`), and **removes** it (not set to `0`)
-  when disabled, so a stale parent value cannot leak into the child as a
-  non-`1`. Game arguments are NOT published to the env — they go on the child
+  `RELAY_LUA_LOGS=1` and `RELAY_SKIP_SPLASH=1`) into the child env before
+  `CreateProcess`, so the injected shell inherits them. `RELAY_LUA_LOGS` and
+  `RELAY_SKIP_SPLASH` are canonicalized: the launcher sets each to exactly `1`
+  when the resolved config enables the feature (`--lua-logs`/`--skip-splash` or
+  the env `1` itself), and **removes** it (not set to `0`) when disabled, so a
+  stale parent value cannot leak into the child as a non-`1`. Game arguments are NOT published to the env — they go on the child
   command line: the quoted exe as argv[0] (byte-for-byte the legacy form),
   followed by every token after the end-of-options `--` separator, each
   rendered with the MSVC CRT quoting algorithm. A bare `--` ends option
@@ -269,6 +273,7 @@ global, so no loader-path env var exists.
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
 | `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
 | `RELAY_LUA_LOGS` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LUA_LOGS=1` when the resolved config enables it (`--lua-logs` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves — that is the external non-launcher contract. |
+| `RELAY_SKIP_SPLASH` | launcher (canonicalized) | shell trampoline + mod loader | the **StateSplash skip** switch: only the exact value `1` enables. The launcher sets `RELAY_SKIP_SPLASH=1` when the resolved config enables it (`--skip-splash` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LUA_LOGS`). The shell snapshots it once at worker startup (`env_is_exact_one`) and bakes it into the trampoline chunk as the internal `RELAY_SKIP_SPLASH` global (`"1"` or `""`); init.lua snapshots it into `Mods._relay.skip_splash` and the loader's lifecycle step wraps `CLASS.StateSplash.on_enter` so the splash state advances directly to `StateTitle` without opening the splash view. Default off = vanilla splash. |
 | `SteamAppId` / `SteamGameId` | launcher | Steam | the real Darktide app id (`1361210`); without it `SteamAPI_Init` is denied under a non-Steam shortcut |
 
 ### Logging
@@ -298,7 +303,7 @@ forwarded game args, e.g. `"…\Darktide.exe" --lua-heap-mb-size 2048`), so the
 exact arguments that reached the game are captured.
 
 **Log split to be aware of:** the mod loader's Lua-side `print`/`__print` output
-(the `[mod_loader] …` lines), DMF, and mods all go to the **engine's** print
+(the `{LEVEL} [mod_loader] …` lines), DMF, and mods all go to the **engine's** print
 destination — Darktide's **console log** (`console-*.log`, at
 `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
 `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`

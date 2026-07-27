@@ -85,7 +85,7 @@ On reaching the main menu, the shared `framework_boundary.log` must show
 3. `[FB_DMF] init raising injected framework-boundary scratch error ...`.
 4. Relay's single full diagnostic (the framework-boundary marker):
    ```
-   [mod_loader] framework-boundary lifecycle failure at entry 'dmf' in
+   ERROR [mod_loader] framework-boundary lifecycle failure at entry 'dmf' in
    generation 1 during init; Relay stopped the current generation:
    <full traceback>
    ```
