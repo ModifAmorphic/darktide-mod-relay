@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.6.0...v0.6.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* **release:** attest windows bundle and rename workflow ([#18](https://github.com/ModifAmorphic/darktide-mod-relay/issues/18)) ([23b667b](https://github.com/ModifAmorphic/darktide-mod-relay/commit/23b667b33725819376e5a2df05a33ea659ceb4c4))
+
 ## [0.6.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.5.1...v0.6.0) (2026-07-27)
 
 
