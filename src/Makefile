@@ -2,7 +2,7 @@
 #
 # Reproducible MinGW cross-compile from Linux: Rust staticlib + C shell/MinHook
 # -> one PE DLL (relay_shell.dll), plus the launcher exe. The MSVC-native build
-# runs in CI (.github/workflows/pr.yml + release-please.yml) on a Windows
+# runs in CI (.github/workflows/pr.yml + .github/workflows/release.yml) on a Windows
 # runner.
 #
 # This Makefile lives in src/, so every path below is relative to src/.

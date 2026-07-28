@@ -105,8 +105,8 @@ uniformly-shifted RVAs across binary versions (validated across builds; e.g. a
 MinGW cross-compile from Linux (`make build`/`check`/`test`) + MSVC native on
 Windows (CI). Both gate on `cargo clippy --all-targets --features test-hooks --
 -D warnings` + tests. CI: `.github/workflows/pr.yml` (the PR quality gate,
-mingw + msvc) + `release-please.yml` (release pipeline, which also builds +
-attaches the Windows runtime bundle to each release).
+mingw + msvc) + `release.yml` (release pipeline, which also builds +
+attests the Windows runtime bundle to each release).
 
 ## Production launcher insights (from live testing)
 

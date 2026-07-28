@@ -1,7 +1,7 @@
 # PR Quality Gate — builds + tests every PR targeting main.
 #
 # There is intentionally no `push:` trigger here. release-please
-# (.github/workflows/release-please.yml) runs on push to main; the build-assets
+# (.github/workflows/release.yml) runs on push to main; the build-assets
 # job in that workflow attaches the Windows runtime bundle to the resulting release.
 # This workflow is the trust gate for merges.
 #

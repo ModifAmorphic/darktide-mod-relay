@@ -31,7 +31,7 @@ the Darktide binary (not of any implementation) are recorded in
 - **`main`** — production. The Relay runtime (the injected modding runtime +
   launcher + mod loader) is the production seed, migrated under `src/`.
   Releases are cut by release-please (see
-  `.github/workflows/release-please.yml`); the project is currently in 0.x
+  `.github/workflows/release.yml`); the project is currently in 0.x
   prereleases. The shipped shell installs exactly two production hooks
   (`lua_newstate` + `lua_pcall`) and the one-shot production trampoline.
 - Development is branch + PR; no unreviewed merges to `main` (reviewed +
@@ -128,7 +128,7 @@ src/                Mod Relay — the injected modding runtime + injector
   README.md         the component README (developers / power users)
 docs/               architecture/ + reference/ (relay/, darktide/, community-tools/)
 .github/workflows/  CI: pr.yml (PR gate: mingw cross-compile + msvc native) +
-                      release-please.yml (release pipeline + Windows bundle attach)
+                      release.yml (release pipeline + Windows bundle attestation)
 .gitignore          ignores src/target, src/bin, build artifacts
 ```
 
@@ -225,7 +225,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   restart remains the safe recovery when side effects may survive.
 - **CI** runs on PRs to `main` (`.github/workflows/pr.yml`: mingw Linux
   cross-compile + wine tests, and msvc Windows native). Pushes to `main` run
-  the release pipeline (`.github/workflows/release-please.yml`: release-please
+  the release pipeline (`.github/workflows/release.yml`: release-please
   versions + tags, then builds + attaches the Windows x64 runtime bundle to the
   release). Both gate on clippy + tests.
 - **Release Please metadata invariant — do not “fix” the Cargo version.** The

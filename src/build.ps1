@@ -5,7 +5,7 @@
 .DESCRIPTION
     Mirrors src/Makefile target-for-target and command-for-command. This is the
     single source of truth for MSVC builds — both GitHub CI workflows
-    (.github/workflows/pr.yml and .github/workflows/release-please.yml) invoke it
+    (.github/workflows/pr.yml and .github/workflows/release.yml) invoke it
     for MSVC builds, and Windows developers use it for local builds.
 
     Targets PowerShell 5.1 (universal on Windows 10/11). No PS 7-only syntax,
