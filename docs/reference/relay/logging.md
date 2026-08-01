@@ -233,7 +233,7 @@ never block the original print, mod loading, or the game.
   architecture: capture/retirement of the private sink, original-authoritative
   ordering, result-cardinality preservation, and the process-lifetime
   non-stacking contract.
-- `src/mod_loader/tests/probes/observational/lua_logs_probe/` — a non-shipped,
+- `src/mod_loader/tests/probes/observational/log_lua_probe/` — a non-shipped,
   read-only observational probe an operator can stage into the real game to
   confirm what the tee captures, how it sanitizes, and that it does not stack.
   It is an optional live diagnostic, not part of the architecture or the

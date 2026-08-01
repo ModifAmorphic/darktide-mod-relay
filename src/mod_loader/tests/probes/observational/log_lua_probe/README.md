@@ -1,8 +1,8 @@
-# Scenario: `observational/lua_logs_probe` — Lua print tee observational probe
+# Scenario: `observational/log_lua_probe` — Lua print tee observational probe
 
 A **non-shipped**, **read-only** observational probe for Relay's
 optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`). It emits unique
-`[LUA_LOGS_PROBE]` markers through the engine's global `print` and `__print`
+`[LOG_LUA_PROBE]` markers through the engine's global `print` and `__print`
 surfaces so an operator can confirm — in the real game — what the tee captures,
 how it sanitizes, and that it does not stack.
 
@@ -43,8 +43,8 @@ mod-load time.
 
 | Path | Purpose |
 | --- | --- |
-| `mods/mods.lst` | Authoritative order: exactly `lua_logs_probe` |
-| `mods/lua_logs_probe/lua_logs_probe.mod` | Outer object that emits one marker per tee policy, one case per `init` |
+| `mods/mods.lst` | Authoritative order: exactly `log_lua_probe` |
+| `mods/log_lua_probe/log_lua_probe.mod` | Outer object that emits one marker per tee policy, one case per `init` |
 
 ## Staging
 
@@ -54,7 +54,7 @@ directly — no copying a leaf folder, no merging a `mods.lst` line, no Lua
 editing. The prior multi-step copy+merge staging — which left room for operator
 error (a forgotten `mods.lst` line, a mis-named leaf folder, a stray merge into
 a profile you cared about) — no longer applies: the bundle's own
-`mods/mods.lst` already lists exactly `lua_logs_probe`.
+`mods/mods.lst` already lists exactly `log_lua_probe`.
 
 Either point `--mod-path` straight at this scenario root, or copy the scenario
 root (as a unit) into your own staging directory and point `--mod-path` at the
@@ -63,11 +63,11 @@ failure-injection probes (never overlay those onto a profile you care about).
 
 ## Launch variants
 
-Point `--mod-path` at this scenario root (`<path-to-observational/lua_logs_probe>`):
+Point `--mod-path` at this scenario root (`<path-to-observational/log_lua_probe>`):
 
 | Variant | Invocation |
 | --- | --- |
-| Default off | `mod_relay.exe --game-binary <exe> --mod-path <path-to-observational/lua_logs_probe>` |
+| Default off | `mod_relay.exe --game-binary <exe> --mod-path <path-to-observational/log_lua_probe>` |
 | CLI on | add `--log-lua` |
 | Env on | `RELAY_LOG_LUA=1` (and no `--log-lua`) |
 | Log-level gate | add `--log-level warn` to the CLI-on variant |
@@ -75,14 +75,14 @@ Point `--mod-path` at this scenario root (`<path-to-observational/lua_logs_probe
 
 ## Expected evidence
 
-- **Darktide console log** (`console-*.log`): every `[LUA_LOGS_PROBE]` line the
+- **Darktide console log** (`console-*.log`): every `[LOG_LUA_PROBE]` line the
   probe printed, regardless of the tee (console remains authoritative and
   unchanged; the tee only adds `relay.log` copies).
 - **`relay.log`** (next to the launcher): when the tee is on, one structured
   `INFO  lua-print:` line per physical line emitted through the wrapped surfaces.
   A captured probe line looks like:
-  `2026-07-23T12:34:56-04:00 INFO  lua-print: [LUA_LOGS_PROBE] case=simple_print load=1 hello-from-print`
-- **Scenario log** (`<mod_path>/mods/lua_logs_probe/lua_logs_probe.log`): one
+  `2026-07-23T12:34:56-04:00 INFO  lua-print: [LOG_LUA_PROBE] case=simple_print load=1 hello-from-print`
+- **Scenario log** (`<mod_path>/mods/log_lua_probe/log_lua_probe.log`): one
   status line per case (`status=ok` / `status=unavailable`), plus the
   `SESSION_START` / `SESSION_DONE` markers — operator convenience for aligning
   cases to `relay.log` lines.
@@ -91,7 +91,7 @@ Point `--mod-path` at this scenario root (`<path-to-observational/lua_logs_probe
 
 | # | Check | Expected result |
 | --- | --- | --- |
-| 1 | **Default off** (no flag/env) | console log has the probe markers; `relay.log` has **no** `lua-print:` probe lines (and no `[LUA_LOGS_PROBE]`). |
+| 1 | **Default off** (no flag/env) | console log has the probe markers; `relay.log` has **no** `lua-print:` probe lines (and no `[LOG_LUA_PROBE]`). |
 | 2 | **CLI on** (`--log-lua`) | every bounded probe marker appears once in console **and** once as a `lua-print:` line in `relay.log`. |
 | 3 | **Env on** (`RELAY_LOG_LUA=1`) | behavior identical to CLI on. |
 | 4 | **Formatting / sanitization / truncation** | `multiline_crlf` → multiple separately-prefixed `relay.log` lines; `percent_fmt` → `%`/`%s`/`%d` preserved literally; `control_bytes` → `\x00`/`\x01`/`\x1b`/`\x7f` (no raw control bytes, no malformed unprefixed lines); `over_budget` → exactly one `... truncated` marker after the budget bytes. |
@@ -112,8 +112,8 @@ document the observed result without changing DMF or wrapping its methods.
 
 1. Point `--mod-path` elsewhere (or relaunch from Steam for vanilla play). The
    whole scenario is one bundle, so there is no `mods.lst` line to edit.
-2. Delete the scenario log (`<mod_path>/mods/lua_logs_probe/lua_logs_probe.log`)
+2. Delete the scenario log (`<mod_path>/mods/log_lua_probe/log_lua_probe.log`)
    if it accrued.
 3. Leave `relay.log` / `console-*.log` as-is, or clear them per your usual workflow.
 
-Re-launch to confirm the probe is gone (no `[LUA_LOGS_PROBE]` markers).
+Re-launch to confirm the probe is gone (no `[LOG_LUA_PROBE]` markers).

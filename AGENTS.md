@@ -75,8 +75,8 @@ src/                Mod Relay — the injected modding runtime + injector
                       relay.log when --log-lua/RELAY_LOG_LUA=1 — retires the
                       trampoline's private __mod_relay_lua_log_sink temp global
                       before its idempotency guard; originals stay authoritative;
-                      covered by tests/test_lua_logs.lua + the
-                      tests/probes/observational/lua_logs_probe/ live probe); lifecycle.lua is the
+                      covered by tests/test_log_lua.lua + the
+                      tests/probes/observational/log_lua_probe/ live probe); lifecycle.lua is the
                       bootstrap coordinator + the direct closure-wraps
                       (BootStateRequireGameScripts._state_update,
                       StateGame.update, GameStateMachine._change_state exit/enter

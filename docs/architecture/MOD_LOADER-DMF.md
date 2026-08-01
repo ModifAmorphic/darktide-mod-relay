@@ -370,7 +370,7 @@ not fight it.
 a DMF/mod path is captured **only if** its runtime ultimately calls one of those
 wrapped globals. DMF's `mod:info` / `mod:warning` / `mod:error` and other
 logging APIs may bypass them — whether they are tee'd is a black-box
-observation (the operator can confirm with the `lua_logs_probe`), never an
+observation (the operator can confirm with the `log_lua_probe`), never an
 assumption. The tee never wraps DMF methods directly and introduces no public
 mod logging interface.
 

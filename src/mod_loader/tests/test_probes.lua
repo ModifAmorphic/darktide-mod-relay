@@ -97,11 +97,11 @@ return function(runner)
                 readme_behavior = { "_check_reload" },
             },
             {
-                dir = "observational/lua_logs_probe",
-                probe = "lua_logs_probe",
-                mod_rel = "observational/lua_logs_probe/mods/lua_logs_probe/lua_logs_probe.mod",
-                old_rel = "observational/lua_logs_probe/lua_logs_probe.mod",
-                readme_behavior = { "[LUA_LOGS_PROBE]", "--log-lua" },
+                dir = "observational/log_lua_probe",
+                probe = "log_lua_probe",
+                mod_rel = "observational/log_lua_probe/mods/log_lua_probe/log_lua_probe.mod",
+                old_rel = "observational/log_lua_probe/log_lua_probe.mod",
+                readme_behavior = { "[LOG_LUA_PROBE]", "--log-lua" },
             },
             {
                 dir = "observational/cwd_probe",
@@ -147,63 +147,63 @@ return function(runner)
     end)
 
     -- -------------------------------------------------------------------
-    -- observational/lua_logs_probe: the Lua print-tee observational probe.
+    -- observational/log_lua_probe: the Lua print-tee observational probe.
     -- Structural-only: compile + distinctive case/contract markers. The probe
     -- is NOT executed here (it only runs staged in the real game).
     -- -------------------------------------------------------------------
-    runner.register("probes: observational/lua_logs_probe structure + markers", function()
-        local probe = assert_compilable("observational/lua_logs_probe/mods/lua_logs_probe/lua_logs_probe.mod")
+    runner.register("probes: observational/log_lua_probe structure + markers", function()
+        local probe = assert_compilable("observational/log_lua_probe/mods/log_lua_probe/log_lua_probe.mod")
         -- Distinctive prefix + one marker per documented case.
-        assert_contains(probe, "[LUA_LOGS_PROBE]", "lua_logs_probe (prefix)")
-        assert_contains(probe, "case=simple_print", "lua_logs_probe (simple_print case)")
-        assert_contains(probe, "case=simple_dprint", "lua_logs_probe (simple_dprint case)")
-        assert_contains(probe, "case=multi_args", "lua_logs_probe (multi_args case)")
-        assert_contains(probe, "case=multiline_crlf", "lua_logs_probe (multiline_crlf case)")
-        assert_contains(probe, "case=percent_fmt", "lua_logs_probe (percent_fmt case)")
-        assert_contains(probe, "case=control_bytes", "lua_logs_probe (control_bytes case)")
-        assert_contains(probe, "case=over_budget", "lua_logs_probe (over_budget case)")
+        assert_contains(probe, "[LOG_LUA_PROBE]", "log_lua_probe (prefix)")
+        assert_contains(probe, "case=simple_print", "log_lua_probe (simple_print case)")
+        assert_contains(probe, "case=simple_dprint", "log_lua_probe (simple_dprint case)")
+        assert_contains(probe, "case=multi_args", "log_lua_probe (multi_args case)")
+        assert_contains(probe, "case=multiline_crlf", "log_lua_probe (multiline_crlf case)")
+        assert_contains(probe, "case=percent_fmt", "log_lua_probe (percent_fmt case)")
+        assert_contains(probe, "case=control_bytes", "log_lua_probe (control_bytes case)")
+        assert_contains(probe, "case=over_budget", "log_lua_probe (over_budget case)")
         -- Exercises BOTH wrapped surfaces (global print + __print); __print is
         -- probed separately and degrades to a clear marker when unavailable.
-        assert_contains(probe, "local _print    = print", "lua_logs_probe (print surface)")
-        assert_contains(probe, "__print", "lua_logs_probe (__print surface)")
+        assert_contains(probe, "local _print    = print", "log_lua_probe (print surface)")
+        assert_contains(probe, "__print", "log_lua_probe (__print surface)")
         -- Control bytes are CONSTRUCTED (string.char), never raw in source, and
         -- the over-budget case exceeds the 4096-byte native input budget.
-        assert_contains(probe, "string.char", "lua_logs_probe (safe control-byte construction)")
-        assert_contains(probe, "string.rep", "lua_logs_probe (over-budget payload construction)")
+        assert_contains(probe, "string.char", "log_lua_probe (safe control-byte construction)")
+        assert_contains(probe, "string.rep", "log_lua_probe (over-budget payload construction)")
         -- Process-lifetime load index (survives hot reload via _G) + rooted
         -- scenario log path (operator convenience).
-        assert_contains(probe, "_RELAY_LUA_LOGS_PROBE_LOAD", "lua_logs_probe (load index global)")
-        assert_contains(probe, "lua_logs_probe/lua_logs_probe.log", "lua_logs_probe (scenario log)")
+        assert_contains(probe, "_RELAY_LOG_LUA_PROBE_LOAD", "log_lua_probe (load index global)")
+        assert_contains(probe, "log_lua_probe/log_lua_probe.log", "log_lua_probe (scenario log)")
         -- The probe is read-only and must NOT touch Relay's private sink/temp
         -- global directly, nor any forbidden community logging surface.
-        assert_not_contains(probe, "__mod_relay_lua_log_sink", "lua_logs_probe (no private sink)")
-        assert_not_contains(probe, "Mods.message", "lua_logs_probe (no community surface)")
+        assert_not_contains(probe, "__mod_relay_lua_log_sink", "log_lua_probe (no private sink)")
+        assert_not_contains(probe, "Mods.message", "log_lua_probe (no community surface)")
         -- Every case is failure-contained (an unavailable surface records a
         -- clear marker instead of crashing the game).
-        assert_contains(probe, "status=unavailable", "lua_logs_probe (contained failure marker)")
-        assert_contains(probe, "_pcall(body)", "lua_logs_probe (per-case containment)")
+        assert_contains(probe, "status=unavailable", "log_lua_probe (contained failure marker)")
+        assert_contains(probe, "_pcall(body)", "log_lua_probe (per-case containment)")
 
         -- README documents the complete-bundle staging, launch variants,
         -- expected evidence, the acceptance matrix, the stock-DMF black-box
         -- caveat, and cleanup.
-        local readme = assert_present("observational/lua_logs_probe/README.md")
-        assert_contains(readme, "[LUA_LOGS_PROBE]", "lua_logs_probe README (prefix)")
-        assert_contains(readme, "--mod-path", "lua_logs_probe README (direct --mod-path)")
-        assert_contains(readme, "complete bundle", "lua_logs_probe README (uniform staging shape)")
-        assert_not_contains(readme, "Shape A", "lua_logs_probe README (legacy shape gone)")
-        assert_not_contains(readme, "Add (or merge)", "lua_logs_probe README (no list-merge step)")
-        assert_contains(readme, "--log-lua", "lua_logs_probe README (CLI variant)")
-        assert_contains(readme, "RELAY_LOG_LUA=1", "lua_logs_probe README (env variant)")
-        assert_contains(readme, "Default off", "lua_logs_probe README (matrix: default off)")
-        assert_contains(readme, "CLI on", "lua_logs_probe README (matrix: CLI on)")
-        assert_contains(readme, "Env on", "lua_logs_probe README (matrix: env on)")
-        assert_contains(readme, "--log-level warn", "lua_logs_probe README (matrix: log-level gate)")
-        assert_contains(readme, "No stacking", "lua_logs_probe README (matrix: no stacking)")
-        assert_contains(readme, "truncation marker", "lua_logs_probe README (matrix: truncation)")
-        assert_contains(readme, "Vanilla", "lua_logs_probe README (matrix: vanilla)")
-        assert_contains(readme, "Coverage is", "lua_logs_probe README (coverage-not-guaranteed)")
-        assert_contains(readme, "black-box", "lua_logs_probe README (DMF black-box caveat)")
-        assert_contains(readme, "Cleanup", "lua_logs_probe README (cleanup section)")
+        local readme = assert_present("observational/log_lua_probe/README.md")
+        assert_contains(readme, "[LOG_LUA_PROBE]", "log_lua_probe README (prefix)")
+        assert_contains(readme, "--mod-path", "log_lua_probe README (direct --mod-path)")
+        assert_contains(readme, "complete bundle", "log_lua_probe README (uniform staging shape)")
+        assert_not_contains(readme, "Shape A", "log_lua_probe README (legacy shape gone)")
+        assert_not_contains(readme, "Add (or merge)", "log_lua_probe README (no list-merge step)")
+        assert_contains(readme, "--log-lua", "log_lua_probe README (CLI variant)")
+        assert_contains(readme, "RELAY_LOG_LUA=1", "log_lua_probe README (env variant)")
+        assert_contains(readme, "Default off", "log_lua_probe README (matrix: default off)")
+        assert_contains(readme, "CLI on", "log_lua_probe README (matrix: CLI on)")
+        assert_contains(readme, "Env on", "log_lua_probe README (matrix: env on)")
+        assert_contains(readme, "--log-level warn", "log_lua_probe README (matrix: log-level gate)")
+        assert_contains(readme, "No stacking", "log_lua_probe README (matrix: no stacking)")
+        assert_contains(readme, "truncation marker", "log_lua_probe README (matrix: truncation)")
+        assert_contains(readme, "Vanilla", "log_lua_probe README (matrix: vanilla)")
+        assert_contains(readme, "Coverage is", "log_lua_probe README (coverage-not-guaranteed)")
+        assert_contains(readme, "black-box", "log_lua_probe README (DMF black-box caveat)")
+        assert_contains(readme, "Cleanup", "log_lua_probe README (cleanup section)")
     end)
 
     -- -------------------------------------------------------------------
@@ -408,19 +408,19 @@ return function(runner)
         assert_contains(index, "offline LuaJIT test harness", "probes index")
         assert_contains(index, "test_probes.lua", "probes index (structural validation noted)")
         assert_contains(index, "part of the shipped runtime", "probes index")
-        -- The lua_logs_probe observational probe is indexed too, and the index
+        -- The log_lua_probe observational probe is indexed too, and the index
         -- no longer makes the now-stale blanket claim that probe/loader lines
         -- never reach relay.log (the claim is conditional on --log-lua).
-        assert_contains(index, "lua_logs_probe", "probes index (lua_logs_probe listed)")
-        assert_contains(index, "[LUA_LOGS_PROBE]", "probes index (lua_logs_probe prefix)")
+        assert_contains(index, "log_lua_probe", "probes index (log_lua_probe listed)")
+        assert_contains(index, "[LOG_LUA_PROBE]", "probes index (log_lua_probe prefix)")
         assert_contains(index, "--log-lua", "probes index (conditional relay.log claim)")
         -- Links to each scenario README (observational scenarios now ship one too).
         assert_contains(index, "observational/shutdown_probe/README.md",
             "probes index shutdown_probe link")
         assert_contains(index, "observational/reload_seam_probe/README.md",
             "probes index reload_seam_probe link")
-        assert_contains(index, "observational/lua_logs_probe/README.md",
-            "probes index lua_logs_probe link")
+        assert_contains(index, "observational/log_lua_probe/README.md",
+            "probes index log_lua_probe link")
         assert_contains(index, "metadata/crashify/README.md", "probes index crashify link")
         assert_contains(index, "failure_injection/standalone/README.md", "probes index standalone link")
         assert_contains(index, "failure_injection/framework_boundary/README.md",

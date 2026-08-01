@@ -1,4 +1,4 @@
--- test_lua_logs.lua — the optional lua-log tee installed by init.lua.
+-- test_log_lua.lua — the optional lua-log tee installed by init.lua.
 --
 -- Covers the Lua side of the RELAY_LOG_LUA=1 print tee: the temporary
 -- __mod_relay_lua_log_sink global is consumed + retired before any later
@@ -86,7 +86,7 @@ return function(runner)
     -- Bootstrap + retirement
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: no sink — print identity unchanged; __print = __print or print", function()
+    runner.register("log-lua: no sink — print identity unchanged; __print = __print or print", function()
         local sb = fresh_sb()
         local orig_print = function() end
         sb.print = orig_print
@@ -98,7 +98,7 @@ return function(runner)
         runner.assert_nil(sb.Mods._relay._print_tee_installed, "no wrap marker set with no sink")
     end)
 
-    runner.register("lua-logs: valid sink — temp global retired; original then sink, once each", function()
+    runner.register("log-lua: valid sink — temp global retired; original then sink, once each", function()
         local sb = fresh_sb()
         local order, print_log, sink_log = {}, {}, {}
         sb.print = function(...)
@@ -126,7 +126,7 @@ return function(runner)
         runner.assert_eq("hello", sink_log[1], "sink received the rendered string")
     end)
 
-    runner.register("lua-logs: invalid (non-function) sink retired; no wrapper installed", function()
+    runner.register("log-lua: invalid (non-function) sink retired; no wrapper installed", function()
         for _, bad in ipairs({ "not a function", 42, {}, true }) do
             local sb = fresh_sb()
             local orig_print = function() end
@@ -144,7 +144,7 @@ return function(runner)
     -- Aliased vs distinct originals
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: aliased print/__print share ONE wrapper (no nested/double capture)", function()
+    runner.register("log-lua: aliased print/__print share ONE wrapper (no nested/double capture)", function()
         local sb = fresh_sb()
         local calls, sink_log = 0, {}
         local shared_orig = function(...) calls = calls + 1 end
@@ -166,7 +166,7 @@ return function(runner)
         runner.assert_eq(1, #sink_log, "sink called once via __print (no nested capture)")
     end)
 
-    runner.register("lua-logs: distinct originals stay distinct; each calls its own original", function()
+    runner.register("log-lua: distinct originals stay distinct; each calls its own original", function()
         local sb = fresh_sb()
         local print_log, dunder_log, sink_log = {}, {}, {}
         local orig_print = recorder(print_log)
@@ -192,7 +192,7 @@ return function(runner)
         runner.assert_eq("via-dunder", sink_log[1], "sink captured the __print call")
     end)
 
-    runner.register("lua-logs: __print absent (nil) — shared wrapper via the __print or print fallback", function()
+    runner.register("log-lua: __print absent (nil) — shared wrapper via the __print or print fallback", function()
         -- __print unset -> __print = __print or print resolves to print -> same
         -- surface -> one shared wrapper on both globals (the common engine case
         -- where DMF has not yet aliased print under __print).
@@ -212,7 +212,7 @@ return function(runner)
     -- Renderer
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: one string + multiple primitive/nil args render tab-delimited", function()
+    runner.register("log-lua: one string + multiple primitive/nil args render tab-delimited", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() end
@@ -228,7 +228,7 @@ return function(runner)
         runner.assert_eq("", sink_log[1], "empty arg list renders as the empty string")
     end)
 
-    runner.register("lua-logs: number rendering uses ordinary textual forms", function()
+    runner.register("log-lua: number rendering uses ordinary textual forms", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() end
@@ -239,7 +239,7 @@ return function(runner)
         runner.assert_eq("0\t-1\t3.5\t1000000", sink_log[1], "numbers use tostring's ordinary forms")
     end)
 
-    runner.register("lua-logs: complex values render as placeholders; __tostring not invoked by capture", function()
+    runner.register("log-lua: complex values render as placeholders; __tostring not invoked by capture", function()
         local sb = fresh_sb()
         local sink_log, meta_log, print_log = {}, {}, {}
         local mt_calls = 0
@@ -260,7 +260,7 @@ return function(runner)
             "__tostring invoked exactly once (by the original), never by capture")
     end)
 
-    runner.register("lua-logs: LuaJIT cdata renders as <cdata> (distinct from userdata)", function()
+    runner.register("log-lua: LuaJIT cdata renders as <cdata> (distinct from userdata)", function()
         -- LuaJIT 2.1: type(ffi.new(...)) == "cdata" (NOT "userdata"). The
         -- renderer has a dedicated cdata branch, so an FFI value gets the stable
         -- <cdata> placeholder and is never re-converted. Grounded against the
@@ -293,7 +293,7 @@ return function(runner)
             "cdata renders as the stable <cdata> placeholder, not <userdata>")
     end)
 
-    runner.register("lua-logs: string passed through byte-for-byte", function()
+    runner.register("log-lua: string passed through byte-for-byte", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() end
@@ -305,7 +305,7 @@ return function(runner)
             "string bytes (incl. % and tab) passed through unchanged — native owns escaping")
     end)
 
-    runner.register("lua-logs: multiline string handed to the sink intact", function()
+    runner.register("log-lua: multiline string handed to the sink intact", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() end
@@ -322,7 +322,7 @@ return function(runner)
     -- Authoritative original behavior
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: original error propagates; sink not called", function()
+    runner.register("log-lua: original error propagates; sink not called", function()
         local sb = fresh_sb()
         local sink_log = {}
         local triggered = false
@@ -341,7 +341,7 @@ return function(runner)
         runner.assert_eq(0, #sink_log, "sink NOT called when the original errored")
     end)
 
-    runner.register("lua-logs: original error provenance preserved (natural propagation, not a rethrow)", function()
+    runner.register("log-lua: original error provenance preserved (natural propagation, not a rethrow)", function()
         -- A pcall+rethrow design unwinds the original's frame BEFORE the outer
         -- handler runs; a DIRECT original(...) call keeps it on the stack. We
         -- distinguish the two at the FRAME level (debug.getinfo source walk),
@@ -391,7 +391,7 @@ return function(runner)
         runner.assert_eq(0, #sink_log, "sink NOT called when the original errored")
     end)
 
-    runner.register("lua-logs: zero / multiple return values (incl. nil cardinality) preserved", function()
+    runner.register("log-lua: zero / multiple return values (incl. nil cardinality) preserved", function()
         local sb = fresh_sb()
         local sink_log = {}
         -- Distinct originals returning specific value shapes.
@@ -424,7 +424,7 @@ return function(runner)
         runner.assert_eq("x", r3[2], "second result preserved")
     end)
 
-    runner.register("lua-logs: sink error (after original success) swallowed; results preserved", function()
+    runner.register("log-lua: sink error (after original success) swallowed; results preserved", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() return "ok-1", "ok-2" end
@@ -438,7 +438,7 @@ return function(runner)
         runner.assert_eq("ok-2", r[2], "result[2] preserved")
     end)
 
-    runner.register("lua-logs: capture failure never changes successful application behavior", function()
+    runner.register("log-lua: capture failure never changes successful application behavior", function()
         -- A sink that errors should be indistinguishable from a healthy sink to
         -- the caller of print: same results, original called once, no leak.
         local sb = fresh_sb()
@@ -457,7 +457,7 @@ return function(runner)
     -- Wrapper insulation (captured locals) + capture-failure containment
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: later global-helper replacement does not break the installed wrapper", function()
+    runner.register("log-lua: later global-helper replacement does not break the installed wrapper", function()
         -- The wrappers capture pcall/select/unpack/type/tostring/table.concat ONCE
         -- at install and close over them. Sabotaging those SANDBOX bindings
         -- afterward must not affect the wrapper: the original is still called,
@@ -489,7 +489,7 @@ return function(runner)
         runner.assert_eq(0, r.n, "zero-result original still forwards zero through the wrapper")
     end)
 
-    runner.register("lua-logs: renderer is total under local capture; sink is the sole fallible protected boundary", function()
+    runner.register("log-lua: renderer is total under local capture; sink is the sole fallible protected boundary", function()
         -- Under the local-capture design the renderer is TOTAL: it dispatches
         -- over every Lua type via the captured _type/_tostring/_concat and table
         -- constructors, so it has no failure mode on any well-typed value.
@@ -542,7 +542,7 @@ return function(runner)
     -- Idempotency + hot-reload invariance
     -- ------------------------------------------------------------------
 
-    runner.register("lua-logs: repeated/partial entry cannot stack wrappers; temp global always retired", function()
+    runner.register("log-lua: repeated/partial entry cannot stack wrappers; temp global always retired", function()
         local sb = fresh_sb()
         local sink_log = {}
         sb.print = function() end
@@ -570,7 +570,7 @@ return function(runner)
         runner.assert_eq(n_before + 1, #sink_log, "still exactly one sink invocation per print (no stacking)")
     end)
 
-    runner.register("lua-logs: partial entry (aborted after wrap) does not re-wrap on re-entry", function()
+    runner.register("log-lua: partial entry (aborted after wrap) does not re-wrap on re-entry", function()
         -- Simulate a partial first entry: install the tee, set the marker, but do
         -- NOT set _loaded (as if bootstrap aborted later). A re-entry must skip
         -- re-wrapping even though _loaded is false.
@@ -592,7 +592,7 @@ return function(runner)
             "temp global still retired on the re-entry path")
     end)
 
-    runner.register("lua-logs: wrapper survives simulated hot-reload state changes (not removed/reinstalled)", function()
+    runner.register("log-lua: wrapper survives simulated hot-reload state changes (not removed/reinstalled)", function()
         -- Hot reload reuses this Lua state but never re-runs the one-shot entry.
         -- Simulate reload-related state churn and confirm the wrappers are
         -- process-lifetime: identity stable, still functional, not reinstalled.
@@ -619,7 +619,7 @@ return function(runner)
         runner.assert_eq("after-reload", sink_log[1], "capture still routes through the original wrapper")
     end)
 
-    runner.register("lua-logs: a later mod replacing global print wins (wrapper does not fight it)", function()
+    runner.register("log-lua: a later mod replacing global print wins (wrapper does not fight it)", function()
         -- The tee is process-lifetime and non-stacking; it does NOT re-assert
         -- itself over a mod that rewrites global print after bootstrap.
         local sb = fresh_sb()
