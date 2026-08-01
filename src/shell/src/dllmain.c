@@ -113,14 +113,15 @@ static size_t          g_trampoline_chunk_len = 0;
 static volatile LONG   g_trampoline_done = 0;      /* one-shot: trampoline fired at pcall#1 */
 
 /* ---- lua-print sink ----
- * Default-off opt-in: snapshot the exact RELAY_LUA_LOGS=1 once at worker
+ * Default-off opt-in: snapshot the exact RELAY_LOG_LUA=1 once at worker
  * startup. When enabled and the required C-API pointers resolve, the trampoline
  * registers a private C callback as the temporary Lua global
  * __mod_relay_lua_log_sink. When disabled, nothing is published and there is
  * no per-print cost. */
-#define ENV_LUA_LOGS        "RELAY_LUA_LOGS"             /* exact value "1" enables */
+#define ENV_LOG_LUA         "RELAY_LOG_LUA"   /* exact value "1" enables */
+#define ENV_LOG_APPEND      "RELAY_LOG_APPEND" /* exact value "1" opens relay.log in append mode */
 #define LUA_LOG_SINK_GLOBAL "__mod_relay_lua_log_sink"   /* temp global set on the VM */
-static int g_lua_log_sink_enabled = 0;   /* snapshot of RELAY_LUA_LOGS=1 at startup */
+static int g_lua_log_sink_enabled = 0;   /* snapshot of RELAY_LOG_LUA=1 at startup */
 
 /* Serializes every relay_log physical-line emission (OutputDebugStringA + the
  * fputs/fflush pair) so worker-thread and Lua-thread (sink) lines never
@@ -173,7 +174,8 @@ static int resolve_log_level(void) {
 
 /* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
  * empty, "0", "true", whitespace, oversized, and all other values return 0.
- * This is the exact-match policy for the value-less RELAY_LUA_LOGS switch. */
+ * This is the exact-match policy shared by the value-less switches
+ * (RELAY_LOG_LUA / RELAY_LOG_APPEND / RELAY_SKIP_SPLASH). */
 static int env_is_exact_one(const char *env_name) {
     char buf[16];
     DWORD n = GetEnvironmentVariableA(env_name, buf, sizeof(buf));
@@ -268,10 +270,13 @@ static void open_log(void) {
             snprintf(path, sizeof(path), "%s", logname);
         }
     }
-    /* "w" (not "a"): truncate so each game start gets a fresh log. The worker
-     * opens the log once per game process (DllMain -> worker thread), so this
-     * recreates the file on every launch — no unbounded growth across runs. */
-    g_log = fopen(path, "w");
+    /* Mode is driven by RELAY_LOG_APPEND (same exact-"1" policy as the other
+     * value-less log switches): default "w" truncates so each game start gets
+     * a fresh log; RELAY_LOG_APPEND=1 opens "a" so the file grows across runs.
+     * The worker opens the log once per game process (DllMain -> worker
+     * thread), so a truncated log is recreated on every launch. */
+    const char *mode = env_is_exact_one(ENV_LOG_APPEND) ? "a" : "w";
+    g_log = fopen(path, mode);
     relay_log(RELAY_LOG_INFO, "shell", "log -> %s\n", path);
 }
 
@@ -343,7 +348,7 @@ static void trampoline_stage_chunk(void) {
     }
 
     /* StateSplash skip (optional). Snapshot the exact RELAY_SKIP_SPLASH=1 once
-     * here via the same exact-"1" policy as RELAY_LUA_LOGS; the chunk bakes the
+     * here via the same exact-"1" policy as RELAY_LOG_LUA; the chunk bakes the
      * boolean into the RELAY_SKIP_SPLASH global ("1" or "") for init.lua. */
     int skip_splash = env_is_exact_one(SKIP_SPLASH_ENV);
 
@@ -570,12 +575,12 @@ static int install_hook(void *target, void *detour, void **original, const char 
 static DWORD WINAPI worker(LPVOID arg) {
     (void)arg;
     g_log_level = resolve_log_level();
-    g_lua_log_sink_enabled = env_is_exact_one(ENV_LUA_LOGS);
+    g_lua_log_sink_enabled = env_is_exact_one(ENV_LOG_LUA);
     open_log();
     relay_log(RELAY_LOG_INFO, "shell", "=== DllMain worker started (pid=%lu) ===\n", GetCurrentProcessId());
 
     if (g_lua_log_sink_enabled) {
-        relay_log(RELAY_LOG_INFO, "shell", "lua-print sink enabled (RELAY_LUA_LOGS=1)\n");
+        relay_log(RELAY_LOG_INFO, "shell", "lua-print sink enabled (RELAY_LOG_LUA=1)\n");
     }
 
     /* The host process command line as the game sees it — the authoritative

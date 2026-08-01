@@ -39,7 +39,8 @@
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
-#define ENV_LUA_LOGS     "RELAY_LUA_LOGS"   /* exact value "1" enables the lua-print sink */
+#define ENV_LOG_LUA      "RELAY_LOG_LUA"    /* exact value "1" enables the lua-print sink */
+#define ENV_LOG_APPEND   "RELAY_LOG_APPEND" /* exact value "1" opens relay.log in append mode */
 #define ENV_SKIP_SPLASH  "RELAY_SKIP_SPLASH" /* exact value "1" enables the StateSplash skip */
 
 /* Named event for the launcher<->shell hook-ready handshake. Created
@@ -354,8 +355,9 @@ static int read_env(const char *env_name, char *out, size_t outsz) {
 
 /* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
  * empty, "0", "true", whitespace, oversized (would truncate the probe buffer),
- * and all other values return 0. This is the exact-match policy for the
- * value-less RELAY_LUA_LOGS switch: only the canonical "1" enables. */
+ * and all other values return 0. This is the exact-match policy shared by the
+ * value-less switches (RELAY_LOG_LUA / RELAY_LOG_APPEND / RELAY_SKIP_SPLASH):
+ * only the canonical "1" enables. */
 static int env_is_exact_one(const char *env_name) {
     char buf[16];
     DWORD n = GetEnvironmentVariableA(env_name, buf, sizeof(buf));
@@ -425,10 +427,17 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
             continue;
         }
 
-        /* --lua-logs: value-less flag (does not consume the following token;
+        /* --log-lua: value-less flag (does not consume the following token;
          * only recognized before `--`). */
-        if (strcmp(flag, "--lua-logs") == 0) {
-            out->lua_logs_enabled = 1;
+        if (strcmp(flag, "--log-lua") == 0) {
+            out->log_lua_enabled = 1;
+            continue;
+        }
+
+        /* --log-append: value-less flag (does not consume the following token;
+         * only recognized before `--`). */
+        if (strcmp(flag, "--log-append") == 0) {
+            out->log_append_enabled = 1;
             continue;
         }
 
@@ -508,15 +517,20 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
         : (read_env(ENV_STEAM_APP_ID, g_steam_app_id_buf, sizeof(g_steam_app_id_buf))
               ? g_steam_app_id_buf : RELAY_DEFAULT_STEAM_APPID);
 
-    /* lua_logs_enabled: an explicit --lua-logs flag enables; otherwise only the
-     * exact env value RELAY_LUA_LOGS=1 enables. Default off. No negative
+    /* log_lua_enabled: an explicit --log-lua flag enables; otherwise only the
+     * exact env value RELAY_LOG_LUA=1 enables. Default off. No negative
      * switch — unset/empty/"0"/"true"/whitespace/oversized/all-other-values
      * all resolve to disabled. */
-    cfg->lua_logs_enabled = args->lua_logs_enabled ? 1 : env_is_exact_one(ENV_LUA_LOGS);
+    cfg->log_lua_enabled = args->log_lua_enabled ? 1 : env_is_exact_one(ENV_LOG_LUA);
+
+    /* log_append_enabled: an explicit --log-append flag enables; otherwise only
+     * the exact env value RELAY_LOG_APPEND=1 enables. Default off. Same
+     * exact-match policy as log_lua_enabled. */
+    cfg->log_append_enabled = args->log_append_enabled ? 1 : env_is_exact_one(ENV_LOG_APPEND);
 
     /* skip_splash_enabled: an explicit --skip-splash flag enables; otherwise
      * only the exact env value RELAY_SKIP_SPLASH=1 enables. Default off. Same
-     * exact-match policy as lua_logs_enabled. */
+     * exact-match policy as log_lua_enabled. */
     cfg->skip_splash_enabled = args->skip_splash_enabled ? 1 : env_is_exact_one(ENV_SKIP_SPLASH);
 }
 
@@ -548,10 +562,16 @@ static void print_usage(FILE *out, const char *prog) {
         "                         [env: RELAY_STEAM_APP_ID]\n"
         "                         [default: 1361210]\n"
         "\n"
-        "  --lua-logs              include Lua print output in relay.log\n"
+        "  --log-lua              include Lua print output in relay.log\n"
         "                         (value-less; only the exact env value\n"
-        "                         RELAY_LUA_LOGS=1 enables)\n"
-        "                         [env: RELAY_LUA_LOGS=1] [default: off]\n"
+        "                         RELAY_LOG_LUA=1 enables)\n"
+        "                         [env: RELAY_LOG_LUA=1] [default: off]\n"
+        "\n"
+        "  --log-append           append to relay.log instead of overwriting\n"
+        "                         (value-less; only the exact env value\n"
+        "                         RELAY_LOG_APPEND=1 enables)\n"
+        "                         [env: RELAY_LOG_APPEND=1] [default: off\n"
+        "                         (truncates: fresh log per launch)]\n"
         "\n"
         "  --skip-splash           skip the StateSplash intro splash state\n"
         "                         (value-less; only the exact env value\n"
@@ -630,17 +650,24 @@ int main(int argc, char **argv) {
     if (cfg.mod_path) {
         SetEnvironmentVariableA(ENV_MOD_PATH, cfg.mod_path);
     }
-    /* Canonical child inheritance for the value-less lua-print switch: set the
+    /* Canonical child inheritance for the value-less log switches: set the
      * exact "1" when enabled, or REMOVE it when disabled so a stale parent
      * value can't leak into the child as a non-"1" (the shell snapshots only
      * the exact "1"). Preserves flag > env > default: the resolved boolean is
      * the single source of truth re-exported here. */
-    if (cfg.lua_logs_enabled) {
-        SetEnvironmentVariableA(ENV_LUA_LOGS, "1");
+    if (cfg.log_lua_enabled) {
+        SetEnvironmentVariableA(ENV_LOG_LUA, "1");
     } else {
-        SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
+        SetEnvironmentVariableA(ENV_LOG_LUA, NULL);
     }
-    /* Same canonical-child policy as RELAY_LUA_LOGS above: set the exact "1"
+    /* Same canonical-child policy as RELAY_LOG_LUA above: set the exact "1"
+     * when enabled, remove it when disabled. */
+    if (cfg.log_append_enabled) {
+        SetEnvironmentVariableA(ENV_LOG_APPEND, "1");
+    } else {
+        SetEnvironmentVariableA(ENV_LOG_APPEND, NULL);
+    }
+    /* Same canonical-child policy as RELAY_LOG_LUA above: set the exact "1"
      * when enabled, remove it when disabled. */
     if (cfg.skip_splash_enabled) {
         SetEnvironmentVariableA(ENV_SKIP_SPLASH, "1");

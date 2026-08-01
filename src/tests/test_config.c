@@ -24,7 +24,8 @@
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
-#define ENV_LUA_LOGS     "RELAY_LUA_LOGS"
+#define ENV_LOG_LUA      "RELAY_LOG_LUA"
+#define ENV_LOG_APPEND   "RELAY_LOG_APPEND"
 #define ENV_SKIP_SPLASH  "RELAY_SKIP_SPLASH"
 
 static void clear_env(void) {
@@ -33,7 +34,8 @@ static void clear_env(void) {
     SetEnvironmentVariableA(ENV_LOG_FILE, NULL);
     SetEnvironmentVariableA(ENV_LOG_LEVEL, NULL);
     SetEnvironmentVariableA(ENV_STEAM_APP_ID, NULL);
-    SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
+    SetEnvironmentVariableA(ENV_LOG_LUA, NULL);
+    SetEnvironmentVariableA(ENV_LOG_APPEND, NULL);
     SetEnvironmentVariableA(ENV_SKIP_SPLASH, NULL);
 }
 
@@ -351,96 +353,217 @@ void test_resolve_game_arguments_none_is_null(void) {
     clear_env();
 }
 
-/* ---- --lua-logs flag (value-less, default-off, exact env) ---- */
+/* ---- --log-lua flag (value-less, default-off, exact env) ---- */
 
-void test_parse_lua_logs_valueless(void) {
-    /* --lua-logs must NOT consume the following token: --game-binary still
+void test_parse_log_lua_valueless(void) {
+    /* --log-lua must NOT consume the following token: --game-binary still
      * parses normally. */
-    char *argv[] = {"prog", "--lua-logs", "--game-binary", "G"};
+    char *argv[] = {"prog", "--log-lua", "--game-binary", "G"};
     relay_parsed_args a;
     ASSERT_EQ(0, relay_parse_args(4, argv, &a));
-    ASSERT_TRUE(a.lua_logs_enabled);
+    ASSERT_TRUE(a.log_lua_enabled);
     ASSERT_STREQ("G", a.game_binary);
 }
 
-void test_parse_lua_logs_defaults_false(void) {
+void test_parse_log_lua_defaults_false(void) {
     char *argv[] = {"prog", "--game-binary", "G"};
     relay_parsed_args a;
     ASSERT_EQ(0, relay_parse_args(3, argv, &a));
-    ASSERT_FALSE(a.lua_logs_enabled);
+    ASSERT_FALSE(a.log_lua_enabled);
 }
 
-void test_parse_lua_logs_after_dash_dash_is_game_arg(void) {
-    /* --lua-logs after -- is a raw game arg, NOT Relay's flag. Relay's own
-     * lua_logs_enabled must stay false, and the token forwards in the tail. */
-    char *argv[] = {"prog", "--", "--lua-logs"};
+void test_parse_log_lua_after_dash_dash_is_game_arg(void) {
+    /* --log-lua after -- is a raw game arg, NOT Relay's flag. Relay's own
+     * log_lua_enabled must stay false, and the token forwards in the tail. */
+    char *argv[] = {"prog", "--", "--log-lua"};
     relay_parsed_args a;
     ASSERT_EQ(0, relay_parse_args(3, argv, &a));
-    ASSERT_FALSE(a.lua_logs_enabled);
+    ASSERT_FALSE(a.log_lua_enabled);
     ASSERT_EQ(1, a.game_argument_count);
-    ASSERT_STREQ("--lua-logs", a.game_arguments[0]);
+    ASSERT_STREQ("--log-lua", a.game_arguments[0]);
 }
 
-void test_resolve_lua_logs_default_off(void) {
+void test_resolve_log_lua_default_off(void) {
     /* No flag, no env => disabled. */
     clear_env();
     relay_parsed_args a = {0};
     relay_config cfg;
     relay_resolve_config(&a, &cfg);
-    ASSERT_FALSE(cfg.lua_logs_enabled);
+    ASSERT_FALSE(cfg.log_lua_enabled);
     clear_env();
 }
 
-void test_resolve_lua_logs_env_exact_one_enables(void) {
+void test_resolve_log_lua_env_exact_one_enables(void) {
     /* Only the exact value "1" enables. */
     clear_env();
-    SetEnvironmentVariableA(ENV_LUA_LOGS, "1");
+    SetEnvironmentVariableA(ENV_LOG_LUA, "1");
     relay_parsed_args a = {0};
     relay_config cfg;
     relay_resolve_config(&a, &cfg);
-    ASSERT_TRUE(cfg.lua_logs_enabled);
+    ASSERT_TRUE(cfg.log_lua_enabled);
     clear_env();
 }
 
-void test_resolve_lua_logs_env_other_values_disabled(void) {
+void test_resolve_log_lua_env_other_values_disabled(void) {
     /* Every non-"1" value disables (unset is covered by default_off). */
     clear_env();
     const char *bad[] = {"0", "true", "TRUE", "2", "yes", " 1", "1 ",
                          "on", "  ", "True", "11", "1.0"};
     for (int k = 0; k < (int)(sizeof(bad) / sizeof(bad[0])); k++) {
-        SetEnvironmentVariableA(ENV_LUA_LOGS, bad[k]);
+        SetEnvironmentVariableA(ENV_LOG_LUA, bad[k]);
         relay_parsed_args a = {0};
         relay_config cfg;
         relay_resolve_config(&a, &cfg);
-        if (cfg.lua_logs_enabled) {
-            ASSERT_FAIL("RELAY_LUA_LOGS=\"%s\" should disable, but enabled",
+        if (cfg.log_lua_enabled) {
+            ASSERT_FAIL("RELAY_LOG_LUA=\"%s\" should disable, but enabled",
                         bad[k]);
         }
     }
     clear_env();
 }
 
-void test_resolve_lua_logs_env_empty_disables(void) {
+void test_resolve_log_lua_env_empty_disables(void) {
     /* An explicitly-empty value must disable (not enable). */
     clear_env();
-    SetEnvironmentVariableA(ENV_LUA_LOGS, "");
+    SetEnvironmentVariableA(ENV_LOG_LUA, "");
     relay_parsed_args a = {0};
     relay_config cfg;
     relay_resolve_config(&a, &cfg);
-    ASSERT_FALSE(cfg.lua_logs_enabled);
+    ASSERT_FALSE(cfg.log_lua_enabled);
     clear_env();
 }
 
-void test_resolve_lua_logs_flag_wins_and_enables_with_invalid_env(void) {
-    /* Explicit --lua-logs enables even when the env is set to an invalid
-     * value (flag > env). */
+void test_resolve_log_lua_env_oversized_disables(void) {
+    /* An oversized value (would truncate the probe buffer) disables. */
     clear_env();
-    SetEnvironmentVariableA(ENV_LUA_LOGS, "true");
+    char big[32];
+    memset(big, '1', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    SetEnvironmentVariableA(ENV_LOG_LUA, big);
     relay_parsed_args a = {0};
-    a.lua_logs_enabled = 1;
     relay_config cfg;
     relay_resolve_config(&a, &cfg);
-    ASSERT_TRUE(cfg.lua_logs_enabled);
+    ASSERT_FALSE(cfg.log_lua_enabled);
+    clear_env();
+}
+
+void test_resolve_log_lua_flag_wins_and_enables_with_invalid_env(void) {
+    /* Explicit --log-lua enables even when the env is set to an invalid
+     * value (flag > env). */
+    clear_env();
+    SetEnvironmentVariableA(ENV_LOG_LUA, "true");
+    relay_parsed_args a = {0};
+    a.log_lua_enabled = 1;
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_TRUE(cfg.log_lua_enabled);
+    clear_env();
+}
+
+/* ---- --log-append flag (value-less, default-off, exact env) ---- */
+
+void test_parse_log_append_valueless(void) {
+    /* --log-append must NOT consume the following token: --game-binary still
+     * parses normally. */
+    char *argv[] = {"prog", "--log-append", "--game-binary", "G"};
+    relay_parsed_args a;
+    ASSERT_EQ(0, relay_parse_args(4, argv, &a));
+    ASSERT_TRUE(a.log_append_enabled);
+    ASSERT_STREQ("G", a.game_binary);
+}
+
+void test_parse_log_append_defaults_false(void) {
+    char *argv[] = {"prog", "--game-binary", "G"};
+    relay_parsed_args a;
+    ASSERT_EQ(0, relay_parse_args(3, argv, &a));
+    ASSERT_FALSE(a.log_append_enabled);
+}
+
+void test_parse_log_append_after_dash_dash_is_game_arg(void) {
+    /* --log-append after -- is a raw game arg, NOT Relay's flag. Relay's own
+     * log_append_enabled must stay false, and the token forwards in the tail. */
+    char *argv[] = {"prog", "--", "--log-append"};
+    relay_parsed_args a;
+    ASSERT_EQ(0, relay_parse_args(3, argv, &a));
+    ASSERT_FALSE(a.log_append_enabled);
+    ASSERT_EQ(1, a.game_argument_count);
+    ASSERT_STREQ("--log-append", a.game_arguments[0]);
+}
+
+void test_resolve_log_append_default_off(void) {
+    /* No flag, no env => disabled. */
+    clear_env();
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_FALSE(cfg.log_append_enabled);
+    clear_env();
+}
+
+void test_resolve_log_append_env_exact_one_enables(void) {
+    /* Only the exact value "1" enables. */
+    clear_env();
+    SetEnvironmentVariableA(ENV_LOG_APPEND, "1");
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_TRUE(cfg.log_append_enabled);
+    clear_env();
+}
+
+void test_resolve_log_append_env_other_values_disabled(void) {
+    /* Every non-"1" value disables (unset is covered by default_off). */
+    clear_env();
+    const char *bad[] = {"0", "true", "TRUE", "2", "yes", " 1", "1 ",
+                         "on", "  ", "True", "11", "1.0"};
+    for (int k = 0; k < (int)(sizeof(bad) / sizeof(bad[0])); k++) {
+        SetEnvironmentVariableA(ENV_LOG_APPEND, bad[k]);
+        relay_parsed_args a = {0};
+        relay_config cfg;
+        relay_resolve_config(&a, &cfg);
+        if (cfg.log_append_enabled) {
+            ASSERT_FAIL("RELAY_LOG_APPEND=\"%s\" should disable, but enabled",
+                        bad[k]);
+        }
+    }
+    clear_env();
+}
+
+void test_resolve_log_append_env_empty_disables(void) {
+    /* An explicitly-empty value must disable (not enable). */
+    clear_env();
+    SetEnvironmentVariableA(ENV_LOG_APPEND, "");
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_FALSE(cfg.log_append_enabled);
+    clear_env();
+}
+
+void test_resolve_log_append_env_oversized_disables(void) {
+    /* An oversized value (would truncate the probe buffer) disables. */
+    clear_env();
+    char big[32];
+    memset(big, '1', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    SetEnvironmentVariableA(ENV_LOG_APPEND, big);
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_FALSE(cfg.log_append_enabled);
+    clear_env();
+}
+
+void test_resolve_log_append_flag_wins_and_enables_with_invalid_env(void) {
+    /* Explicit --log-append enables even when the env is set to an invalid
+     * value (flag > env). */
+    clear_env();
+    SetEnvironmentVariableA(ENV_LOG_APPEND, "true");
+    relay_parsed_args a = {0};
+    a.log_append_enabled = 1;
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_TRUE(cfg.log_append_enabled);
     clear_env();
 }
 
@@ -597,19 +720,36 @@ int main(void) {
                   test_resolve_game_arguments_threaded_unchanged);
     test_register("resolve_game_arguments_none_is_null",
                   test_resolve_game_arguments_none_is_null);
-    test_register("parse_lua_logs_valueless", test_parse_lua_logs_valueless);
-    test_register("parse_lua_logs_defaults_false", test_parse_lua_logs_defaults_false);
-    test_register("parse_lua_logs_after_dash_dash_is_game_arg",
-                  test_parse_lua_logs_after_dash_dash_is_game_arg);
-    test_register("resolve_lua_logs_default_off", test_resolve_lua_logs_default_off);
-    test_register("resolve_lua_logs_env_exact_one_enables",
-                  test_resolve_lua_logs_env_exact_one_enables);
-    test_register("resolve_lua_logs_env_other_values_disabled",
-                  test_resolve_lua_logs_env_other_values_disabled);
-    test_register("resolve_lua_logs_env_empty_disables",
-                  test_resolve_lua_logs_env_empty_disables);
-    test_register("resolve_lua_logs_flag_wins_and_enables_with_invalid_env",
-                  test_resolve_lua_logs_flag_wins_and_enables_with_invalid_env);
+    test_register("parse_log_lua_valueless", test_parse_log_lua_valueless);
+    test_register("parse_log_lua_defaults_false", test_parse_log_lua_defaults_false);
+    test_register("parse_log_lua_after_dash_dash_is_game_arg",
+                  test_parse_log_lua_after_dash_dash_is_game_arg);
+    test_register("resolve_log_lua_default_off", test_resolve_log_lua_default_off);
+    test_register("resolve_log_lua_env_exact_one_enables",
+                  test_resolve_log_lua_env_exact_one_enables);
+    test_register("resolve_log_lua_env_other_values_disabled",
+                  test_resolve_log_lua_env_other_values_disabled);
+    test_register("resolve_log_lua_env_empty_disables",
+                  test_resolve_log_lua_env_empty_disables);
+    test_register("resolve_log_lua_env_oversized_disables",
+                  test_resolve_log_lua_env_oversized_disables);
+    test_register("resolve_log_lua_flag_wins_and_enables_with_invalid_env",
+                  test_resolve_log_lua_flag_wins_and_enables_with_invalid_env);
+    test_register("parse_log_append_valueless", test_parse_log_append_valueless);
+    test_register("parse_log_append_defaults_false", test_parse_log_append_defaults_false);
+    test_register("parse_log_append_after_dash_dash_is_game_arg",
+                  test_parse_log_append_after_dash_dash_is_game_arg);
+    test_register("resolve_log_append_default_off", test_resolve_log_append_default_off);
+    test_register("resolve_log_append_env_exact_one_enables",
+                  test_resolve_log_append_env_exact_one_enables);
+    test_register("resolve_log_append_env_other_values_disabled",
+                  test_resolve_log_append_env_other_values_disabled);
+    test_register("resolve_log_append_env_empty_disables",
+                  test_resolve_log_append_env_empty_disables);
+    test_register("resolve_log_append_env_oversized_disables",
+                  test_resolve_log_append_env_oversized_disables);
+    test_register("resolve_log_append_flag_wins_and_enables_with_invalid_env",
+                  test_resolve_log_append_flag_wins_and_enables_with_invalid_env);
     test_register("parse_skip_splash_valueless", test_parse_skip_splash_valueless);
     test_register("parse_skip_splash_defaults_false", test_parse_skip_splash_defaults_false);
     test_register("parse_skip_splash_after_dash_dash_is_game_arg",
