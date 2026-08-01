@@ -277,7 +277,7 @@ values:
 - **`RELAY_MOD_PATH`** (from `--mod-path` / `RELAY_MOD_PATH`) —
   **user-controlled**. The **mod-path boundary**: a directory that *contains*
   a `mods/` subdirectory. DMF + user mods + `mods.lst` (the load-order file;
-  you author it, or your app generates it) live at `<mod_path>/mods/`. The
+  you author it, or a mod manager generates it) live at `<mod_path>/mods/`. The
   loader derives `Mods._mod_root` as `<mod_path>/mods` (what `Mods.file.*`
   roots at) and `Mods._mod_path` as the containment boundary for the
   `Mods.lua.io` raw-read wrapper.

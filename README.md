@@ -60,7 +60,9 @@ Mods live in the `mods/` subfolder of the directory you point `--mod-path` at
   place it at `<mod-path>/mods/dmf/`.
 - **`mods.lst`** lists the mods to load, one name per line, in the order they
   load (list `dmf` first). The loader loads exactly what's listed, in order — it
-  injects nothing. You author this file by hand, or have your app generate it.
+  injects nothing. You author this file by hand, or use a mod manager to
+  generate it — e.g. [Modificus Curator](https://github.com/ModifAmorphic/darktide-modificus-curator)
+  or the [Darktide Vortex Relay Extension](https://github.com/ModifAmorphic/darktide-vortex-relay-extension).
 
 ### 3. Locate the Darktide install
 

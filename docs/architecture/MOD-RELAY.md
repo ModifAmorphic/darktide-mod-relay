@@ -235,7 +235,7 @@ app (it's the runtime that powers Mod Curator, but any caller works).
   `Mods.file.*` roots at) and uses `Mods._mod_path` as the containment
   boundary for the `Mods.lua.io` raw-read wrapper (see
   `docs/architecture/MOD_LOADER-DMF.md` → "Raw `Mods.lua.io` redirection").
-- **`mods.lst`** is a plain text file you author (or your app generates): one
+- **`mods.lst`** is a plain text file you author (or a mod manager generates): one
   mod folder name per line, in load order. It is **the Relay↔caller load-order
   contract** — the mod loader reads it authoritatively and loads exactly the
   listed mods in order; it injects nothing (DMF does not read it). When DMF is
