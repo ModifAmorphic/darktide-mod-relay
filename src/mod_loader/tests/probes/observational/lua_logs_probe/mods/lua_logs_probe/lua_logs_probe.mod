@@ -1,7 +1,7 @@
 -- lua_logs_probe.mod -- manual live diagnostic (not a harness test; not shipped).
 --
 -- An outer-driven observational probe for Relay's OPTIONAL Lua print tee
--- (--lua-logs / RELAY_LUA_LOGS=1). It emits unique [LUA_LOGS_PROBE] markers
+-- (--log-lua / RELAY_LOG_LUA=1). It emits unique [LUA_LOGS_PROBE] markers
 -- through the engine's global `print` and `__print` surfaces, one case per tee
 -- policy: simple print, simple __print, multi-arg (primitive/nil), multiline +
 -- CRLF, literal % / format-looking text, control/NUL/DEL bytes (built safely),

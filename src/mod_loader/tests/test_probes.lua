@@ -101,14 +101,14 @@ return function(runner)
                 probe = "lua_logs_probe",
                 mod_rel = "observational/lua_logs_probe/mods/lua_logs_probe/lua_logs_probe.mod",
                 old_rel = "observational/lua_logs_probe/lua_logs_probe.mod",
-                readme_behavior = { "[LUA_LOGS_PROBE]", "--lua-logs" },
+                readme_behavior = { "[LUA_LOGS_PROBE]", "--log-lua" },
             },
             {
                 dir = "observational/cwd_probe",
                 probe = "cwd_probe",
                 mod_rel = "observational/cwd_probe/mods/cwd_probe/cwd_probe.mod",
                 old_rel = "observational/cwd_probe/cwd_probe.mod",
-                readme_behavior = { "[CWD_PROBE]", "--lua-logs" },
+                readme_behavior = { "[CWD_PROBE]", "--log-lua" },
             },
         }
         for _, s in ipairs(scenarios) do
@@ -192,8 +192,8 @@ return function(runner)
         assert_contains(readme, "complete bundle", "lua_logs_probe README (uniform staging shape)")
         assert_not_contains(readme, "Shape A", "lua_logs_probe README (legacy shape gone)")
         assert_not_contains(readme, "Add (or merge)", "lua_logs_probe README (no list-merge step)")
-        assert_contains(readme, "--lua-logs", "lua_logs_probe README (CLI variant)")
-        assert_contains(readme, "RELAY_LUA_LOGS=1", "lua_logs_probe README (env variant)")
+        assert_contains(readme, "--log-lua", "lua_logs_probe README (CLI variant)")
+        assert_contains(readme, "RELAY_LOG_LUA=1", "lua_logs_probe README (env variant)")
         assert_contains(readme, "Default off", "lua_logs_probe README (matrix: default off)")
         assert_contains(readme, "CLI on", "lua_logs_probe README (matrix: CLI on)")
         assert_contains(readme, "Env on", "lua_logs_probe README (matrix: env on)")
@@ -248,8 +248,8 @@ return function(runner)
         assert_contains(readme, "[CWD_PROBE]", "cwd_probe README (prefix)")
         assert_contains(readme, "--mod-path", "cwd_probe README (direct --mod-path)")
         assert_contains(readme, "complete bundle", "cwd_probe README (uniform staging shape)")
-        assert_contains(readme, "--lua-logs", "cwd_probe README (CLI variant)")
-        assert_contains(readme, "RELAY_LUA_LOGS=1", "cwd_probe README (env variant)")
+        assert_contains(readme, "--log-lua", "cwd_probe README (CLI variant)")
+        assert_contains(readme, "RELAY_LOG_LUA=1", "cwd_probe README (env variant)")
         assert_contains(readme, "cwd_ffi == cwd_popen", "cwd_probe README (matrix: agreement)")
         assert_contains(readme, "binaries", "cwd_probe README (research question)")
         assert_contains(readme, "Cleanup", "cwd_probe README (cleanup section)")
@@ -410,10 +410,10 @@ return function(runner)
         assert_contains(index, "part of the shipped runtime", "probes index")
         -- The lua_logs_probe observational probe is indexed too, and the index
         -- no longer makes the now-stale blanket claim that probe/loader lines
-        -- never reach relay.log (the claim is conditional on --lua-logs).
+        -- never reach relay.log (the claim is conditional on --log-lua).
         assert_contains(index, "lua_logs_probe", "probes index (lua_logs_probe listed)")
         assert_contains(index, "[LUA_LOGS_PROBE]", "probes index (lua_logs_probe prefix)")
-        assert_contains(index, "--lua-logs", "probes index (conditional relay.log claim)")
+        assert_contains(index, "--log-lua", "probes index (conditional relay.log claim)")
         -- Links to each scenario README (observational scenarios now ship one too).
         assert_contains(index, "observational/shutdown_probe/README.md",
             "probes index shutdown_probe link")

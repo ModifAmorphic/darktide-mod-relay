@@ -44,7 +44,7 @@ directly — no copying a leaf folder, no merging a list, no Lua editing.
   (append+flush per line; survives console-log truncation at process exit).
 
 > Relay's shell log is `relay.log`; the probe's `[SHUTDOWN_PROBE]` lines are
-> **not** there unless you also enable `--lua-logs` (see
+> **not** there unless you also enable `--log-lua` (see
   [`observational/lua_logs_probe/README.md`](../lua_logs_probe/README.md)) — they
   go to the Darktide console log and the scenario log above.
 

@@ -1,6 +1,6 @@
 -- test_lua_logs.lua — the optional lua-log tee installed by init.lua.
 --
--- Covers the Lua side of the RELAY_LUA_LOGS=1 print tee: the temporary
+-- Covers the Lua side of the RELAY_LOG_LUA=1 print tee: the temporary
 -- __mod_relay_lua_log_sink global is consumed + retired before any later
 -- bootstrap behavior, then global print + __print are wrapped best-effort so
 -- every SUCCESSFUL print also reaches the private sink (originals stay

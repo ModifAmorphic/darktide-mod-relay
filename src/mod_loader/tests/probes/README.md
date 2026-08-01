@@ -77,10 +77,10 @@ step (e.g. `mods-without-alpha.lst`), copy that supplied file over the staged
 - **Scenario logs** (per-probe or shared, depending on the probe). Written via
   the rooted `Mods.lua.io.open` (rooted at `<mod_path>/mods/`), append+flushed
   per line so evidence survives console-log truncation at process exit.
-- **Relay shell log** is `relay.log`. By default (`--lua-logs` off) **neither**
+- **Relay shell log** is `relay.log`. By default (`--log-lua` off) **neither**
   the probes' `[PREFIX]` lines **nor** Relay's `[mod_loader]` lines go there —
   they go to the Darktide console log and the scenario logs above. When the user
-  opts in with `--lua-logs` (or `RELAY_LUA_LOGS=1`), Relay tees Lua `print` /
+  opts in with `--log-lua` (or `RELAY_LOG_LUA=1`), Relay tees Lua `print` /
   `__print` output into `relay.log` as structured `INFO  lua-print:` lines too —
   so probe/loader lines that traverse those wrapped surfaces ALSO appear in
   `relay.log`. The Darktide console log remains authoritative and unchanged
@@ -109,7 +109,7 @@ step (e.g. `mods-without-alpha.lst`), copy that supplied file over the staged
 | --- | --- | --- | --- | --- |
 | `shutdown_probe/` | `[SHUTDOWN_PROBE]` | `shutdown_probe/shutdown_probe.log` | Records the public lifecycle-callback sequence (`on_game_state_changed` / `on_reload` / `on_unload`, plus `init`) to verify state-exit / reload / unload ordering (e.g. that a final state-exit dispatches before `on_unload` on shutdown). | [`shutdown_probe/README.md`](observational/shutdown_probe/README.md) |
 | `reload_seam_probe/` | (console only) | — | Overrides `CLASS.ModManager._check_reload` to return `false`, demonstrating the reload trigger-detection seam is hookable (the built-in LEFT Ctrl + LEFT Shift + R gesture is suppressed while this is loaded). | [`reload_seam_probe/README.md`](observational/reload_seam_probe/README.md) |
-| `lua_logs_probe/` | `[LUA_LOGS_PROBE]` | `lua_logs_probe/lua_logs_probe.log` | Observes Relay's optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`): emits unique markers through `print` and `__print` across one case per tee policy (simple, multi-arg, multiline+CRLF, `%` text, control bytes, over-budget truncation). Read-only. | [`lua_logs_probe/README.md`](observational/lua_logs_probe/README.md) |
+| `lua_logs_probe/` | `[LUA_LOGS_PROBE]` | `lua_logs_probe/lua_logs_probe.log` | Observes Relay's optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`): emits unique markers through `print` and `__print` across one case per tee policy (simple, multi-arg, multiline+CRLF, `%` text, control bytes, over-budget truncation). Read-only. | [`lua_logs_probe/README.md`](observational/lua_logs_probe/README.md) |
 | `cwd_probe/` | `[CWD_PROBE]` | `cwd_probe/cwd_probe.log` | Reads the live process CWD (FFI + `io.popen("cd")` cross-check), the host exe path, and the mod-path context — so an operator can determine whether the CWD is `{GAME_DIR}\binaries` before deciding to chdir to `<mod_path>\mods`. Read-only. | [`cwd_probe/README.md`](observational/cwd_probe/README.md) |
 
 ### metadata/
