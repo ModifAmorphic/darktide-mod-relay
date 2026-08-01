@@ -176,7 +176,7 @@ Mods.lua.os = Mods.lua.os or os
 -- failure can NEVER become a second failure path that breaks loading. Mechanism
 -- only — no level threshold: prints go to the console log unfiltered, and level
 -- filtering is the shell/tee's job. _print is post-tee __print so diagnostics
--- are tee'd when --lua-logs is on.
+-- are tee'd when --log-lua is on.
 do
     local _pcall = pcall
     local _tostring = tostring

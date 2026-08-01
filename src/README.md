@@ -164,7 +164,8 @@ shell DLL, log file, and mod loader root all default next to the launcher exe.
 | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
 | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
-| `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; exact env value `1` enables) |
+| `--log-lua` | `RELAY_LOG_LUA=1` | off (value-less; exact env value `1` enables) |
+| `--log-append` | `RELAY_LOG_APPEND=1` | off (value-less; exact env value `1` enables; appends instead of truncating) |
 | `--skip-splash` | `RELAY_SKIP_SPLASH=1` | off (value-less; exact env value `1` enables; skips the intro splash state) |
 | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game) |
 | `--version` | — (none) | — (prints the build-injected version; see below) |
@@ -225,7 +226,7 @@ Relay writes to **two** separate logs by default:
   **Authoritative and complete** for Lua output; Relay never redirects or
   suppresses it.
 
-**Optional Lua print tee** — `--lua-logs` (or `RELAY_LUA_LOGS=1`, exact value
+**Optional Lua print tee** — `--log-lua` (or `RELAY_LOG_LUA=1`, exact value
 `1`; default off). When enabled, Relay wraps the engine's global `print` and
 `__print` **once per process** so every successful call through those surfaces
 is **also** copied into `relay.log` as structured `INFO  lua-print:` lines
@@ -252,9 +253,9 @@ Two interactions worth knowing:
   reload; a mod that later replaces global `print` wins (Relay does not fight
   it).
 
-The launcher canonicalizes the child env: it sets `RELAY_LUA_LOGS=1` when
+The launcher canonicalizes the child env: it sets `RELAY_LOG_LUA=1` when
 enabled and **removes** it when disabled (a stale parent value cannot leak in as
-a non-`1`). Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves; that
+a non-`1`). Direct shell injectors may set `RELAY_LOG_LUA=1` themselves; that
 is the external non-launcher contract. The normative logging contract
 (destinations, the `relay.log` line/lifecycle, the tee boundary, argument
 rendering, and byte-safety) is in

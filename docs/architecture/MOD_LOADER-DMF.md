@@ -310,7 +310,7 @@ logic is the loader **logic**.
 | `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable. See the [pinned FFI contract](../reference/darktide/darktide-binary.md#ffi-module-loading). |
 | `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table`; plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
-| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--lua-logs` / `RELAY_LUA_LOGS=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
+| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--log-lua` / `RELAY_LOG_LUA=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
 
 There is **no** `Mods.hook` — the loadstring-driven hook chain (`set`/`enable`/
 `remove`/`set_on_file`/`enable_by_file`, the `MODS_HOOKS`/`MODS_HOOKS_BY_FILE`
@@ -326,7 +326,7 @@ pcall#1 code reach classes that don't exist until late in boot.
 
 ## Lua print tee
 
-The optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off) is
+The optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`, default off) is
 **process-lifetime bootstrap plumbing**, installed in `init.lua` at pcall#1 —
 **not** generation policy, so it lives in the entry, not the DMF adapter or mod
 manager. When a valid sink is present, the entry installs wrappers on global

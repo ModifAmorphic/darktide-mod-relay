@@ -11,7 +11,7 @@ failure behavior. The implementation architecture lives in
 Two things are documented here:
 
 1. The logging **destinations** Relay writes to, and which output goes where.
-2. The optional **Lua print tee** (`--lua-logs` / `RELAY_LUA_LOGS=1`) — a
+2. The optional **Lua print tee** (`--log-lua` / `RELAY_LOG_LUA=1`) — a
    best-effort copy of calls through the wrapped global `print` / `__print`
    surfaces into `relay.log`.
 
@@ -31,7 +31,8 @@ Every setting follows **flag > env var > default**.
 | --- | --- | --- | --- | --- |
 | Log file | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` | The launcher resolves this and publishes it into the child env, so the shell normally opens the launcher-dir path. The shell itself opens `RELAY_LOG_FILE` when set; if a process is injected directly without the launcher (no env), it falls back to beside the game exe, then to a relative `relay.log`. |
 | Log level | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` | One of `error`, `warn`, `info`, `debug`, `trace`. Matched case-insensitively in the shell. Unset, oversized, or an unknown value resolves to `info`. |
-| Lua print tee | `--lua-logs` | `RELAY_LUA_LOGS=1` | off | A value-less switch. Only the exact env value `1` enables; every other value (unset, empty, `0`, `true`, whitespace, oversized) is off. Recognized only before the `--` end-of-options separator; after `--` it is a raw game argument. The launcher canonicalizes the child env to `1` when enabled and **removes** it when disabled, so a stale parent value cannot leak in as a non-`1`. A process injected directly without the launcher may set `RELAY_LUA_LOGS=1` itself — that is the external non-launcher contract. |
+| Lua print tee | `--log-lua` | `RELAY_LOG_LUA=1` | off | A value-less switch. Only the exact env value `1` enables; every other value (unset, empty, `0`, `true`, whitespace, oversized) is off. Recognized only before the `--` end-of-options separator; after `--` it is a raw game argument. The launcher canonicalizes the child env to `1` when enabled and **removes** it when disabled, so a stale parent value cannot leak in as a non-`1`. A process injected directly without the launcher may set `RELAY_LOG_LUA=1` itself — that is the external non-launcher contract. |
+| Log append mode | `--log-append` | `RELAY_LOG_APPEND=1` | off (truncate) | A value-less switch. Only the exact env value `1` enables; every other value (unset, empty, `0`, `true`, whitespace, oversized) is off (truncate). When enabled, the shell opens `relay.log` in append mode (`'a'`) so the file persists and grows across runs; when disabled (the default), the shell truncates on open (a fresh file per launch). Same value-less/canonical-child-env policy as the other log switches (recognized only before `--`; the launcher sets `RELAY_LOG_APPEND=1` when enabled and removes it when disabled). |
 
 ## `relay.log` line and lifecycle contract
 
@@ -55,9 +56,11 @@ For example:
   `WARN`, `INFO`, `DEBUG`, `TRACE`).
 - **Component + message.** A short component identifier (`shell`,
   `trampoline`, `discovery`, `lua-print`, …) followed by the message.
-- **Fresh file per game process.** The shell truncates the file when it opens
-  it. There is no append or rotation across runs; each game launch starts a new
-  `relay.log`.
+- **Fresh file per launch by default; optional append.** By default the shell
+  truncates the file when it opens it, so each game launch starts a new
+  `relay.log`. With `--log-append` / `RELAY_LOG_APPEND=1`, the shell opens the
+  file in append mode instead, so it persists and grows across runs. There is no
+  rotation.
 - **Level filter before emission.** Lines below the configured logging
   threshold are not emitted.
 - **Serialized physical-line writes.** Complete physical-line writes are
@@ -215,7 +218,8 @@ never block the original print, mod loading, or the game.
 - **Capture/render/sink failures are contained.** After a successful original
   `print`, any failure in the render or sink step is swallowed; it never
   changes the original call's results, return cardinality, or error behavior.
-- **Log growth.** `relay.log` starts fresh each launch, but while the tee is
+- **Log growth.** `relay.log` starts fresh each launch (unless `--log-append` /
+  `RELAY_LOG_APPEND=1` makes it persist across runs), but while the tee is
   enabled during one run it duplicates print traffic at `INFO` and can grow
   quickly. Disable the tee, or set the level to `warn`/`error`, to keep
   `relay.log` to the shell/trampoline lines.

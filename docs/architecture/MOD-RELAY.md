@@ -187,7 +187,8 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
   | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
   | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
-  | `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; only the exact env value `1` enables) |
+  | `--log-lua` | `RELAY_LOG_LUA=1` | off (value-less; only the exact env value `1` enables) |
+  | `--log-append` | `RELAY_LOG_APPEND=1` | off (value-less; only the exact env value `1` enables; appends instead of truncating) |
   | `--skip-splash` | `RELAY_SKIP_SPLASH=1` | off (value-less; only the exact env value `1` enables; skips the intro splash state) |
   | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game, in order) |
   | `--version` | — (none) | — (value-less; prints the build-injected version and exits 0) |
@@ -197,10 +198,10 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   configurable. The launcher resolves the config, then publishes the
   shell-contract values (`SteamAppId`/`SteamGameId`, `RELAY_MOD_PATH`,
   `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`, and — only when enabled —
-  `RELAY_LUA_LOGS=1` and `RELAY_SKIP_SPLASH=1`) into the child env before
-  `CreateProcess`, so the injected shell inherits them. `RELAY_LUA_LOGS` and
+  `RELAY_LOG_LUA=1` and `RELAY_SKIP_SPLASH=1`) into the child env before
+  `CreateProcess`, so the injected shell inherits them. `RELAY_LOG_LUA` and
   `RELAY_SKIP_SPLASH` are canonicalized: the launcher sets each to exactly `1`
-  when the resolved config enables the feature (`--lua-logs`/`--skip-splash` or
+  when the resolved config enables the feature (`--log-lua`/`--skip-splash` or
   the env `1` itself), and **removes** it (not set to `0`) when disabled, so a
   stale parent value cannot leak into the child as a non-`1`. Game arguments are NOT published to the env — they go on the child
   command line: the quoted exe as argv[0] (byte-for-byte the legacy form),
@@ -272,8 +273,9 @@ global, so no loader-path env var exists.
 | `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod-path boundary** — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here) and `Mods._mod_path` as the containment boundary for the `Mods.lua.io` wrapper. Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
 | `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
-| `RELAY_LUA_LOGS` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LUA_LOGS=1` when the resolved config enables it (`--lua-logs` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves — that is the external non-launcher contract. |
-| `RELAY_SKIP_SPLASH` | launcher (canonicalized) | shell trampoline + mod loader | the **StateSplash skip** switch: only the exact value `1` enables. The launcher sets `RELAY_SKIP_SPLASH=1` when the resolved config enables it (`--skip-splash` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LUA_LOGS`). The shell snapshots it once at worker startup (`env_is_exact_one`) and bakes it into the trampoline chunk as the internal `RELAY_SKIP_SPLASH` global (`"1"` or `""`); init.lua snapshots it into `Mods._relay.skip_splash` and the loader's lifecycle step wraps `CLASS.StateSplash.on_enter` so the splash state advances directly to `StateTitle` without opening the splash view. Default off = vanilla splash. |
+| `RELAY_LOG_LUA` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_LUA=1` when the resolved config enables it (`--log-lua` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LOG_LUA=1` themselves — that is the external non-launcher contract. |
+| `RELAY_LOG_APPEND` | launcher (canonicalized) | shell worker | the **log-append** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_APPEND=1` when the resolved config enables it (`--log-append` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and opens `relay.log` in append mode (`'a'`) when set; otherwise it truncates on open (`'w'`, a fresh file per launch). Direct shell injectors may set `RELAY_LOG_APPEND=1` themselves — that is the external non-launcher contract. |
+| `RELAY_SKIP_SPLASH` | launcher (canonicalized) | shell trampoline + mod loader | the **StateSplash skip** switch: only the exact value `1` enables. The launcher sets `RELAY_SKIP_SPLASH=1` when the resolved config enables it (`--skip-splash` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and bakes it into the trampoline chunk as the internal `RELAY_SKIP_SPLASH` global (`"1"` or `""`); init.lua snapshots it into `Mods._relay.skip_splash` and the loader's lifecycle step wraps `CLASS.StateSplash.on_enter` so the splash state advances directly to `StateTitle` without opening the splash view. Default off = vanilla splash. |
 | `SteamAppId` / `SteamGameId` | launcher | Steam | the real Darktide app id (`1361210`); without it `SteamAPI_Init` is denied under a non-Steam shortcut |
 
 ### Logging
@@ -294,8 +296,10 @@ ISO-8601 UTC offset** that follows the system time zone (UTC itself shows
 verbose detail). Default location is next to the launcher exe (resolved by the
 launcher from `--log-file`/`RELAY_LOG_FILE`); the shell itself opens
 `RELAY_LOG_FILE` if set, otherwise falls back to beside the game exe. The
-shell opens the file with truncate once per game process — **a fresh
-`relay.log` every launch** (no append, no rotation across runs).
+shell opens the file in truncate mode once per game process by default — **a
+fresh `relay.log` every launch**; with `--log-append` / `RELAY_LOG_APPEND=1` it
+opens in append mode instead, so the file persists and grows across runs (no
+rotation).
 
 Right after the startup banner, the worker logs a `launching <cmdline>` INFO
 line — the host process command line as the game sees it (the quoted exe + the
@@ -312,7 +316,7 @@ Wine/Proton diagnostics only). `relay.log` carries the C-side shell + trampoline
 lines (including the trampoline's pcall#1 status/failure diagnostics, which are
 the reliable bootstrap validation).
 
-**Optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off).**
+**Optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`, default off).**
 When enabled, Relay additionally copies Lua `print` / `__print` output into
 `relay.log` as structured `INFO  lua-print:` lines. It is a **tee, never a
 redirect**: the engine's console `print` still runs first and authoritatively,

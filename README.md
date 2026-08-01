@@ -98,10 +98,10 @@ A minimal `launch.bat` (next to the launcher) makes this easier:
 mod_relay.exe ^
   --game-binary "C:\Games\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries\Darktide.exe" ^
   --mod-path "C:\Path\To\RelayMods"
-rem   --lua-logs
+rem   --log-lua
 ```
 
-The `--lua-logs` line (uncomment to enable) optionally copies Lua `print` output
+The `--log-lua` line (uncomment to enable) optionally copies Lua `print` output
 into `relay.log` too — handy when collecting diagnostics in one place. See
 [Additional options](#5-additional-options) and the
 [logging reference](docs/reference/relay/logging.md) for what lands where.
@@ -127,7 +127,8 @@ the launcher exe.
 | `--log-file <path>` | Where the C-side shell/trampoline log is written. | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | Log level for `relay.log`: `error` / `warn` / `info` / `debug` / `trace`. | `info` |
 | `--steam-app-id <id>` | Steam app id the launcher publishes. | `1361210` |
-| `--lua-logs` | Also copy Lua `print` output into `relay.log` (a tee — the console log stays authoritative). | off |
+| `--log-lua` | Also copy Lua `print` output into `relay.log` (a tee — the console log stays authoritative). | off |
+| `--log-append` | Append to `relay.log` instead of overwriting it. | off |
 | `--skip-splash` | Skip the `StateSplash` intro splash state. | off |
 | `--` | End-of-options separator: everything after it is forwarded to Darktide verbatim, in order. | unset |
 | `--version` | Print the build-injected version and exit. | — |
@@ -135,7 +136,7 @@ the launcher exe.
 By default Relay writes **two** logs: `relay.log` (the C-side shell/trampoline
 log, next to the launcher) and Darktide's **console log** — the authoritative
 home for the mod loader's, DMF's, and your mods' Lua output. On Windows that's
-`%APPDATA%\Fatshark\Darktide\console_logs\console-*.log`. `--lua-logs` adds a
+`%APPDATA%\Fatshark\Darktide\console_logs\console-*.log`. `--log-lua` adds a
 copy of Lua `print` output into `relay.log`; `--log-level warn`/`error` filters
 those copied lines out of `relay.log` (the console log is unaffected). See the
 [logging reference](docs/reference/relay/logging.md) for the full contract.
@@ -158,7 +159,7 @@ You can confirm each reload in Darktide's console log
 (`%APPDATA%\Fatshark\Darktide\console_logs\console-*.log` on Windows; see
 [Linux (Proton)](#linux-proton) for the Proton path): look for the
 `INFO [mod_loader] hot reload generation N …` lines — `completed cleanly` on
-success. If you launched with `--lua-logs`, those same `[mod_loader]` lines are
+success. If you launched with `--log-lua`, those same `[mod_loader]` lines are
 **also** copied into `relay.log` (as `lua-print` lines); the console log always
 has them regardless.
 
@@ -204,7 +205,7 @@ Darktide Lua output.
 > **Optional: also capture Lua `print` output in `relay.log`.** By default the
 > Darktide console log is the only place Lua `print` / `__print` output (the
 > mod loader, DMF, and mods) shows up — `relay.log` carries only the C-side
-> shell/trampoline lines. Add `--lua-logs` to also **copy** that Lua `print`
+> shell/trampoline lines. Add `--log-lua` to also **copy** that Lua `print`
 > output into `relay.log` as `lua-print` lines. It is a **tee, not a redirect**:
 > Darktide's console log stays complete and authoritative. It is off by default,
 > and `--log-level warn`/`error` filters the copied lines out of `relay.log`
