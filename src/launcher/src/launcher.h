@@ -14,8 +14,7 @@
  * CreateProcessA's lpCommandLine ceiling: the documented max is 32,767
  * characters INCLUDING the terminating NUL (so ~32,766 usable). A command
  * line that would exceed it is unlaunchable on Windows regardless, so the
- * builder rejects it before any process is created. Shared by main(), the
- * command-line builder, and the injection tests, so it lives here.
+ * builder rejects it before any process is created.
  */
 #define RELAY_CMDLINE_MAX 32767
 

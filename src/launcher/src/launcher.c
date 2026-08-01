@@ -2,57 +2,31 @@
  * launcher.c — CreateRemoteThread DLL injector.
  *
  * Creates Darktide.exe in a SUSPENDED state, injects relay_shell.dll via
- * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the DLL to signal
+ * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the shell to signal
  * that the lua_newstate hook is ready, then resumes. Zero files land in the
- * game directory (the DLL is loaded from a staging path).
+ * game directory.
  *
- * Flow: CreateProcess(SUSPENDED) → inject → wait for hook-ready → ResumeThread,
- * with the correct Steam appID set in the child environment. The hook-ready
- * wait is essential: DllMain returns instantly (it only spawns a worker), and
- * the worker doesn't enable the lua_newstate hook until after discovery
- * completes — resuming before the hook is ready means the engine calls
- * lua_newstate before the hook is installed, so the hook never fires.
+ * Timing hazard: the hook must be installed before the engine's main() runs.
+ * SUSPENDED → inject → wait-hook-ready → resume gives that guarantee. DllMain
+ * returns instantly (it only spawns a worker) and the worker does not arm the
+ * hook until discovery completes, so resuming before hook-ready means the
+ * engine calls lua_newstate before the hook is installed and the hook never
+ * fires.
  *
- * Configuration model: every setting is flag > env > default. Game arguments
- * are NOT a setting — they are the verbatim rest-of-line after `--`.
- *   --game-binary <path>       [RELAY_GAME_BINARY]                REQUIRED
- *   --mod-path <path>          [RELAY_MOD_PATH]                   (optional; trampoline skips if unset)
- *   --log-file <path>          [RELAY_LOG_FILE]                   <launcher-dir>\relay.log
- *   --log-level <level>        [RELAY_LOG_LEVEL]                  info
- *   --steam-app-id <id>        [RELAY_STEAM_APP_ID]               1361210
- *   --version                  (value-less)                      print version and exit
- *   --lua-logs                 (value-less)                      tee Lua print output into relay.log
- *                                                                [RELAY_LUA_LOGS=1] (default: off)
- *   --skip-splash              (value-less)                      skip the StateSplash intro splash
- *                                                                [RELAY_SKIP_SPLASH=1] (default: off)
- *   --                         (end-of-options separator)        rest-of-line forwarded to the game
+ * Every setting follows flag > env > default; the canonical flag/env/default
+ * table is print_usage() (the --help text). Game arguments are not a setting:
+ * the verbatim rest-of-line after `--`, forwarded to the game as separate argv
+ * entries, CRT-quoted, in order (Relay flags must precede `--`; a flag-looking
+ * token after `--` is a raw game arg).
  *
- * `--` ends Relay's option parsing: EVERY token after it is forwarded to the
- * game verbatim as a separate argv entry, in order, CRT-quoted by the builder
- * and appended after the quoted exe. Relay's own flags must precede `--`; a
- * token that looks like `--version` or `--mod-path` after `--` is a raw game
- * argument, not a Relay flag. The `--` itself is consumed (not forwarded). No
- * `--` (or no tokens after it) yields the legacy exe-only launch byte-for-byte.
- * Example: `--game-binary X -- --lua-heap-mb-size 2048` forwards two game
- * arguments (`--lua-heap-mb-size` and `2048`). There is no env serialization of
- * the game-argument tail — the only input path is the command line after `--`.
- * --version prints the build-injected product version (RELAY_VERSION) and exits.
+ * Quoting is ANSI only (CreateProcessA): Darktide.exe arguments are ASCII and
+ * no known argument takes a non-ANSI value (see relay_build_command_line for
+ * the full reasoning and the CreateProcessW caveat). The full line is capped
+ * at RELAY_CMDLINE_MAX (32,767 chars incl. NUL — the CreateProcessA ceiling);
+ * an oversize line is rejected before any process is created.
  *
- * Command-line quoting is ANSI only (the Windows active code page).
- * Darktide.exe arguments are ASCII (relative paths, ini-section identifiers,
- * HTTPS URLs); there is no known Darktide argument that takes a non-ANSI
- * value, so the launcher stays on CreateProcessA. If a non-ANSI value ever
- * needs forwarding, the launcher must widen to CreateProcessW (a separate
- * change). The full command line is capped at RELAY_CMDLINE_MAX (32,767 chars
- * incl. NUL — the CreateProcessA ceiling); an oversize line is rejected before
- * any process is created.
- *
- * The injected DLL is hardcoded to <launcher-dir>\relay_shell.dll (the shell
- * self-locates the mod loader from its own path) — NOT configurable.
- *
- * Windows native: build with cl.exe or x86_64-w64-mingw32-gcc.
- * Proton: build the launcher for Windows (mingw) and run it under Wine inside
- * the Steam Proton prefix (see docs/architecture/MOD-RELAY.md).
+ * The injected DLL is hardcoded to <launcher-dir>\relay_shell.dll — not
+ * configurable.
  */
 #include "launcher.h"
 #include <stdio.h>
@@ -458,29 +432,21 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
 
         if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) return -2;
 
-        /* --version: value-less flag. Does NOT consume the following token
-         * (so {"--version","--game-binary","G"} still parses --game-binary).
-         * main() prints the build-injected version and exits 0. */
+        /* --version: value-less flag (does not consume the following token). */
         if (strcmp(flag, "--version") == 0) {
             out->show_version = 1;
             continue;
         }
 
-        /* --lua-logs: value-less flag. Does NOT consume the following token
-         * (so {"--lua-logs","--game-binary","G"} still parses --game-binary).
-         * Sets the parsed lua_logs_enabled field; relay_resolve_config turns
-         * it into the resolved cfg->lua_logs_enabled (flag > env > default).
-         * Only recognized before `--` (after `--` it is a raw game arg). */
+        /* --lua-logs: value-less flag (does not consume the following token;
+         * only recognized before `--`). */
         if (strcmp(flag, "--lua-logs") == 0) {
             out->lua_logs_enabled = 1;
             continue;
         }
 
-        /* --skip-splash: value-less flag. Does NOT consume the following token
-         * (so {"--skip-splash","--game-binary","G"} still parses --game-binary).
-         * Sets the parsed skip_splash_enabled field; relay_resolve_config turns
-         * it into the resolved cfg->skip_splash_enabled (flag > env > default).
-         * Only recognized before `--` (after `--` it is a raw game arg). */
+        /* --skip-splash: value-less flag (does not consume the following
+         * token; only recognized before `--`). */
         if (strcmp(flag, "--skip-splash") == 0) {
             out->skip_splash_enabled = 1;
             continue;
@@ -643,14 +609,12 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* --version: print the build-injected product version and exit 0 — but
-     * only when parse fully succeeded (returned 0). -h/--help (parse returns
-     * -2) and parse errors (unknown flag / missing value, returns -1) are
-     * checked above and take precedence, so e.g. `--version --help` prints help
-     * and `--version --bogus x` errors out. Reaching here also means --version
-     * appeared BEFORE `--` (after `--` it's a raw game arg). Checked before the
-     * required --game-binary check so it works on a bare command line (a caller
-     * like Curator uses this for version comparison). */
+    /* --version prints the build-injected version and exits 0, but only after
+     * a clean parse: -h/--help (parse returns -2) and parse errors (-1) are
+     * handled above and take precedence (so `--version --help` prints help,
+     * `--version --bogus x` errors). It is reached only when --version
+     * appeared before `--` (after `--` it is a raw game arg), and before the
+     * required --game-binary check so it works on a bare command line. */
     if (args.show_version) {
         printf("mod_relay %s\n", RELAY_VERSION);
         return 0;
@@ -689,10 +653,8 @@ int main(int argc, char **argv) {
     } else {
         SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
     }
-    /* Same canonical-child-inheritance policy for the value-less splash skip:
-     * set the exact "1" when enabled, or REMOVE it when disabled so a stale
-     * parent value can't leak into the child as a non-"1" (the shell snapshots
-     * only the exact "1"). */
+    /* Same canonical-child policy as RELAY_LUA_LOGS above: set the exact "1"
+     * when enabled, remove it when disabled. */
     if (cfg.skip_splash_enabled) {
         SetEnvironmentVariableA(ENV_SKIP_SPLASH, "1");
     } else {
