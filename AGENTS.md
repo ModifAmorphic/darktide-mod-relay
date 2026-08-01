@@ -266,6 +266,9 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
 - `docs/reference/relay/logging.md` — the normative Mod Relay logging contract
   (destinations, the `relay.log` line/lifecycle, and the optional Lua print
   tee).
+- `docs/reference/relay/shell.md` — the normative injected-shell contracts (the
+  two required hooks, the pcall#1 trampoline game-safety invariants, the two
+  trampoline-baked roots, the deliberately-not-hooked discovery anchor).
 - `docs/reference/darktide/darktide-binary.md` — validated game-binary constraints.
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing
   modding ecosystem the runtime patch replaces.
@@ -344,7 +347,7 @@ affects repo structure, build, architecture, or ops, update:
   root links to it.
 - **`docs/architecture/`** for any architecture change.
 - **`docs/reference/`** — categorized: `relay/` (Mod Relay-owned normative
-  contracts: logging), `darktide/` (game-binary facts),
+  contracts: logging, the injected shell), `darktide/` (game-binary facts),
   `community-tools/` (existing modding ecosystem).
 
 Then ensure `make build/check/test` + clippy pass. **Outdated docs in a PR are
