@@ -1,14 +1,11 @@
 -- class_registry.lua — CLASS registry + the sole _G[class_name] write surface.
 --
 -- Wraps the engine's global `class` so every result is recorded in CLASS[name]
--- and published to _G[name] for mod compatibility. This module owns BOTH
--- directions of the _G[class_name] surface — every register (class()) AND every
--- clear (retire_class) — so retirement routes through retire_class, never a
--- direct _G write. retire_class does NOT clear CLASS[name]; new class() calls
--- overwrite CLASS entries normally.
+-- and mirrored to _G[name] (rawget-guarded). Owns BOTH directions of the
+-- _G[class_name] surface — register (class()) and clear (retire_class, which
+-- does NOT clear CLASS[name]); retirement must route through retire_class.
 --
--- Unresolved-class sentinel + globalization rationale:
--- docs/architecture/MOD_LOADER-DMF.md.
+-- Sentinel + globalization rationale: docs/architecture/MOD_LOADER-DMF.md.
 
 -- CLASS is created up front if absent. If the engine (or a prior pass) already
 -- populated it, keep what's there.

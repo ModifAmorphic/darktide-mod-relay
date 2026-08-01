@@ -5,6 +5,8 @@
 -- containment, guarded engine alerts, and two-frame developer-mode hot reload.
 -- Stock-DMF-specific field transitions + stale-global retirement stay in
 -- dmf_adapter.lua.
+--
+-- Full load/failure/reload contracts: docs/architecture/MOD_LOADER-DMF.md.
 
 local _pcall = pcall
 local _xpcall = xpcall

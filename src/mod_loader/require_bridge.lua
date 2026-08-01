@@ -1,10 +1,11 @@
 -- require_bridge.lua — wraps global require to feed DMF's require store.
 --
 -- Every successful require of a table result is recorded in Mods.require_store,
--- deduplicated by table IDENTITY (not consecutive-equality): a table that
--- reappears, even non-consecutively, is not recorded twice. After each
--- successful require the lifecycle bootstrap coordinator runs (idempotent) so
--- class install + boot attachment advance as main.lua runs.
+-- identity-deduped (a reappearing table is never recorded twice, even
+-- non-consecutively). After each successful require the lifecycle coordinator
+-- runs (idempotent) to advance class install + boot attachment as main.lua runs.
+--
+-- Contract: docs/architecture/MOD_LOADER-DMF.md (Surfaces + Deferred bootstrap).
 
 -- Tables aren't hashable by identity in Lua without a proxy, so a linear scan
 -- is the correct option (require stores are short per path).

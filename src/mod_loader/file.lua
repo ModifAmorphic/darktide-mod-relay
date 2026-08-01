@@ -1,13 +1,13 @@
 -- file.lua — mod-root-rooted file operations for the mod loader.
 --
--- All mod-relative access roots at Mods._mod_root (= _mod_path .. "/mods"). This
--- is the surface mod_manager + DMF's adapted io_* methods delegate to.
+-- All mod-relative access roots at Mods._mod_root (= _mod_path .. "/mods"); this
+-- is the surface mod_manager + DMF's adapted io_* methods delegate to. Callers
+-- pass a mod-RELATIVE path; resolve() rejects NUL/drive/UNC/absolute/".." as
+-- path validation only (mods still hold the captured raw io), not OS-level
+-- sandboxing — see the resolve() code site for the exact rules.
 --
--- Path safety: callers pass a mod-RELATIVE path. We normalize backslashes to
--- forward and reject NUL bytes, drive-qualified (C:\), UNC (\\server), absolute
--- (/x), and any ".." segment. This is path validation, not OS-level sandboxing
--- — mods still hold the captured raw io. Legitimate nested relative paths
--- (e.g. "dmf/scripts/mods/dmf/modules/core/io") work.
+-- Rooting, raw-io redirection, and the containment threat model:
+-- docs/architecture/MOD_LOADER-DMF.md (Surfaces + Raw Mods.lua.io redirection).
 
 local _io = Mods.lua.io
 -- Capture the raw io.open for internal ops. The wrapper at the bottom replaces

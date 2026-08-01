@@ -1,34 +1,17 @@
 -- lifecycle.lua — the bootstrap coordinator + retryable boot wrapper.
 --
--- The coordinator runs after every require (via require_bridge) and advances,
--- each idempotent: (1) install class_registry once `class` is a function;
--- (2) once CLASS.BootStateRequireGameScripts._state_update is a function, wrap
--- it exactly once with a closure.
+-- Mods.coordinate_bootstrap runs after every require (via require_bridge) and
+-- advances two idempotent steps: install the class registry once `class` is a
+-- function, and wrap BootStateRequireGameScripts._state_update once it exists.
+-- That boot wrapper calls the original first (returns preserved incl. trailing
+-- nils; errors not swallowed), then a protected advance_bootstrap retrying only
+-- the missing steps — load mod_manager + Managers.mod, wrap StateGame.update +
+-- GameStateMachine._change_state/.destroy (and, opt-in --skip-splash, the
+-- StateSplash skip) — until a `completed` flag short-circuits.
 --
--- The boot wrapper calls the original _state_update first (preserving return
--- values incl. trailing nils; NOT swallowing its errors), then runs a protected
--- advance_bootstrap that attempts only the missing steps:
---   - load the Relay mod_manager + instantiate Managers.mod once;
---   - wrap CLASS.StateGame.update so Managers.mod:update(dt) runs BEFORE the
---     engine update;
---   - wrap CLASS.GameStateMachine._change_state, dispatching "exit" BEFORE and
---     "enter" AFTER the engine transition;
---   - wrap CLASS.GameStateMachine.destroy, dispatching a final "exit" for the
---     current state BEFORE the engine destroys it;
---   - (opt-in --skip-splash) wrap CLASS.StateSplash.on_enter to skip the splash
---     (takes the engine's own skip branch; degrades to vanilla if StateTitle is
---     unresolvable).
---
--- Each step is independently idempotent; a partial pass retries on the next
--- _state_update tick until a `completed` flag short-circuits.
---
--- GameStateMachine contract: the engine holds self._state + current_state_name();
--- the wrappers only READ those — never write a state field. A state destroyed
--- without a preceding _change_state exit gets exactly one exit dispatch from
--- the destroy wrapper; one already exited is not redispatched. Dedup is a
--- private per-state-machine side-track (identity-compared), shared between the
--- two wrappers via _claim_exit. Missing class/method at bootstrap → log-once +
--- vanilla degradation, never a game crash.
+-- Full contract (deferred bootstrap, the exact-once state-exit dedup, the
+-- GameStateMachine read-only rule): docs/architecture/MOD_LOADER-DMF.md
+-- (Deferred bootstrap + Intentional shutdown).
 
 local _pcall = pcall
 local _tostring = tostring

@@ -1,20 +1,14 @@
 -- init.lua — the mod loader entry.
 --
--- Runs at pcall#1 in engine-context (delivered by the runtime trampoline),
--- BEFORE main.lua executes, and captures the engine's Lua facilities before
--- the engine strips them from globals (~pcall#6). Bootstrap-loads the Relay
--- modules, wraps global require, installs the lua-print tee, and exposes the
--- bootstrap coordinator. Class registry install, boot wrapping, and mod
--- loading fire LATER, deferred via the require bridge as main.lua runs.
+-- Runs at pcall#1 in engine-context (BEFORE main.lua) to capture the engine's
+-- Lua facilities before they're stripped (~pcall#6), wrap global require,
+-- install the optional lua-print tee, and expose the bootstrap coordinator.
+-- Class registry install, boot wrapping, and mod loading fire LATER, deferred
+-- via the require bridge as main.lua runs.
 --
--- Trampoline-baked globals consumed here (one-shot; retired immediately after
--- snapshot): MOD_LOADER_DIR (loader root, internal), RELAY_MOD_PATH (the
--- mod-path boundary — a dir containing mods/), MOD_RELAY_VERSION, RELAY_SKIP_SPLASH.
---
--- Module bootstrap order: file -> class_registry -> lifecycle -> require_bridge
--- (each assumes its deps are already on Mods/_G). mod_manager + dmf_adapter
--- load later via the lifecycle bootstrap (mod_manager calls class(), which only
--- exists once the class registry installs during main.lua's requires).
+-- Full contract (pcall#1 capture, the deferred bootstrap, the captured
+-- surface, the trampoline-baked globals, the print tee):
+-- docs/architecture/MOD_LOADER-DMF.md.
 
 -- 0. Retire the optional lua-log sink temp global (one-shot C handoff). MUST
 --    run before the _loaded idempotency guard below so a repeated/partial entry
