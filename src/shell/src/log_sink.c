@@ -4,8 +4,8 @@
  * Implementation of the helper declared in log_sink.h. This file has NO
  * Windows, Lua, or hook dependencies — only string/snprintf ops — so it
  * compiles directly into both the shell DLL and the C unit-test exes (like
- * trampoline.c). The shell's dllmain.c calls log_sink_render with a relay_log-
- * emitting callback; the callback owns the structured-log prefix.
+ * trampoline.c). The emit callback owns the structured-log prefix; this code
+ * only sanitizes + emits raw line data.
  */
 #include "log_sink.h"
 

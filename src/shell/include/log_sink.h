@@ -8,7 +8,7 @@
  * unchanged as data. No I/O, no heap, no Windows or Lua dependencies — the
  * caller supplies the emit callback (relay_log in the shell; a capturing
  * callback in unit tests). Kept separate from dllmain.c so the sanitization
- * policy is unit-testable, mirroring the pure-helper split in trampoline.h/c.
+ * policy is unit-testable.
  */
 #ifndef RELAY_LOG_SINK_H
 #define RELAY_LOG_SINK_H

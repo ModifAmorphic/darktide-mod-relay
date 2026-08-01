@@ -1,59 +1,42 @@
 /*
  * dllmain.c — Mod Relay C shell (the injected DLL).
  *
- * Linked with the Rust `relay-discovery` staticlib (C-ABI) + MinHook into
- * one PE DLL, delivered by CreateRemoteThread. DllMain spawns a worker that:
- *   - calls the Rust `relay_discover` seam on the live Darktide.exe image
- *     to resolve the LuaJIT/engine function addresses;
- *   - installs two production MinHook detours — `lua_newstate` (captures the
- *     single Lua VM) and `lua_pcall` (drives the staged mod loader) — and
- *     signals hook-ready to the launcher;
- *   - stages the production trampoline chunk (self-locating the mod loader dir
- *     + reading the mod root) so it is ready to fire one-shot at pcall#1.
+ * Linked with the Rust `relay-discovery` staticlib (C-ABI) + MinHook into one
+ * PE DLL, delivered by CreateRemoteThread. DllMain spawns a worker that runs
+ * discovery, installs two production MinHook detours, and stages the mod-loader
+ * trampoline to fire one-shot at pcall#1. The trampoline mechanism, the
+ * two-roots contract, and the loader bootstrap are documented in
+ * docs/architecture/MOD-RELAY.md and trampoline.h; this header documents only
+ * the shell-side hazards a maintainer can break.
  *
- * Both hooks are required: without `lua_newstate` the Lua state is never
- * captured, and without `lua_pcall` the trampoline never runs. A failure to
- * install either is fatal (the worker logs FATAL and exits, leaving the game
- * running vanilla rather than half-modded).
+ * Both hooks are required and a failure to install either is FATAL: without
+ * `lua_newstate` the Lua state is never captured, and without `lua_pcall` the
+ * trampoline never runs. The worker logs FATAL and exits rather than resume
+ * half-modded — the launcher's hook-ready wait then times out and the game is
+ * left running vanilla.
  *
- * Production trampoline (the proven engine-context entry):
- *   On the FIRST lua_pcall (pcall #1) — one-shot, BEFORE the original pcall —
- *   the pcall detour runs the staged chunk. The chunk sets MOD_LOADER_DIR +
- *   RELAY_MOD_PATH, hands off the build-injected product version privately,
- *   io.opens the staged entry (`<MOD_LOADER_DIR>/init.lua`),
- *   reads it, loadstrings it, and runs it. This captures the engine's
- *   io/loadstring before the engine strips them from globals (~pcall#10); a
- *   chunk injected at pcall#1 sees the globals table directly (no setfenv
- *   sandbox at pcall#1 — chunk env = globals). The chunk returns "OK" or
- *   "FAIL <step>: <err>" and the shell logs the one-line status. See
- *   trampoline.h/c for the chunk template and path/env contract.
+ * The trampoline fires one-shot at pcall#1, BEFORE the original pcall, and is
+ * game-safe: synchronous on the engine's Lua thread; Interlocked-guarded
+ * against re-run; `g_in_trampoline` set for the duration so the chunk's
+ * internal Lua pcall re-enters `lua_pcall` but forwards straight to the
+ * original (no re-count, no re-run); stack-clean (gettop saved / settop
+ * restored — zero net effect, engine pcall args below base untouched); and
+ * `lua_pcall` returns on error (never longjmps). The two roots baked into the
+ * chunk: MOD_LOADER_DIR (REQUIRED — self-located by the shell from its own DLL
+ * path as <dll-dir>\mod_loader; if unresolvable the trampoline is SKIPPED and
+ * the game runs vanilla) and RELAY_MOD_PATH (OPTIONAL — mods just won't load
+ * if unset).
  *
- *   Two roots: MOD_LOADER_DIR (the loader dir — runtime-controlled, self-
- *   located by the shell from its own DLL path as <dll-dir>\mod_loader,
- *   REQUIRED; if unresolvable the trampoline is SKIPPED and the game runs
- *   vanilla) and RELAY_MOD_PATH (the mod dir — user/mod-manager-
- *   controlled, OPTIONAL; mods just won't load if unset).
+ * The discovered `lua_resource::bytecode` engine anchor is logged but NOT
+ * hooked: it is an engine C++ function with an unknown signature/return
+ * convention, so a forwarding detour would risk stack/return corruption.
+ * `lua_pcall` (known LuaJIT C-API signature) is the safe injection point. The
+ * other discovered anchors are retained in the address table for a stable ABI;
+ * the shell consumes only the subset it needs.
  *
- * Game-safety: one-shot (Interlocked guard), synchronous on the engine's Lua
- * thread, g_in_trampoline set for the duration (the chunk's internal Lua pcall
- * re-enters lua_pcall but is skipped by the guard — no re-count, no re-run),
- * stack-clean (gettop saved / settop restored — zero net effect; the engine's
- * pcall args below base are untouched), lua_pcall never longjmps (errors are
- * returned), and the staged file is the runtime-controlled loader entry.
- *
- * Discovery note: the address table also carries `lua_resource::bytecode` (the
- * engine's bundle-script loader, resolved as the `stingray::lua_resource::
- * bytecode` string-anchor's containing function). It is logged as a validated
- * discovery output but NOT hooked — it is an engine C++ function with an
- * unknown signature/return convention, so a forwarding detour risks stack/return
- * corruption. `lua_pcall` (known LuaJIT C-API signature) is the safe injection
- * point. The other discovered anchors (lua_getfield/getfenv/setfenv/openlibs,
- * LuaEnvironment::init bounds) are likewise validated discovery outputs retained
- * for a stable ABI; the production shell consumes the subset it needs.
- *
- * Out of scope: DMF bootstrap, multi-shot injection, mod-manager UI. Logging
- * goes to OutputDebugString + a log file (RELAY_LOG_FILE env, or relay.log
- * beside the game exe), level-filtered via RELAY_LOG_LEVEL (default info).
+ * Logging goes to OutputDebugString + a log file (RELAY_LOG_FILE env, or
+ * relay.log beside the game exe), level-filtered via RELAY_LOG_LEVEL (default
+ * info).
  */
 #include <windows.h>
 #include <psapi.h>
@@ -143,21 +126,11 @@ static volatile LONG g_pcall_calls = 0;       /* observed pcall count (sanity/co
 static volatile int  g_in_trampoline = 0;     /* re-entrancy guard for the trampoline chunk */
 
 /* ---- Production trampoline state ----
- * The staged chunk (built once at worker startup from the two roots) and the
- * one-shot guard that fires it at pcall#1. Lua is single-threaded on the
- * engine's main thread, so these are only touched from that thread; the guard
- * is Interlocked anyway as the cheap Win32 one-shot idiom.
- *
- * Two roots:
- *   - MOD_LOADER_DIRNAME (mod_loader): the loader dir — where init.lua + its
- *     modules live. Runtime-controlled. SELF-LOCATED by the shell from its own
- *     DLL path (<dll-dir>\mod_loader, where the DLL ships next to the
- *     launcher). REQUIRED: if the DLL path can't be resolved, staging logs why
- *     and the trampoline is SKIPPED.
- *   - MOD_PATH_ENV (RELAY_MOD_PATH): the mod dir — where DMF + user mods +
- *     mods.lst live. User/mod-manager-controlled. OPTIONAL: if unset, the
- *     chunk emits an empty RELAY_MOD_PATH and mods just won't load.
- * The entry path = <dll-dir>\mod_loader\init.lua (joined + baked below). */
+ * The staged chunk (built once at worker startup) + the one-shot guard that
+ * fires it at pcall#1. Lua is single-threaded on the engine's main thread, so
+ * these are touched only from that thread; the guard is Interlocked as the
+ * cheap Win32 one-shot idiom. The two roots + entry path are documented in the
+ * file header and trampoline.h. */
 #define MOD_PATH_ENV         "RELAY_MOD_PATH"   /* mod root dir (user/mod-manager-controlled; optional) */
 #define SKIP_SPLASH_ENV      "RELAY_SKIP_SPLASH" /* StateSplash skip (user-controlled; optional; exact "1") */
 #define MOD_LOADER_DIRNAME   "mod_loader"            /* the loader dir, self-located next to the DLL */
@@ -170,9 +143,8 @@ static volatile LONG   g_trampoline_done = 0;      /* one-shot: trampoline fired
  * Default-off opt-in: snapshot the exact RELAY_LUA_LOGS=1 once at worker
  * startup. When enabled and the required C-API pointers resolve, the trampoline
  * registers a private C callback as the temporary Lua global
- * __mod_relay_lua_log_sink (consumed by init.lua's wrapper in a later task).
- * This slice implements only the native callback + safe structured emission.
- * When disabled, nothing is published and there is no per-print cost. */
+ * __mod_relay_lua_log_sink. When disabled, nothing is published and there is
+ * no per-print cost. */
 #define ENV_LUA_LOGS        "RELAY_LUA_LOGS"             /* exact value "1" enables */
 #define LUA_LOG_SINK_GLOBAL "__mod_relay_lua_log_sink"   /* temp global set on the VM */
 static int g_lua_log_sink_enabled = 0;   /* snapshot of RELAY_LUA_LOGS=1 at startup */
@@ -331,14 +303,10 @@ static void open_log(void) {
 }
 
 /* ---- Production trampoline ----
- * The staging step self-locates the mod loader dir from this DLL's own path
- * (<dll-dir>\mod_loader), reads the mod dir (optional) from the child env,
- * joins the loader dir + init.lua into the entry path, and builds the chunk
- * once (worker startup); the run step executes it one-shot at pcall#1, BEFORE
- * g_orig_pcall, so it runs in the io/loadstring-present window (the engine
- * strips io/loadstring from globals between pcall #1 and #10). If the loader
- * dir can't be self-located, staging logs why and the run step logs SKIPPED at
- * pcall#1 — the game runs vanilla. */
+ * staging builds the chunk once at worker startup (self-locating the loader
+ * dir from this DLL's path + reading the optional mod root); the run step
+ * executes it one-shot at pcall#1, BEFORE g_orig_pcall. On any staging failure
+ * the chunk len stays 0 and the run step logs SKIPPED — the game runs vanilla. */
 
 /*
  * Self-locate the mod loader dir, join it + init.lua into the entry path, and
@@ -350,10 +318,9 @@ static void open_log(void) {
  * Idempotent: called once from the worker.
  */
 static void trampoline_stage_chunk(void) {
-    /* Mod loader root (self-located). The shell derives it from its own DLL
-     * path: the DLL ships next to the launcher, and mod_loader/ ships next to
-     * the DLL, so <dll-dir>\mod_loader is where init.lua + its modules live.
-     * On any failure the chunk len stays 0 and trampoline_run logs SKIPPED. */
+    /* Mod loader root: self-located from this DLL's path. Deployment layout is
+     * DLL next to the launcher, mod_loader/ next to the DLL, so <dll-dir>
+     * \mod_loader is where init.lua + its modules live. */
     char dll_path[1024];
     DWORD dn = GetModuleFileNameA(g_hmodule, dll_path, sizeof(dll_path));
     if (dn == 0) {
@@ -503,10 +470,8 @@ static void trampoline_run(lua_State *L) {
     int base = g_lua_gettop(L);
 
     /* Register the lua-print sink (when enabled) as the temporary Lua global
-     * __mod_relay_lua_log_sink, BEFORE loading/running the chunk. The chunk's
-     * init.lua is the consumer in a later task; this slice only publishes the
-     * callback. Done before the chunk so the wrapper can rely on the global
-     * existing from the loader's first instruction.
+     * __mod_relay_lua_log_sink, BEFORE loading/running the chunk so the wrapper
+     * can rely on the global existing from the loader's first instruction.
      *
      * Zero net stack effect (provably, against the grounded LuaJIT 2.1 ABI):
      * lua_pushcclosure(fn, 0) pushes exactly one value (the 0-upvalue closure),
@@ -595,18 +560,16 @@ static lua_State *detour_newstate(lua_Alloc f, void *ud) {
 }
 
 /* lua_pcall — count calls + run the staged trampoline one-shot at pcall#1
- * BEFORE the original pcall (so the chunk runs in the io/loadstring-present
- * window). The chunk's own internal pcall re-enters here but is skipped by
- * g_in_trampoline (forward-only) — no re-run, no counter perturbation. */
+ * BEFORE the original pcall. The chunk's own internal pcall re-enters here
+ * but is skipped by g_in_trampoline (forward-only) — see the file header's
+ * game-safety note. */
 static int detour_pcall(lua_State *L, int nargs, int nresults, int errfunc) {
     if (!g_in_trampoline) {
         LONG n = InterlockedIncrement(&g_pcall_calls);
         if (!g_L) g_L = L;
 
         /* Production trampoline — one-shot at pcall#1, BEFORE the engine's
-         * pcall, so it runs while io/loadstring are still present (they are
-         * stripped between pcall #1 and #10). Runs first so its result is the
-         * headline of the pcall#1 log block. */
+         * pcall. Runs first so its result is the headline of the pcall#1 log. */
         if (n == 1 && InterlockedCompareExchange(&g_trampoline_done, 1, 0) == 0) {
             trampoline_run(L);
         }
@@ -709,11 +672,9 @@ static DWORD WINAPI worker(LPVOID arg) {
     g_lua_pushcclosure = (pushcclosure_t)(g_module_base + tbl.lua_pushcclosure);
     g_lua_setfield     = (setfield_t)(g_module_base + tbl.lua_setfield);
 
-    /* Install the two production hooks. Both are required/fatal: without
-     * lua_newstate the Lua state is never captured, and without lua_pcall the
-     * trampoline never runs. A failure logs FATAL and the worker exits (the
-     * launcher's hook-ready wait then times out and terminates the game rather
-     * than resuming half-modded). */
+    /* Install the two production hooks (both required/fatal — see file header):
+     * a failure logs FATAL and the worker exits, so the launcher's hook-ready
+     * wait times out rather than the game resuming half-modded. */
     MH_STATUS mh = MH_Initialize();
     if (mh != MH_OK) { relay_log(RELAY_LOG_ERROR, "shell", "FATAL: MH_Initialize failed: %d\n", mh); return 1; }
     if (!install_hook((void *)(g_module_base + tbl.lua_newstate_thunk),
@@ -726,10 +687,8 @@ static DWORD WINAPI worker(LPVOID arg) {
     }
     relay_log(RELAY_LOG_INFO, "shell", "production hooks armed: lua_newstate (VM capture) + lua_pcall (trampoline @ pcall#1)\n");
 
-    /* Production trampoline: stage the chunk now (self-locating the mod loader
-     * dir from this DLL's path + reading RELAY_MOD_PATH for the mod root) so
-     * it is ready to fire one-shot at pcall#1 (the hooks above are armed and
-     * the engine's first lua_pcall is imminent once the main thread resumes). */
+    /* Stage the chunk now so it is ready to fire one-shot at pcall#1 once the
+     * armed hooks see the engine's first lua_pcall. */
     trampoline_stage_chunk();
 
     /* Production hook-ready handshake: signal the launcher that the hooks are
