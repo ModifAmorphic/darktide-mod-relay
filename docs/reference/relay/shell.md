@@ -26,8 +26,8 @@ install **either is FATAL**.
 
 **Failure handling (must not be weakened).** On any hook-install failure
 (`MH_Initialize`, `MH_CreateHook`/`MH_EnableHook` for either target) the worker
-logs `FATAL` and exits its thread **without** signaling the `relay_hook_ready`
-named event. The launcher — which created the game `SUSPENDED` and is blocked on
+logs at `ERROR` level and exits its thread **without** signaling the
+`relay_hook_ready` named event. The launcher — which created the game `SUSPENDED` and is blocked on
 that event — then times out (60 s) and `TerminateProcess`es the game. The game
 is **terminated, never resumed**; there is no best-effort continue past a hook
 failure and no "run vanilla" fallback for a hook-install fault. (Vanilla is the

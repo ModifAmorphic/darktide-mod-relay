@@ -646,9 +646,10 @@ static DWORD WINAPI worker(LPVOID arg) {
     g_lua_setfield     = (setfield_t)(g_module_base + tbl.lua_setfield);
 
     /* Install the two production hooks (both required/fatal — see
-     * docs/reference/relay/shell.md): a failure logs FATAL and the worker
-     * exits without signaling hook-ready, so the launcher's hook-ready wait
-     * times out and it terminates the game rather than resume it half-modded. */
+     * docs/reference/relay/shell.md): a failure logs at ERROR level and the
+     * worker exits without signaling hook-ready, so the launcher's hook-ready
+     * wait times out and it terminates the game rather than resume it
+     * half-modded. */
     MH_STATUS mh = MH_Initialize();
     if (mh != MH_OK) { relay_log(RELAY_LOG_ERROR, "shell", "FATAL: MH_Initialize failed: %d\n", mh); return 1; }
     if (!install_hook((void *)(g_module_base + tbl.lua_newstate_thunk),
