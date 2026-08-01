@@ -1,7 +1,7 @@
 /*
  * test_quoting.c — Unit tests for relay_build_command_line().
  *
- * Two layers of assertion, as required by the item brief:
+ * Two layers of assertion:
  *
  *   1. Exact-byte spine — assert the built command line equals a hand-written
  *      expected string. This is the deterministic backward-compat backbone

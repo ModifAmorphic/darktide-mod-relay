@@ -1,7 +1,7 @@
 /*
  * test_config.c — Unit tests for the launcher's config model.
  *
- * Validates the two guarantees of the rewrite:
+ * Validates the two guarantees:
  *   1. relay_parse_args: --flag <value> pairs populate the right fields;
  *      unknown flag / missing value / -h / --help return the right codes.
  *   2. relay_resolve_config: every setting follows flag > env > default,
@@ -213,8 +213,8 @@ void test_parse_version_before_dash_dash_sets_flag(void) {
 }
 
 void test_parse_dash_dash_operator_scenario(void) {
-    /* First-hand proof of the operator's originally-failing scenario, now
-     * correct: --lua-heap-mb-size and 2048 forward as TWO separate tokens. */
+    /* The operator's scenario: --lua-heap-mb-size and 2048 forward as TWO
+     * separate tokens. */
     char *argv[] = {"prog", "--game-binary", "X", "--", "--lua-heap-mb-size",
                     "2048"};
     relay_parsed_args a;
