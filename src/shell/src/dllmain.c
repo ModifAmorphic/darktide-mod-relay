@@ -3,40 +3,13 @@
  *
  * Linked with the Rust `relay-discovery` staticlib (C-ABI) + MinHook into one
  * PE DLL, delivered by CreateRemoteThread. DllMain spawns a worker that runs
- * discovery, installs two production MinHook detours, and stages the mod-loader
- * trampoline to fire one-shot at pcall#1. The trampoline mechanism, the
- * two-roots contract, and the loader bootstrap are documented in
- * docs/architecture/MOD-RELAY.md and trampoline.h; this header documents only
- * the shell-side hazards a maintainer can break.
+ * discovery, installs the two production MinHook detours, and stages the
+ * trampoline to fire one-shot at pcall#1.
  *
- * Both hooks are required and a failure to install either is FATAL: without
- * `lua_newstate` the Lua state is never captured, and without `lua_pcall` the
- * trampoline never runs. The worker logs FATAL and exits rather than resume
- * half-modded — the launcher's hook-ready wait then times out and the game is
- * left running vanilla.
- *
- * The trampoline fires one-shot at pcall#1, BEFORE the original pcall, and is
- * game-safe: synchronous on the engine's Lua thread; Interlocked-guarded
- * against re-run; `g_in_trampoline` set for the duration so the chunk's
- * internal Lua pcall re-enters `lua_pcall` but forwards straight to the
- * original (no re-count, no re-run); stack-clean (gettop saved / settop
- * restored — zero net effect, engine pcall args below base untouched); and
- * `lua_pcall` returns on error (never longjmps). The two roots baked into the
- * chunk: MOD_LOADER_DIR (REQUIRED — self-located by the shell from its own DLL
- * path as <dll-dir>\mod_loader; if unresolvable the trampoline is SKIPPED and
- * the game runs vanilla) and RELAY_MOD_PATH (OPTIONAL — mods just won't load
- * if unset).
- *
- * The discovered `lua_resource::bytecode` engine anchor is logged but NOT
- * hooked: it is an engine C++ function with an unknown signature/return
- * convention, so a forwarding detour would risk stack/return corruption.
- * `lua_pcall` (known LuaJIT C-API signature) is the safe injection point. The
- * other discovered anchors are retained in the address table for a stable ABI;
- * the shell consumes only the subset it needs.
- *
- * Logging goes to OutputDebugString + a log file (RELAY_LOG_FILE env, or
- * relay.log beside the game exe), level-filtered via RELAY_LOG_LEVEL (default
- * info).
+ * Contracts/hazards: docs/reference/relay/shell.md (the two required hooks +
+ * FATAL-on-failure, pcall#1 game-safety invariants, the two trampoline-baked
+ * roots, the not-hooked lua_resource::bytecode). Mechanism:
+ * docs/architecture/MOD-RELAY.md -> shell.
  */
 #include <windows.h>
 #include <psapi.h>
@@ -672,9 +645,10 @@ static DWORD WINAPI worker(LPVOID arg) {
     g_lua_pushcclosure = (pushcclosure_t)(g_module_base + tbl.lua_pushcclosure);
     g_lua_setfield     = (setfield_t)(g_module_base + tbl.lua_setfield);
 
-    /* Install the two production hooks (both required/fatal — see file header):
-     * a failure logs FATAL and the worker exits, so the launcher's hook-ready
-     * wait times out rather than the game resuming half-modded. */
+    /* Install the two production hooks (both required/fatal — see
+     * docs/reference/relay/shell.md): a failure logs FATAL and the worker
+     * exits without signaling hook-ready, so the launcher's hook-ready wait
+     * times out and it terminates the game rather than resume it half-modded. */
     MH_STATUS mh = MH_Initialize();
     if (mh != MH_OK) { relay_log(RELAY_LOG_ERROR, "shell", "FATAL: MH_Initialize failed: %d\n", mh); return 1; }
     if (!install_hook((void *)(g_module_base + tbl.lua_newstate_thunk),

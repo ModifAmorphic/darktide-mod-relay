@@ -1,17 +1,11 @@
 /*
  * trampoline.h — pure helpers for the production trampoline.
  *
- * The trampoline chunk (set MOD_LOADER_DIR + RELAY_MOD_PATH -> io.open the
- * staged entry -> read -> loadstring -> run) is the engine-context entry
- * mechanism (see dllmain.c). The production path uses TWO roots:
- *   - the mod loader root (`mod_loader_dir`) — where init.lua + its modules
- *     live (runtime-controlled; self-located by the shell next to the DLL at
- *     <dll-dir>\mod_loader; REQUIRED);
- *   - the mod root (`mod_path`) — where DMF + user mods + mods.lst live
- *     (user/mod-manager-controlled; OPTIONAL — mods just won't load if unset).
- * The entry path is `<mod_loader_dir>\init.lua`. These are pure string-op
- * helpers with no Windows/Lua/hook dependencies, so they compile directly into
- * the C test exes.
+ * Pure string-op helpers (no Windows/Lua/hook dependencies) that compile
+ * directly into both the shell DLL and the C test exes. The trampoline's
+ * game-safety and two-roots contracts are normative in
+ * docs/reference/relay/shell.md; the per-global build contract is documented
+ * at trampoline_build_chunk below.
  */
 #ifndef RELAY_TRAMPOLINE_H
 #define RELAY_TRAMPOLINE_H
@@ -55,9 +49,7 @@ int trampoline_escape_path(const char *path, size_t path_len,
  * when NULL/empty/overlong, so malformed build metadata disables only version
  * diagnostics, not the loader), and RELAY_SKIP_SPLASH ("1" when `skip_splash`
  * is nonzero, "" otherwise — the loader checks `== "1"`), then io.open + reads
- * + loadstrings + runs `entry_path` (escaped). All four globals are an internal
- * bootstrap handoff, not user env vars or a public Lua-facility surface; the
- * loader retires them before community code runs.
+ * + loadstrings + runs `entry_path` (escaped).
  *
  * `skip_splash` is an int (0 or 1): it maps to a fixed Lua string token, so
  * unlike `mod_path` it needs no escaping.
@@ -66,10 +58,6 @@ int trampoline_escape_path(const char *path, size_t path_len,
  * else "FAIL <step>: <err>" identifying which step broke. (The unguarded
  * f:read is the one step whose error is caught by the chunk's own pcall and
  * reported as CHUNK PCALL FAILED by trampoline_run.)
- *
- * (In the production call site `mod_loader_dir` is also the prefix of
- * `entry_path`, so it appears twice in the chunk — once as the global, once
- * inside the io.open path. That is intended.)
  *
  * Writes the NUL-terminated chunk to `out`. Returns the chunk length
  * (excluding NUL), or -1 on a NULL arg (`mod_loader_dir`, `entry_path`, or

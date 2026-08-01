@@ -1,10 +1,11 @@
 /*
  * trampoline.c — pure helpers for the production trampoline.
  *
- * Implementation of the helpers declared in trampoline.h; the chunk mechanism
- * and two-roots contract are documented there and in dllmain.c. This file has
- * NO Windows, Lua, or hook dependencies — only string ops — so it compiles
- * directly into both the shell DLL and the C unit-test exes.
+ * Implementation of the helpers declared in trampoline.h. This file has NO
+ * Windows, Lua, or hook dependencies — only string ops — so it compiles
+ * directly into both the shell DLL and the C unit-test exes. The trampoline's
+ * game-safety and two-roots contracts are normative in
+ * docs/reference/relay/shell.md.
  */
 #include "trampoline.h"
 
