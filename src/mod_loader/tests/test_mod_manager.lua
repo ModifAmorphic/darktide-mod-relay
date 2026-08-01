@@ -2,19 +2,12 @@
 --
 -- Asserts the external behavior contract:
 --   - declares class("ModManager") (so CLASS.ModManager.destroy exists for DMF)
---   - generic scan/load/lifecycle behavior is unchanged:
---     - init() SCANs only: reads mods.lst, builds _mods (id/name/handle), no load
---     - missing/empty mods.lst -> empty _mods, no crash
---     - _state nil after init; "done" after first update; written once even if all fail
---     - update(dt) LOADs on first call (per-mod run/init in order), then drives
---     - run() then init() per mod, before the next mod loads
---     - run() failure / missing .mod / bad .mod -> skipped, load continues
---     - run() returning nil -> DMF-driven success (not outer-driven, not a failure)
---     - init() failure -> object not driven
---     - update(dt) fans out to each loaded mod's update; failures isolated
---     - on_game_state_changed forwards status+name+object; failures isolated
---     - destroy() calls on_unload in reverse order; failures isolated
---     - Managers.mod shape: _mods[_mod_load_index].handle resolves per mod during load
+--   - generic scan/load/lifecycle: init() scans mods.lst into _mods (id/name/
+--     handle, no load); update(dt) loads on first call (per-mod run/init in
+--     order), then drives update + on_game_state_changed; destroy() calls
+--     on_unload in reverse. run/init failures are isolated (skipped/logged,
+--     load continues); a nil run() result is DMF-driven success, not
+--     outer-driven.
 --   - the DMF-visible contract fields (_state, _mod_load_index, _settings) are
 --     driven through the dmf_adapter; mod_manager itself never writes them
 --     directly. The DMF IO adaptation (eight DMFMod:io_* overrides, path
