@@ -398,14 +398,14 @@ static void trampoline_stage_chunk(void) {
 static void shell_log_sink_emit(const char *line, size_t len, void *ud) {
     (void)ud;
     if (len > LOG_SINK_LINE_BUDGET) len = LOG_SINK_LINE_BUDGET;  /* defensive */
-    relay_log(RELAY_LOG_INFO, "lua-print", "%.*s\n", (int)len, line);
+    relay_log(RELAY_LOG_INFO, "lua", "%.*s\n", (int)len, line);
 }
 
 /* The native callback published to Lua as __mod_relay_lua_log_sink. Expects
  * exactly one actual Lua string; uses lua_type (no hostile-value coercion — a
  * number/nil/table/extra-args call is ignored, not errored). Reads it with
  * lua_tolstring + explicit length, emits it through log_sink_render (which
- * splits/sanitizes into structured INFO lua-print lines), and returns zero
+ * splits/sanitizes into structured INFO lua lines), and returns zero
  * values. Never calls into Lua (no lua_error longjmp), never retains L or the
  * string (the pointer is only valid for the duration of the call). Does NOT
  * take g_log_lock itself: serialization happens per physical line inside
@@ -466,8 +466,8 @@ static void trampoline_run(lua_State *L) {
         if (g_lua_pushcclosure && g_lua_setfield && g_lua_type) {
             g_lua_pushcclosure(L, &lua_log_sink_cb, 0);
             g_lua_setfield(L, LUA_GLOBALSINDEX, LUA_LOG_SINK_GLOBAL);
-            /* Component is "trampoline", not "lua-print": this is the pcall#1
-             * setup step (plumbing), not a captured Lua line — "lua-print" is
+            /* Component is "trampoline", not "lua": this is the pcall#1
+             * setup step (plumbing), not a captured Lua line — "lua" is
              * reserved for captured print output emitted via the sink. */
             relay_log(RELAY_LOG_INFO, "trampoline",
                       "lua-print sink registered as global %s\n",
