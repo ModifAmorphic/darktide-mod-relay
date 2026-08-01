@@ -80,9 +80,9 @@ Point `--mod-path` at this scenario root (`<path-to-observational/cwd_probe>`):
   probe printed, regardless of the tee (console remains authoritative and
   unchanged; the tee only adds `relay.log` copies).
 - **`relay.log`** (next to the launcher): when the tee is on (`--log-lua` /
-  `RELAY_LOG_LUA=1`), one structured `INFO  lua-print:` line per probe line.
+  `RELAY_LOG_LUA=1`), one structured `INFO  lua:` line per probe line.
   A captured probe line looks like:
-  `2026-07-25T12:34:56-04:00 INFO  lua-print: [CWD_PROBE] case=cwd_ffi load=1 cwd_ffi=C:\Program Files (x86)\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries`
+  `2026-07-25T12:34:56-04:00 INFO  lua: [CWD_PROBE] case=cwd_ffi load=1 cwd_ffi=C:\Program Files (x86)\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries`
 - **Scenario log** (`<mod_path>/mods/cwd_probe/cwd_probe.log`): every probe
   line (same content as the console) — operator convenience, a persistent
   record that survives console-log truncation at process exit.
@@ -103,8 +103,8 @@ Point `--mod-path` at this scenario root (`<path-to-observational/cwd_probe>`):
 
 | # | Check | Expected result |
 | --- | --- | --- |
-| 1 | **Default off** (no flag/env) | console log + scenario log have the probe markers; `relay.log` has **no** `lua-print:` probe lines (and no `[CWD_PROBE]`). |
-| 2 | **`--log-lua` on** (or `RELAY_LOG_LUA=1`) | every probe marker appears once in console **and** once as a `lua-print:` line in `relay.log`. |
+| 1 | **Default off** (no flag/env) | console log + scenario log have the probe markers; `relay.log` has **no** `lua:` probe lines (and no `[CWD_PROBE]`). |
+| 2 | **`--log-lua` on** (or `RELAY_LOG_LUA=1`) | every probe marker appears once in console **and** once as a `lua:` line in `relay.log`. |
 | 3 | **`cwd_ffi == cwd_popen`** | the FFI CWD and the popen CWD agree (same path string). |
 | 4 | **`exe_path` present** | `exe_path` is non-empty (a real path to the host exe). |
 | 5 | **No duplication across reloads** | perform at least **three** clean hot reloads (LEFT Ctrl + LEFT Shift + R). Per generation, each case produces **exactly one** `load=N` set — never duplicates. |

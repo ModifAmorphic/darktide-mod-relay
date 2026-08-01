@@ -81,7 +81,7 @@ step (e.g. `mods-without-alpha.lst`), copy that supplied file over the staged
   the probes' `[PREFIX]` lines **nor** Relay's `[mod_loader]` lines go there —
   they go to the Darktide console log and the scenario logs above. When the user
   opts in with `--log-lua` (or `RELAY_LOG_LUA=1`), Relay tees Lua `print` /
-  `__print` output into `relay.log` as structured `INFO  lua-print:` lines too —
+  `__print` output into `relay.log` as structured `INFO  lua:` lines too —
   so probe/loader lines that traverse those wrapped surfaces ALSO appear in
   `relay.log`. The Darktide console log remains authoritative and unchanged
   either way; the tee only adds `relay.log` copies. See

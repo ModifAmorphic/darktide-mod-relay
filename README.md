@@ -162,7 +162,7 @@ You can confirm each reload in Darktide's console log
 [Linux (Proton)](#linux-proton) for the Proton path): look for the
 `INFO [mod_loader] hot reload generation N …` lines — `completed cleanly` on
 success. If you launched with `--log-lua`, those same `[mod_loader]` lines are
-**also** copied into `relay.log` (as `lua-print` lines); the console log always
+**also** copied into `relay.log` (as `lua` lines); the console log always
 has them regardless.
 
 > **If a reload reports errors:** Relay reloads best-effort and is not
@@ -208,7 +208,7 @@ Darktide Lua output.
 > Darktide console log is the only place Lua `print` / `__print` output (the
 > mod loader, DMF, and mods) shows up — `relay.log` carries only the C-side
 > shell/trampoline lines. Add `--log-lua` to also **copy** that Lua `print`
-> output into `relay.log` as `lua-print` lines. It is a **tee, not a redirect**:
+> output into `relay.log` as `lua` lines. It is a **tee, not a redirect**:
 > Darktide's console log stays complete and authoritative. It is off by default,
 > and `--log-level warn`/`error` filters the copied lines out of `relay.log`
 > while the console log is unaffected. See the

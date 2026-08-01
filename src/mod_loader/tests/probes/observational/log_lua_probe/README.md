@@ -79,9 +79,9 @@ Point `--mod-path` at this scenario root (`<path-to-observational/log_lua_probe>
   probe printed, regardless of the tee (console remains authoritative and
   unchanged; the tee only adds `relay.log` copies).
 - **`relay.log`** (next to the launcher): when the tee is on, one structured
-  `INFO  lua-print:` line per physical line emitted through the wrapped surfaces.
+  `INFO  lua:` line per physical line emitted through the wrapped surfaces.
   A captured probe line looks like:
-  `2026-07-23T12:34:56-04:00 INFO  lua-print: [LOG_LUA_PROBE] case=simple_print load=1 hello-from-print`
+  `2026-07-23T12:34:56-04:00 INFO  lua: [LOG_LUA_PROBE] case=simple_print load=1 hello-from-print`
 - **Scenario log** (`<mod_path>/mods/log_lua_probe/log_lua_probe.log`): one
   status line per case (`status=ok` / `status=unavailable`), plus the
   `SESSION_START` / `SESSION_DONE` markers — operator convenience for aligning
@@ -91,11 +91,11 @@ Point `--mod-path` at this scenario root (`<path-to-observational/log_lua_probe>
 
 | # | Check | Expected result |
 | --- | --- | --- |
-| 1 | **Default off** (no flag/env) | console log has the probe markers; `relay.log` has **no** `lua-print:` probe lines (and no `[LOG_LUA_PROBE]`). |
-| 2 | **CLI on** (`--log-lua`) | every bounded probe marker appears once in console **and** once as a `lua-print:` line in `relay.log`. |
+| 1 | **Default off** (no flag/env) | console log has the probe markers; `relay.log` has **no** `lua:` probe lines (and no `[LOG_LUA_PROBE]`). |
+| 2 | **CLI on** (`--log-lua`) | every bounded probe marker appears once in console **and** once as a `lua:` line in `relay.log`. |
 | 3 | **Env on** (`RELAY_LOG_LUA=1`) | behavior identical to CLI on. |
 | 4 | **Formatting / sanitization / truncation** | `multiline_crlf` → multiple separately-prefixed `relay.log` lines; `percent_fmt` → `%`/`%s`/`%d` preserved literally; `control_bytes` → `\x00`/`\x01`/`\x1b`/`\x7f` (no raw control bytes, no malformed unprefixed lines); `over_budget` → exactly one `... truncated` marker after the budget bytes. |
-| 5 | **`--log-level warn`** | with the tee on, `INFO  lua-print:` lines are **absent** from `relay.log` while console output remains. |
+| 5 | **`--log-level warn`** | with the tee on, `INFO  lua:` lines are **absent** from `relay.log` while console output remains. |
 | 6 | **No stacking across reloads** | perform at least **three** clean hot reloads (LEFT Ctrl + LEFT Shift + R). Per generation, each probe marker produces **exactly one** `relay.log` copy (load=N distinguishes generations) — never duplicates. |
 | 7 | **Vanilla unaffected** | a normal Steam launch (without Relay) runs the game unmodified; nothing of Relay's exists. |
 

@@ -229,7 +229,7 @@ Relay writes to **two** separate logs by default:
 **Optional Lua print tee** — `--log-lua` (or `RELAY_LOG_LUA=1`, exact value
 `1`; default off). When enabled, Relay wraps the engine's global `print` and
 `__print` **once per process** so every successful call through those surfaces
-is **also** copied into `relay.log` as structured `INFO  lua-print:` lines
+is **also** copied into `relay.log` as structured `INFO  lua:` lines
 (after the original still goes to the console). It is a **tee, never a
 redirect**: the console log remains complete and authoritative.
 

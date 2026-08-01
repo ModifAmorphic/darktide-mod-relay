@@ -184,7 +184,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   from `.release-please-manifest.json` at build time) and exits — callers like
   Curator use it for version comparison. `--log-lua` (env `RELAY_LOG_LUA=1`,
   exact value `1` only; default off) is a value-less switch that tees Lua
-  `print`/`__print` output into `relay.log` as `INFO lua-print:` lines (a tee,
+  `print`/`__print` output into `relay.log` as `INFO lua:` lines (a tee,
   never a redirect — console stays authoritative); the launcher canonicalizes
   the child env to `1` or removes it. `--log-append` (env `RELAY_LOG_APPEND=1`,
   same value-less/canonical-child-env policy) opens `relay.log` in append mode
@@ -210,8 +210,8 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   under Proton) — NOT to `relay.log` and NOT to the Proton `steam-$APPID.log`
   (Wine/Proton diagnostics only). With `--log-lua`/`RELAY_LOG_LUA=1` on,
   Relay additionally copies `print`/`__print` output into `relay.log` as
-  `INFO lua-print:` lines (the console log stays complete/authoritative; it is a
-  tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua-print`
+  `INFO lua:` lines (the console log stays complete/authoritative; it is a
+  tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua`
   lines out of `relay.log` while the console log is unaffected. See
   `docs/reference/relay/logging.md` for the normative logging contract
   (destinations, line/lifecycle, tee boundary, argument rendering,

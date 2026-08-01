@@ -318,7 +318,7 @@ the reliable bootstrap validation).
 
 **Optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`, default off).**
 When enabled, Relay additionally copies Lua `print` / `__print` output into
-`relay.log` as structured `INFO  lua-print:` lines. It is a **tee, never a
+`relay.log` as structured `INFO  lua:` lines. It is a **tee, never a
 redirect**: the engine's console `print` still runs first and authoritatively,
 and the tee only adds `relay.log` copies of what traverses those wrapped
 surfaces. Coverage is honest and narrower than "all Lua logs":
@@ -332,7 +332,7 @@ surfaces. Coverage is honest and narrower than "all Lua logs":
   coverage depends on whether their runtime path ultimately calls the wrapped
   globals (observed, not guaranteed).
 
-Captured lines are emitted at `INFO` with component `lua-print`. `print` /
+Captured lines are emitted at `INFO` with component `lua`. `print` /
 `__print` carry no severity metadata, and Relay does **not** infer severity
 from text prefixes — a line whose text says `warning` / `error` is still
 copied at `INFO`. Relay does not identify which game script, Relay module, DMF
