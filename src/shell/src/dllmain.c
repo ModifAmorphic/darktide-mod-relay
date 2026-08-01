@@ -277,7 +277,8 @@ static void open_log(void) {
      * thread), so a truncated log is recreated on every launch. */
     const char *mode = env_is_exact_one(ENV_LOG_APPEND) ? "a" : "w";
     g_log = fopen(path, mode);
-    relay_log(RELAY_LOG_INFO, "shell", "log -> %s\n", path);
+    relay_log(RELAY_LOG_INFO, "shell", "log -> %s%s\n", path,
+              mode[0] == 'a' ? " (append)" : "");
 }
 
 /* ---- Production trampoline ----
