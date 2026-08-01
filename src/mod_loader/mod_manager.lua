@@ -1,10 +1,10 @@
 -- mod_manager.lua — Relay's private scan/load/lifecycle driver.
 --
--- The manager owns authoritative mods.lst scanning, nil/table run-result
--- validation, outer-object lifecycle driving, generation-aware Crashify
--- metadata, one-strike outer failure containment, guarded engine alerts, and
--- the existing two-frame developer-mode hot reload. Stock-DMF-specific field
--- transitions and stale-global retirement remain in dmf_adapter.lua.
+-- Owns mods.lst scanning, run-result validation, outer-object lifecycle
+-- driving, generation-aware Crashify metadata, one-strike outer failure
+-- containment, guarded engine alerts, and two-frame developer-mode hot reload.
+-- Stock-DMF-specific field transitions + stale-global retirement stay in
+-- dmf_adapter.lua.
 
 local _pcall = pcall
 local _xpcall = xpcall
@@ -18,11 +18,8 @@ local _string_find = string.find
 local _string_gsub = string.gsub
 local _string_sub = string.sub
 
--- Leveled diagnostics (the shared helper init.lua publishes on Mods._relay).
--- Captured once at module load — mod_manager loads after init, so these exist.
--- Each emits "{LEVEL} [mod_loader] {message}"; the helper is pcall-guarded and
--- runs message content through safe_text, so diagnostics never become a second
--- failure path.
+-- Leveled diagnostics (init.lua publishes the helper on Mods._relay before this
+-- module loads). Pcall-guarded so diagnostics never become a second failure path.
 local log_info  = Mods._relay.log_info
 local log_debug = Mods._relay.log_debug
 local log_warn  = Mods._relay.log_warn

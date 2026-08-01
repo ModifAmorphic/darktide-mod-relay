@@ -1,13 +1,11 @@
 -- class_registry.lua — CLASS registry + the sole _G[class_name] write surface.
 --
 -- Wraps the engine's global `class` so every result is recorded in CLASS[name]
--- (the loader's authoritative handle on engine state classes, which are not
--- bare _G globals) and published to _G[name] for mod compatibility. This module
--- owns BOTH directions of the _G[class_name] surface — every register (class())
--- AND every clear (retire_class) — so dmf_adapter and any other consumer routes
--- class-result retirement through retire_class rather than writing _G directly.
--- retire_class does NOT clear CLASS[name]; new class() calls overwrite CLASS
--- entries normally.
+-- and published to _G[name] for mod compatibility. This module owns BOTH
+-- directions of the _G[class_name] surface — every register (class()) AND every
+-- clear (retire_class) — so retirement routes through retire_class, never a
+-- direct _G write. retire_class does NOT clear CLASS[name]; new class() calls
+-- overwrite CLASS entries normally.
 --
 -- Unresolved-class sentinel + globalization rationale:
 -- docs/architecture/MOD_LOADER-DMF.md.
@@ -17,10 +15,10 @@
 CLASS = CLASS or {}
 
 -- Attach the unresolved-class sentinel if CLASS has no metatable yet (don't
--- clobber an engine-provided one). __index returns the missing key as a string
--- so DMF's string/table hook validator accepts it; registered entries live in
--- the table itself and are returned directly (the metatable is not consulted
--- for keys that exist). Writes are unaffected (no __newindex).
+-- clobber an engine-provided one). __index returns a missing key as a string so
+-- DMF's string/table hook validator accepts it; registered entries are returned
+-- directly (metatable not consulted for existing keys). Writes unaffected (no
+-- __newindex).
 if getmetatable(CLASS) == nil then
     setmetatable(CLASS, {
         __index = function(_, key)
@@ -35,9 +33,9 @@ local _print = __print or print
 local installed = false
 local original_class = nil
 
--- Idempotently install the class wrapper. Returns true once installed (or if
--- already installed), false when global `class` is absent or not a function
--- (the not-ready case — no mutation happens until it appears).
+-- Idempotently install the class wrapper. Returns true once installed, false
+-- when global `class` is absent/not a function (not-ready: no mutation until it
+-- appears).
 local function install_class_registry()
     if installed then return true end
     local c = _rawget(_G, "class")
@@ -46,13 +44,10 @@ local function install_class_registry()
     end
     original_class = c
     installed = true
-    -- Replace _G.class with a closure that delegates to the captured original,
-    -- stores the returned class object in CLASS[name] and (when not already
-    -- set) publishes it to _G[name] for the community contract, and returns it
-    -- verbatim. Super/varargs are forwarded exactly. The CLASS store is a
-    -- direct table write (the __index sentinel only affects missing-key
-    -- reads); the _G write is rawget-guarded so engine/DMF explicit
-    -- assignments are preserved.
+    -- Stores the result in CLASS[name] and publishes to _G[name] when not
+    -- already set (rawget-guarded so engine/DMF explicit assignments are
+    -- preserved). Super/varargs forwarded exactly. The CLASS write is direct
+    -- (the __index sentinel only affects missing-key reads).
     _G.class = function(name, ...)
         local result = original_class(name, ...)
         if type(name) == "string" then
@@ -66,10 +61,9 @@ local function install_class_registry()
     return true
 end
 
--- Clear a single class result from _G. Sole owner of the _G[class_name]
--- write surface: every register AND every clear goes through here.
--- Does NOT clear CLASS[name] — new class() calls overwrite CLASS entries
--- normally (see docs/architecture/MOD_LOADER-DMF.md).
+-- Clear a single class result from _G. Does NOT clear CLASS[name] — new
+-- class() calls overwrite CLASS entries normally
+-- (see docs/architecture/MOD_LOADER-DMF.md).
 local function retire_class(name)
     if type(name) ~= "string" then return end
     _G[name] = nil

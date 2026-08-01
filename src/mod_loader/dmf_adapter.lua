@@ -1,14 +1,10 @@
 -- dmf_adapter.lua — the stock-DMF compatibility boundary for the mod loader.
 --
--- A plain Lua module (NOT an engine class(), NOT a proxy/metatable facade) that
--- centralizes every stock-DMF-specific assumption the loader makes, so
--- mod_manager.lua can stay generic: scan/order/load/drive/unload/isolate/reload.
--- Loaded from the loader root via Mods.load_module("dmf_adapter") at the top of
--- mod_manager.lua; the factory M.new(manager) returns one adapter per manager.
---
--- Full contract — DMF-visible field transitions, the generation-aware IO
--- adaptation mechanism, the reload teardown boundary — is documented in
--- docs/architecture/MOD_LOADER-DMF.md.
+-- A plain Lua module (not an engine class(), not a proxy/metatable facade) that
+-- centralizes every stock-DMF-specific assumption so mod_manager stays generic
+-- (scan/order/load/drive/unload/isolate/reload). The full contract — DMF-
+-- visible field transitions, the generation-aware IO adaptation, the reload
+-- teardown boundary — is in docs/architecture/MOD_LOADER-DMF.md.
 
 local _type = type
 local _rawget = rawget
@@ -16,9 +12,8 @@ local _rawget = rawget
 local M = {}
 
 -- Build a mod-relative path from DMF's io_* argument shape, replicating DMF's
--- get_file_path joining (minus its hardcoded "./../mods" base). local_path is
--- the directory portion, file_name the file, file_extension the extension
--- (defaults to "lua" when absent — matching DMF).
+-- get_file_path joining minus its hardcoded "./../mods" base. file_extension
+-- defaults to "lua" (matching DMF).
 local function build_dmf_path(local_path, file_name, file_extension)
     local p = ""
     if local_path and local_path ~= "" then
@@ -37,10 +32,8 @@ local function build_dmf_path(local_path, file_name, file_extension)
     return p .. ".lua"
 end
 
--- Validate a _mods entry has the shape DMF requires at the load boundary:
--- non-nil `id`, string `name`, non-nil `handle`. Returns (true) on success or
--- (false, reason) on failure. Generic _mods ownership/scanning stays in
--- mod_manager.lua; this only centralizes the DMF-required shape check.
+-- Validate a _mods entry has the DMF-required shape at the load boundary:
+-- non-nil `id`, string `name`, non-nil `handle`. Returns (true) | (false, reason).
 local function validate_entry_shape(entry)
     if entry == nil then
         return false, "missing entry"
@@ -57,9 +50,8 @@ local function validate_entry_shape(entry)
     return true
 end
 
--- Restore persisted manager settings from Application.user_setting; startup-only
--- with a defensive { developer_mode = false } fallback. See MOD_LOADER-DMF.md
--- for the persisted-developer-mode policy.
+-- Restore persisted settings from Application.user_setting (startup-only);
+-- defensive { developer_mode = false } fallback. See MOD_LOADER-DMF.md.
 local function restore_persisted_settings()
     local app = _rawget(_G, "Application")
     if _type(app) == "table" and _type(app.user_setting) == "function" then
@@ -77,15 +69,15 @@ local function restore_persisted_settings()
 end
 
 -- Factory: bind an adapter to one manager instance. Private state lives in
--- closure upvalues (see adapt_dmf_io and retire_stale_generation_globals);
--- only the explicit transition methods write DMF-visible contract fields.
+-- closure upvalues; only the explicit transition methods write DMF-visible
+-- contract fields.
 function M.new(manager)
     local observer_registered = false
     local adapted_dmfmod = nil
     local adapted_io_dofile = nil
 
-    -- Adapt DMF's mod-facing io_* methods to delegate to Mods.file.* (mod-root
-    -- rooted). Installation-aware idempotent — see MOD_LOADER-DMF.md.
+    -- Adapt DMF's mod-facing io_* methods to Mods.file.*. Installation-aware
+    -- idempotent — see MOD_LOADER-DMF.md.
     local function adapt_dmf_io()
         local DMFMod = _rawget(_G, "DMFMod")
         if _type(DMFMod) ~= "table" then
@@ -105,7 +97,7 @@ function M.new(manager)
 
         local file = Mods.file
 
-        -- Emit a DMF debug line if the mod object exposes :debug().
+        -- DMF debug line (no-op if the mod lacks :debug()).
         local function dmf_debug(self_dmf, msg)
             local dbg = self_dmf.debug
             if _type(dbg) == "function" then
@@ -113,7 +105,7 @@ function M.new(manager)
             end
         end
 
-        -- Emit a DMF error line if the mod object exposes :error().
+        -- DMF error line (no-op if the mod lacks :error()).
         local function dmf_error(self_dmf, msg)
             local errf = self_dmf.error
             if _type(errf) == "function" then
@@ -121,9 +113,9 @@ function M.new(manager)
             end
         end
 
-        -- Drive a SAFE Relay file op with DMF debug/error logging. Logs
-        -- "Loading <rel>" before; on a false result, logs a concise error
-        -- naming <rel>. Returns the Relay result unchanged.
+        -- SAFE Relay file op with DMF debug/error logging. Logs "Loading <rel>"
+        -- before; logs a concise error + returns the Relay result unchanged on
+        -- failure.
         local function safe_io(self_dmf, rel, file_op, ...)
             dmf_debug(self_dmf, "Loading " .. rel)
             local result = file_op(rel, ...)
@@ -133,9 +125,8 @@ function M.new(manager)
             return result
         end
 
-        -- Drive an UNSAFE Relay file op with DMF debug logging only. The op
-        -- may raise; the debug line is emitted before, and the error is not
-        -- swallowed.
+        -- UNSAFE Relay file op with DMF debug logging only. The op may raise;
+        -- the error is not swallowed.
         local function unsafe_io(self_dmf, rel, file_op, ...)
             dmf_debug(self_dmf, "Loading " .. rel)
             return file_op(rel, ...)
@@ -227,27 +218,24 @@ function M.new(manager)
                 and manager._settings.developer_mode == true
         end,
 
-        -- Validate a _mods entry has the DMF-required shape at the load
-        -- boundary. Returns (true) | (false, reason). Pure check; the manager
-        -- decides what to do on failure (skip + log).
+        -- DMF-required shape check (pure; manager decides on failure).
         validate_entry = function(self, entry)
             return validate_entry_shape(entry)
         end,
 
-        -- Reload-teardown retirement, split by ownership: class results
-        -- (DMFMod) route through class_registry (Mods.retire_class) since it
-        -- owns the _G[class_name] surface; DMF installation helpers
-        -- (new_mod/get_mod, not classes) stay local. Retains the private
-        -- adapted_dmfmod + adapted_io_dofile markers. See MOD_LOADER-DMF.md.
+        -- Reload-teardown retirement, split by ownership: class results (DMFMod)
+        -- route through class_registry (Mods.retire_class, which owns the
+        -- _G[class_name] surface); DMF installation helpers (new_mod/get_mod, not
+        -- classes) stay local. Retains the adapted_dmfmod + adapted_io_dofile
+        -- markers. See MOD_LOADER-DMF.md.
         retire_stale_generation_globals = function(self)
             Mods.retire_class("DMFMod")    -- class result -> class_registry owns the _G clear
             _G.new_mod = nil                -- DMF installation globals (not classes) -> adapter owns
             _G.get_mod = nil
         end,
 
-        -- Diagnostic/test surface: the DMFMod table identity currently adapted
-        -- (nil if none yet), and the exact Relay-installed io_dofile wrapper.
-        -- Not part of the DMF-visible contract.
+        -- Diagnostic/test surface (not part of the DMF-visible contract): the
+        -- adapted DMFMod identity + the Relay-installed io_dofile wrapper.
         adapted_dmfmod = function(self)
             return adapted_dmfmod
         end,

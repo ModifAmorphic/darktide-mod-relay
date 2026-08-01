@@ -1,43 +1,32 @@
 -- file.lua — mod-root-rooted file operations for the mod loader.
 --
--- All mod-relative access roots at Mods._mod_root (derived by init.lua as
--- _mod_path .. "/mods", where _mod_path = RELAY_MOD_PATH — the mod-path
--- boundary). The operations here are the surface the loader's mod_manager +
--- DMF's adapted io_* methods delegate to.
+-- All mod-relative access roots at Mods._mod_root (= _mod_path .. "/mods"). This
+-- is the surface mod_manager + DMF's adapted io_* methods delegate to.
 --
--- Design is organized around explicit operations (read / execute / observe),
--- not around a generic read-or-execute dispatcher. Each operation opens the
--- file once, closes the handle before compilation/execution, and validates the
--- caller path against escape attempts.
---
--- Path safety: the caller passes a mod-RELATIVE path. We normalize backslashes
--- to forward slashes and reject NUL bytes, drive-qualified (C:\), UNC (\\server),
--- absolute (/x), and any ".." segment. This is path validation, not OS-level
--- sandboxing — mods still hold the captured raw io. Legitimate nested relative
--- paths (e.g. "dmf/scripts/mods/dmf/modules/core/io") work.
+-- Path safety: callers pass a mod-RELATIVE path. We normalize backslashes to
+-- forward and reject NUL bytes, drive-qualified (C:\), UNC (\\server), absolute
+-- (/x), and any ".." segment. This is path validation, not OS-level sandboxing
+-- — mods still hold the captured raw io. Legitimate nested relative paths
+-- (e.g. "dmf/scripts/mods/dmf/modules/core/io") work.
 
 local _io = Mods.lua.io
--- Capture the raw io.open for internal Mods.file.* ops (read_raw/read_lines).
--- The wrapper at file.lua's bottom replaces Mods.lua.io.open, but _io_open
--- stays the raw function — _io is a table REFERENCE, so _io.open would become
--- the wrapper too. Capturing the function directly preserves the raw surface.
+-- Capture the raw io.open for internal ops. The wrapper at the bottom replaces
+-- Mods.lua.io.open; _io is a table REFERENCE, so _io.open would become the
+-- wrapper too. Capturing the function directly preserves the raw surface.
 local _io_open = _io.open
 local _loadstring = Mods.lua.loadstring
 local _pcall = pcall
 local _error = error
 local _tostring = tostring
 
--- Load the path utilities module (normpath + is_within). Loaded on demand via
--- Mods.load_module, which reads from MOD_LOADER_DIR. Must load before the
--- Mods.lua.io wrapper installs below, so the wrapper can use path.normpath
--- and path.is_within.
+-- Load path utilities (normpath + is_within). Must load before the Mods.lua.io
+-- wrapper below, which uses path.normpath + path.is_within.
 local path = Mods.load_module("path")
 
 Mods.file = Mods.file or {}
 
--- The mod root (Mods._mod_root, derived as _mod_path/mods). Captured at module
--- load; init.lua sets Mods._mod_root before this module runs. An empty root
--- resolves paths as-is.
+-- The mod root (Mods._mod_root). Captured at module load; init.lua sets it
+-- before this module runs. An empty root resolves paths as-is.
 local mod_root = ""
 if Mods._mod_root ~= nil and Mods._mod_root ~= "" then
     -- Normalize the root itself: backslashes -> forward, strip trailing slash.
@@ -45,13 +34,14 @@ if Mods._mod_root ~= nil and Mods._mod_root ~= "" then
 end
 
 -- ---------------------------------------------------------------------------
--- Internal observer mechanism (mod-loader-internal; not part of the mod-facing file surface).
+-- Internal observer mechanism (mod-loader-internal; not part of the mod-facing
+-- file surface).
 --
--- Observers fire AFTER a chunk executed successfully (exec/dofile variants,
--- not reads). They are the hook mod_manager uses to adapt DMF's io_* methods
--- the moment DMF's core/io.lua defines them (mid-DMF-init). Observer failures
--- are logged but never replace the chunk result or crash the engine. This
--- mechanism does NOT touch Mods.require_store.
+-- Observers fire AFTER a chunk executes successfully (exec/dofile variants,
+-- not reads) — the trigger mod_manager uses to adapt DMF's io_* methods the
+-- moment core/io.lua defines them. Observer failures are logged but never
+-- replace the chunk result or crash the engine. Does NOT touch
+-- Mods.require_store.
 -- ---------------------------------------------------------------------------
 local observers = {}
 
@@ -75,11 +65,8 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Resolve a caller-supplied relative path to a full path rooted at mod_root.
--- Returns (full_path) on success or (nil, reason) on rejection. Normalizes
--- backslashes to forward slashes and strips trailing separators. If the final
--- path segment has no extension (no "."), ".lua" is appended — matching the
--- DMF convention where io_dofile / dofile are called with extensionless paths
--- (e.g. Mods.file.dofile("dmf/scripts/mods/dmf/dmf_loader")).
+-- Returns (full_path) | (nil, reason). If the final segment has no extension,
+-- ".lua" is appended (DMF calls io_dofile/dofile with extensionless paths).
 local function resolve(relative)
     if type(relative) ~= "string" then
         return nil, "non-string path"
@@ -109,10 +96,8 @@ local function resolve(relative)
         return nil, "empty path"
     end
     -- Append .lua if the basename has no extension. "has extension" = the
-    -- basename contains a "." at position 2 or later (so "mods.lst" keeps .lst,
-    -- but "dmf_mod_data" gets .lua). A leading-dot name like ".gitignore" has
-    -- no dot after position 1, so it is treated as extension-less and gets .lua
-    -- appended — an irrelevant edge case for mod paths.
+    -- basename contains a "." at position 2 or later (so "mods.lst" keeps .lst;
+    -- a leading-dot name like ".gitignore" is treated as extension-less).
     local basename = norm:match("([^/]+)$") or norm
     local has_ext = basename:find(".", 2, true) ~= nil  -- start at 2: leading dot = ext-less
     if not has_ext then
@@ -124,9 +109,9 @@ local function resolve(relative)
     return mod_root .. "/" .. norm
 end
 
--- Open-once raw reader. Guarantees f:close() even if f:read raises. Safe
--- callers receive (false, err); unsafe callers convert the err to a raised
--- error (see dofile_unsafe). Returns (true, content) or (false, err).
+-- Open-once raw reader. Guarantees f:close() even if read raises. Returns
+-- (true, content) | (false, err); unsafe callers convert the err to a raised
+-- error.
 local function read_raw(full_path)
     local f, oerr = _io_open(full_path, "r")
     if not f then
@@ -146,10 +131,9 @@ local function read_raw(full_path)
     return true, data
 end
 
--- Open-once line-list reader. Trims each line and skips blank lines and lines
--- whose first non-whitespace chars are "--" (single-line Lua comments).
--- Guarantees f:close() even if the lines iterator raises. Returns (true, list)
--- or (false, err).
+-- Open-once line-list reader. Trims each line and skips blank + "--" comment
+-- lines. Guarantees f:close() even if the iterator raises. Returns
+-- (true, list) | (false, err).
 local function read_lines(full_path)
     local f, oerr = _io_open(full_path, "r")
     if not f then
@@ -172,15 +156,10 @@ local function read_lines(full_path)
     return true, list
 end
 
--- Compile + run a chunk. The chunk executes in the shared global environment
--- (the captured loadstring governs its env — the engine globals in production,
--- the sandbox in tests) and receives `args` as its first parameter, matching
--- the DMF chunk convention (`func(args)`).
---
--- unsafe = false: returns (true, chunk_value) on success, (false, err) on
---   compile/runtime failure.
--- unsafe = true: propagates compile/runtime errors (raises); returns the
---   chunk value on success.
+-- Compile + run a chunk in the shared global env (loadstring governs the env).
+-- Receives `args` as its first parameter (DMF's func(args) convention).
+-- unsafe=false: returns (true, chunk_value) | (false, err).
+-- unsafe=true: propagates compile/runtime errors (raises); returns chunk_value.
 local function execute(full_path, source, args, unsafe)
     local fn, lerr = _loadstring(source, full_path)
     if not fn then
@@ -202,10 +181,9 @@ end
 -- ---------------------------------------------------------------------------
 -- Public operations.
 --
--- Safe variants return false on missing/read/compile/runtime failure and the
--- chunk value (with-return) or true (boolean exec) on success. Unsafe variants
--- propagate compile/runtime failures. Observers fire only after a successful
--- execution.
+-- Safe variants return false on failure and the chunk value (with-return) or
+-- true (boolean exec) on success. Unsafe variants propagate compile/runtime
+-- failures. Observers fire only after a successful execution.
 -- ---------------------------------------------------------------------------
 
 -- Safe dofile (with return). Returns the chunk value, or false on failure.
@@ -286,43 +264,37 @@ end
 -- ---------------------------------------------------------------------------
 -- Mods.lua.io.open / io.lines wrapper.
 --
--- DMF mods load their own data files via the stock-DMF convention
--- "./../mods/<modname>/<rest>", passed to Mods.lua.io.open(). Without this
--- wrapper, those paths resolve against the engine CWD (the game's binaries/
--- dir) and silently miss — the DMFMod:io_* adaptation only covers mods that
--- go through mod:io_dofile(), not mods that call Mods.lua.io.open() directly.
+-- DMF mods load data files via the stock-DMF convention "./../mods/<mod>/<rest>"
+-- passed to Mods.lua.io.open(). Without this wrapper those paths resolve
+-- against the engine CWD and silently miss (DMFMod:io_* only covers mods that
+-- go through mod:io_dofile(), not direct Mods.lua.io.open() callers).
 --
--- The wrapper prepends _mod_root (the mods dir), normalizes via path.normpath
--- (so "./../mods/foo" collapses back to _mod_root/foo), and verifies the
--- resolved path stays within _mod_path (the boundary = parent of mods/).
--- Escapes are rejected with nil, err (mirroring io.open's failure shape).
+-- The wrapper prepends _mod_root, normalizes via path.normpath (so
+-- "./../mods/foo" collapses back to _mod_root/foo), and verifies the resolved
+-- path stays within _mod_path (the boundary = parent of mods/). Escapes are
+-- rejected with nil, err (io.open's failure shape).
 --
--- The raw io captured above as _io is preserved for the internal Mods.file.*
--- operations, which already root paths via resolve() and must not be
--- double-wrapped.
+-- The raw io captured above (_io) is preserved for internal Mods.file.* ops,
+-- which already root via resolve() and must not be double-wrapped.
 --
--- Containment is at the _mod_path boundary only — NOT per-mod isolation. Mods
--- can traverse to sibling mods' files within <mod_path>/mods/. This is
--- intentional (a shared Lua VM means per-mod filesystem isolation would be
--- security theater). See docs/architecture/MOD_LOADER-DMF.md → "Raw io
--- redirection" for the threat model + known gaps (lexical containment, not
--- OS-level sandboxing; symlinks/junctions; FFI/os.execute bypass the wrapper).
+-- Containment is at the _mod_path boundary only — NOT per-mod isolation (a
+-- shared Lua VM makes per-mod filesystem isolation security theater). See
+-- docs/architecture/MOD_LOADER-DMF.md → "Raw io redirection" for the threat
+-- model + known gaps (lexical not OS-level; symlinks/junctions;
+-- FFI/os.execute bypass the wrapper).
 -- ---------------------------------------------------------------------------
 if Mods._mod_path and Mods._mod_path ~= "" then
     local _mod_root = Mods._mod_root
     local _normpath = path.normpath
     local _is_within = path.is_within
-    -- Normalize _mod_path once at install time so is_within receives the same
-    -- separator form normpath produces on the joined path (backslashes on
-    -- Windows). The caller (this closure) is responsible for normalizing both
-    -- is_within inputs — see path.lua's is_within contract.
+    -- Normalize _mod_path once at install so is_within receives the same
+    -- separator form normpath produces on the joined path. Both is_within inputs
+    -- must be normalized — see path.lua's is_within contract.
     local _mod_path = _normpath(Mods._mod_path)
 
-    -- Resolve + contain a caller-supplied path. Shared by the io.open and
-    -- io.lines wrappers. Rejects NUL bytes (would truncate at the OS boundary,
-    -- matching resolve()) before joining; then prepends _mod_root, normalizes,
-    -- and verifies containment. Returns the resolved absolute path, or
-    -- (nil, reason) on rejection.
+    -- Resolve + contain a caller path. Shared by the io.open and io.lines
+    -- wrappers. Rejects NUL bytes before joining, then prepends _mod_root,
+    -- normalizes, and verifies containment. Returns the resolved path | (nil, reason).
     local function resolve_and_check(file_path)
         if type(file_path) == "string" and file_path:find("\0", 1, true) then
             return nil, "nul byte in path"
@@ -354,10 +326,10 @@ end
 -- Mods.lua.io.popen wrapper — relative-path CWD redirection via cd-prepend.
 --
 -- Prepends `cd /d "<normpath _mod_root>" && ` so mod shell-out calls using
--- RELATIVE paths (stock-DMF `..\mods\<mod>\...`) resolve against the mods
--- dir. The cd runs inside the spawned cmd.exe child only — the parent Lua
--- CWD is never touched (no SetCurrentDirectory, no FFI, no race); the opaque
--- shell string rules out the path-rewrite+containment open/lines applies.
+-- RELATIVE paths (stock-DMF `..\mods\<mod>\...`) resolve against the mods dir.
+-- The cd runs in the spawned cmd.exe child only — the parent Lua CWD is never
+-- touched (no SetCurrentDirectory, no FFI, no race). The opaque shell string
+-- rules out the path-rewrite+containment open/lines applies.
 -- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection".
 -- ---------------------------------------------------------------------------
 do
@@ -366,7 +338,7 @@ do
        and type(Mods.lua.io) == "table"
        and type(Mods.lua.io.popen) == "function" then
         -- _mod_root carries a forward slash (init.lua: _mod_path.."/mods");
-        -- normpath yields the Windows form cd /d expects.
+        -- normpath yields the Windows form `cd /d` expects.
         local win_root = path.normpath(mod_root)
         local _orig_popen = Mods.lua.io.popen
         Mods.lua.io.popen = function(cmd, ...)
