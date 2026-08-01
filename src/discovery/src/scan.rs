@@ -1,8 +1,6 @@
 //! `.text` byte-pattern scanners and thunk resolvers.
 //!
-//! All operate on an RVA-laid-out `image` and report RVAs. The scanner design
-//! (opcodes + offset math) is shared with prior validated implementations of
-//! this discovery path, re-implemented here in safe Rust.
+//! All operate on an RVA-laid-out `image` and report RVAs.
 //!
 //! Covered `.pdata` gap categories (production-spec §".pdata behavior"):
 //!   - **CFG/hot-patch thunks** (`E9 rel32 + cc`): followed by [`trace_thunk`].

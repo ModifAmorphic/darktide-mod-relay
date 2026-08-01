@@ -244,7 +244,7 @@ mod tests {
     //! (positive `rip +`, negative `rip -`, neither ⇒ `None`). The positive
     //! branch is also covered indirectly by the oracle integration test against
     //! real `lea` disassembly; these directly pin the sign arithmetic and the
-    //! `None` early-return, which previously had no direct coverage.
+    //! `None` early-return.
     use super::*;
 
     fn insn(op_str: &str, address: u64, size: u32) -> DecodedInsn {

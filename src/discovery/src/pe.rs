@@ -9,9 +9,6 @@
 //! No `unsafe`, no external PE dependency: every read is a bounds-checked
 //! little-endian slice read. PE constants are hard-coded so the same code
 //! compiles on Linux, MinGW and MSVC without `windows.h`.
-//!
-//! Fresh, safe-Rust implementation (shared design with prior validated
-//! implementations of this discovery path).
 
 // PE header constants (subset of IMAGE_* from winnt.h).
 const DOS_MAGIC: u16 = 0x5A4D; // "MZ"
