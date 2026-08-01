@@ -78,9 +78,7 @@ return function(runner)
 
     -- -------------------------------------------------------------------
     -- observational/ — every scenario ships the uniform complete-bundle
-    -- shape (README.md + mods/mods.lst + mods/<probe>/<probe>.mod). The
-    -- legacy flat layout (a single <probe>/<probe>.mod with no mods.lst,
-    -- staged by copying a leaf folder and merging a mods.lst line) is gone.
+    -- shape (README.md + mods/mods.lst + mods/<probe>/<probe>.mod).
     -- -------------------------------------------------------------------
     runner.register("probes: observational scenarios are complete bundles (uniform shape)", function()
         local scenarios = {
@@ -185,9 +183,9 @@ return function(runner)
         assert_contains(probe, "status=unavailable", "lua_logs_probe (contained failure marker)")
         assert_contains(probe, "_pcall(body)", "lua_logs_probe (per-case containment)")
 
-        -- README documents the complete-bundle staging (no legacy Shape-A
-        -- copy/merge), launch variants, expected evidence, the acceptance
-        -- matrix, the stock-DMF black-box caveat, and cleanup.
+        -- README documents the complete-bundle staging, launch variants,
+        -- expected evidence, the acceptance matrix, the stock-DMF black-box
+        -- caveat, and cleanup.
         local readme = assert_present("observational/lua_logs_probe/README.md")
         assert_contains(readme, "[LUA_LOGS_PROBE]", "lua_logs_probe README (prefix)")
         assert_contains(readme, "--mod-path", "lua_logs_probe README (direct --mod-path)")
@@ -255,7 +253,6 @@ return function(runner)
         assert_contains(readme, "cwd_ffi == cwd_popen", "cwd_probe README (matrix: agreement)")
         assert_contains(readme, "binaries", "cwd_probe README (research question)")
         assert_contains(readme, "Cleanup", "cwd_probe README (cleanup section)")
-        -- Legacy staging shape is gone (matches lua_logs_probe).
         assert_not_contains(readme, "Shape A", "cwd_probe README (legacy shape gone)")
         assert_not_contains(readme, "Add (or merge)", "cwd_probe README (no list-merge step)")
     end)
@@ -402,8 +399,6 @@ return function(runner)
         assert_contains(index, "complete scenario bundle",
             "probes index (uniform complete-bundle shape)")
         assert_contains(index, "--mod-path", "probes index (direct launch)")
-        -- The legacy two-shape convention and single-folder/list-merge staging
-        -- instructions must be gone.
         assert_not_contains(index, "Shape A", "probes index (legacy Shape A gone)")
         assert_not_contains(index, "Shape B", "probes index (legacy Shape B gone)")
         assert_not_contains(index, "Add (or merge)", "probes index (no list-merge step)")

@@ -225,7 +225,7 @@ return function(runner)
     end)
 
     -- -----------------------------------------------------------------
-    -- FFI module publication (Finding 1)
+    -- FFI module publication
     -- -----------------------------------------------------------------
 
     runner.register("entry: Mods.lua.ffi is the engine FFI module (required via original_require)", function()
