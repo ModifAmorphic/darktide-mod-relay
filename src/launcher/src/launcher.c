@@ -1,32 +1,19 @@
 /*
  * launcher.c — CreateRemoteThread DLL injector.
  *
- * Creates Darktide.exe in a SUSPENDED state, injects relay_shell.dll via
- * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the shell to signal
- * that the lua_newstate hook is ready, then resumes. Zero files land in the
- * game directory.
+ * Creates Darktide.exe SUSPENDED, injects relay_shell.dll via
+ * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the shell's
+ * hook-ready signal, then resumes — the lua_newstate hook must arm before the
+ * engine's main() runs, and this ordering guarantees it. Zero files land in
+ * the game directory.
  *
- * Timing hazard: the hook must be installed before the engine's main() runs.
- * SUSPENDED → inject → wait-hook-ready → resume gives that guarantee. DllMain
- * returns instantly (it only spawns a worker) and the worker does not arm the
- * hook until discovery completes, so resuming before hook-ready means the
- * engine calls lua_newstate before the hook is installed and the hook never
- * fires.
+ * Every setting follows flag > env > default (the canonical table is
+ * print_usage()). Game arguments are the verbatim rest-of-line after `--`,
+ * forwarded to the game as separate argv entries, in order. The injected DLL
+ * is hardcoded to <launcher-dir>\relay_shell.dll.
  *
- * Every setting follows flag > env > default; the canonical flag/env/default
- * table is print_usage() (the --help text). Game arguments are not a setting:
- * the verbatim rest-of-line after `--`, forwarded to the game as separate argv
- * entries, CRT-quoted, in order (Relay flags must precede `--`; a flag-looking
- * token after `--` is a raw game arg).
- *
- * Quoting is ANSI only (CreateProcessA): Darktide.exe arguments are ASCII and
- * no known argument takes a non-ANSI value (see relay_build_command_line for
- * the full reasoning and the CreateProcessW caveat). The full line is capped
- * at RELAY_CMDLINE_MAX (32,767 chars incl. NUL — the CreateProcessA ceiling);
- * an oversize line is rejected before any process is created.
- *
- * The injected DLL is hardcoded to <launcher-dir>\relay_shell.dll — not
- * configurable.
+ * Full flow + CLI table, and the timing/quoting/ANSI/ceiling hazards:
+ * docs/architecture/MOD-RELAY.md (launcher/) + src/README.md (Launcher CLI).
  */
 #include "launcher.h"
 #include <stdio.h>
