@@ -2,11 +2,13 @@
 --
 -- All mod-relative access roots at Mods._mod_root (= _mod_path .. "/mods"); this
 -- is the surface mod_manager + DMF's adapted io_* methods delegate to. Callers
--- pass a mod-RELATIVE path; resolve() rejects NUL/drive/UNC/absolute/".." as
--- path validation only (mods still hold the captured raw io), not OS-level
--- sandboxing — see the resolve() code site for the exact rules.
+-- pass a mod-RELATIVE path; resolve() rejects NUL/drive/UNC/absolute/".." for
+-- the internal code-loading surface (Mods.file.*) only — path validation, not
+-- OS-level sandboxing (mods still hold the captured raw io). See the resolve()
+-- code site for the exact rules.
 --
--- Rooting, raw-io redirection, and the containment threat model:
+-- Rooting + raw-io redirection (the mod-facing Mods.lua.io wrapper roots
+-- relative paths and passes absolute paths through verbatim — no containment):
 -- docs/architecture/MOD_LOADER-DMF.md (Surfaces + Raw Mods.lua.io redirection).
 
 local _io = Mods.lua.io
@@ -19,8 +21,9 @@ local _pcall = pcall
 local _error = error
 local _tostring = tostring
 
--- Load path utilities (normpath + is_within). Must load before the Mods.lua.io
--- wrapper below, which uses path.normpath + path.is_within.
+-- Load path utilities. Must load before the Mods.lua.io wrapper below, which
+-- uses path.normpath (is_within remains a tested pure utility in path.lua;
+-- file.lua no longer consumes it after the io wrapper dropped containment).
 local path = Mods.load_module("path")
 
 Mods.file = Mods.file or {}
@@ -266,59 +269,57 @@ end
 --
 -- DMF mods load data files via the stock-DMF convention "./../mods/<mod>/<rest>"
 -- passed to Mods.lua.io.open(). Without this wrapper those paths resolve
--- against the engine CWD and silently miss (DMFMod:io_* only covers mods that
--- go through mod:io_dofile(), not direct Mods.lua.io.open() callers).
+-- against the engine CWD (binaries/) and silently miss (DMFMod:io_* only covers
+-- mods that go through mod:io_dofile(), not direct Mods.lua.io.open() callers).
 --
--- The wrapper prepends _mod_root, normalizes via path.normpath (so
--- "./../mods/foo" collapses back to _mod_root/foo), and verifies the resolved
--- path stays within _mod_path (the boundary = parent of mods/). Escapes are
--- rejected with nil, err (io.open's failure shape).
+-- The wrapper does ONE thing — make that relative convention resolve:
+--   - relative path -> path.normpath(_mod_root .. "/" .. file_path)
+--   - absolute path -> forwarded VERBATIM (no rooting, no normalization, the
+--     caller's separators preserved) — so mods can read/write anywhere, like
+--     stock DMF (e.g. the Scores mod's %APPDATA% history writes)
+--   - non-string    -> forwarded as-is (the original io handles/raises)
+--
+-- There is NO containment and NO filtering: a mod runs Lua in-process and is
+-- unconstrained by any Lua-level wrapper (os.execute/FFI/absolute io.popen were
+-- always open, and so is io.open/io.lines now). The wrapper exists solely
+-- because the engine CWD is binaries/, not mods/ — without rooting, DMF's
+-- ./../mods/<rest> convention resolves to the wrong directory.
 --
 -- The raw io captured above (_io) is preserved for internal Mods.file.* ops,
 -- which already root via resolve() and must not be double-wrapped.
 --
--- Containment is at the _mod_path boundary only — NOT per-mod isolation (a
--- shared Lua VM makes per-mod filesystem isolation security theater). See
--- docs/architecture/MOD_LOADER-DMF.md → "Raw io redirection" for the threat
--- model + known gaps (lexical not OS-level; symlinks/junctions;
--- FFI/os.execute bypass the wrapper).
+-- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection" for
+-- the raw-io semantics + threat model.
 -- ---------------------------------------------------------------------------
-if Mods._mod_path and Mods._mod_path ~= "" then
+if Mods._mod_root and Mods._mod_root ~= "" then
     local _mod_root = Mods._mod_root
     local _normpath = path.normpath
-    local _is_within = path.is_within
-    -- Normalize _mod_path once at install so is_within receives the same
-    -- separator form normpath produces on the joined path. Both is_within inputs
-    -- must be normalized — see path.lua's is_within contract.
-    local _mod_path = _normpath(Mods._mod_path)
 
-    -- Resolve + contain a caller path. Shared by the io.open and io.lines
-    -- wrappers. Rejects NUL bytes before joining, then prepends _mod_root,
-    -- normalizes, and verifies containment. Returns the resolved path | (nil, reason).
-    local function resolve_and_check(file_path)
-        if type(file_path) == "string" and file_path:find("\0", 1, true) then
-            return nil, "nul byte in path"
+    -- Resolve a caller path for the mod-facing io surface: root a relative
+    -- path at _mod_root (normalized), or forward an absolute path verbatim.
+    -- Non-string paths pass through so the original io handles/raises. Absolute
+    -- iff, after "\"->"/", the form is drive-qualified (^%a: — covers C:/x,
+    -- C:\x, C:x) or root-anchored (^/ — also covers UNC, \\server -> //server).
+    -- These mirror the patterns resolve() rejects; here they select passthrough.
+    local function resolve(file_path)
+        if type(file_path) ~= "string" then
+            return file_path
         end
-        local joined = _mod_root .. "/" .. tostring(file_path)
-        local resolved = _normpath(joined)
-        if not _is_within(resolved, _mod_path) then
-            return nil, "path escapes mod path boundary"
+        local fwd = file_path:gsub("\\", "/")
+        if fwd:match("^%a:") or fwd:match("^/") then
+            return file_path
         end
-        return resolved
+        return _normpath(_mod_root .. "/" .. file_path)
     end
 
     local _original_io_open = Mods.lua.io.open
     Mods.lua.io.open = function(file_path, mode)
-        local resolved, err = resolve_and_check(file_path)
-        if not resolved then return nil, err end
-        return _original_io_open(resolved, mode)
+        return _original_io_open(resolve(file_path), mode)
     end
 
     local _original_io_lines = Mods.lua.io.lines
     Mods.lua.io.lines = function(file_path, ...)
-        local resolved, err = resolve_and_check(file_path)
-        if not resolved then return nil, err end
-        return _original_io_lines(resolved, ...)
+        return _original_io_lines(resolve(file_path), ...)
     end
 end
 
@@ -329,7 +330,7 @@ end
 -- RELATIVE paths (stock-DMF `..\mods\<mod>\...`) resolve against the mods dir.
 -- The cd runs in the spawned cmd.exe child only — the parent Lua CWD is never
 -- touched (no SetCurrentDirectory, no FFI, no race). The opaque shell string
--- rules out the path-rewrite+containment open/lines applies.
+-- rules out the path-rewrite that open/lines applies.
 -- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection".
 -- ---------------------------------------------------------------------------
 do

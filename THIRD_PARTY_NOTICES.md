@@ -374,9 +374,10 @@ DEALINGS IN THE SOFTWARE.
 - **Component:** the `normpath` function from Penlight's `pl.path` module,
   extracted verbatim into `src/mod_loader/path.lua`. Used by the mod loader's
   `Mods.lua.io.open` / `io.lines` wrapper to normalize the joined
-  `_mod_root`/relative path before the containment check. The `is_within`
-  function in the same file is adapted from `pl.path.relpath`'s
-  segment-comparison logic (not a verbatim copy). Source-level extraction only
+  `_mod_root`/relative path. The `is_within` function in the same file is
+  adapted from `pl.path.relpath`'s segment-comparison logic (not a verbatim
+  copy); it is now a retained, tested utility no longer consumed by the
+  loader. Source-level extraction only
   — Penlight is NOT a dynamic/runtime dependency (no `require 'pl.path'`, no
   LuaRocks); `pl.path`'s hard `lfs` (LuaFileSystem) dependency is bypassed by
   extracting only the pure-string `normpath` + its helpers (`is_windows`

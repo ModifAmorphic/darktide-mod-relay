@@ -229,11 +229,12 @@ app (it's the runtime that powers Mod Curator, but any caller works).
   path (`<dll-dir>\mod_loader\`, set as the internal `MOD_LOADER_DIR` global
   — not an env var/flag). The **mod path** (`--mod-path` /
   `RELAY_MOD_PATH`) is yours: point it at the directory that **contains**
-  your `mods/` subdirectory (the "boundary" — DMF + user mods + `mods.lst`
+  your `mods/` subdirectory (DMF + user mods + `mods.lst`
   live at `<mod_path>/mods/`). The trampoline sets `RELAY_MOD_PATH` from
   it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (what
-  `Mods.file.*` roots at) and uses `Mods._mod_path` as the containment
-  boundary for the `Mods.lua.io` raw-read wrapper (see
+  `Mods.file.*` roots at) and the `Mods.lua.io.open`/`io.lines` wrapper roots
+  relative paths there (absolute paths pass through verbatim — no
+  containment; see
   `docs/architecture/MOD_LOADER-DMF.md` → "Raw `Mods.lua.io` redirection").
 - **`mods.lst`** is a plain text file you author (or a mod manager generates): one
   mod folder name per line, in load order. It is **the Relay↔caller load-order
@@ -270,7 +271,7 @@ global, so no loader-path env var exists.
 
 | Env var | Set by | Read by | Meaning |
 | --- | --- | --- | --- |
-| `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod-path boundary** — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here) and `Mods._mod_path` as the containment boundary for the `Mods.lua.io` wrapper. Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
+| `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod path** config value — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here; the `Mods.lua.io.open`/`io.lines` wrapper roots relative paths there and passes absolute paths through verbatim — no containment). Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
 | `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
 | `RELAY_LOG_LUA` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_LUA=1` when the resolved config enables it (`--log-lua` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LOG_LUA=1` themselves — that is the external non-launcher contract. |

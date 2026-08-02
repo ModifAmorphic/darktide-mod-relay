@@ -169,10 +169,11 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
 - **Launcher CLI** is flag-based (**flag > env var > default**; `--game-binary`
   is the only required flag; the shell DLL is hardcoded next to the launcher
   and self-locates the mod loader). `--mod-path` (env `RELAY_MOD_PATH`)
-  is the user-controlled mod-path **boundary** — a directory that *contains*
+  is the user-controlled mod path — a directory that *contains*
   a `mods/` subdirectory (DMF + user mods live at `<mod_path>/mods/`); the
-  loader derives `Mods._mod_root` as `<mod_path>/mods` and contains raw
-  `Mods.lua.io` reads at `_mod_path`. The loader root is self-located by the
+  loader derives `Mods._mod_root` as `<mod_path>/mods` and the
+  `Mods.lua.io` wrapper roots relative paths there (absolute paths pass
+  through verbatim — no containment). The loader root is self-located by the
   shell
   from its own DLL path (`<dll-dir>/mod_loader/`, set as the internal
   `MOD_LOADER_DIR` — not an env var/flag). A bare `--` (end-of-options

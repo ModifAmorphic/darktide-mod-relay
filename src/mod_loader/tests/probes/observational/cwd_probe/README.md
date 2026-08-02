@@ -25,7 +25,7 @@ distinguishes generations across hot reloads.
 | `cwd_ffi` | `cwd_ffi=<path>` | primary CWD via LuaJIT FFI + Win32 `GetCurrentDirectoryW` (UTF-16 → UTF-8) |
 | `exe_path` | `exe_path=<path>` | host exe full path via `GetModuleFileNameW(NULL,…)` (NULL module = current process exe) |
 | `cwd_popen` | `cwd_popen=<path>` | cross-check via the engine's raw `io.popen("cd")` (the exact surface popen-using mods hit — Relay wraps `io.open`/`io.lines` but NOT `io.popen`) |
-| `context` | `mod_path=<p> mod_root=<r>` | the eventual chdir targets — `Mods._mod_path` (the boundary) + `Mods._mod_root` (the mods dir) |
+| `context` | `mod_path=<p> mod_root=<r>` | the eventual chdir targets — `Mods._mod_path` (the mod-path config) + `Mods._mod_root` (the mods dir) |
 
 The probe is **read-only**: it installs no hooks, raises no errors (every case
 is `pcall`-contained), and **never** calls `SetCurrentDirectory`,

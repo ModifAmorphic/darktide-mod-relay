@@ -186,7 +186,7 @@ return {
                 end)
 
                 -- 4. context — the eventual chdir targets: the mod-path
-                --    boundary (_mod_path) and the mods root (_mod_root).
+                --    config (_mod_path) and the mods root (_mod_root).
                 --    Guarded with type checks; <nil>/<empty> rendered clearly.
                 case("context", tag, function()
                     local function render(v)

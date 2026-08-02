@@ -213,12 +213,14 @@ if Mods.lua.ffi == nil and type(Mods.original_require) == "function" then
         Mods._relay.log_warn("ffi module unavailable; Mods.lua.ffi remains nil")
     end
 end
--- The mod-path boundary (RELAY_MOD_PATH). _mod_path is the dir containing a
+-- The mod path (RELAY_MOD_PATH). _mod_path is the dir containing a
 -- `mods/` subdir; _mod_root is derived as _mod_path .. "/mods" (what Mods.file.*
--- roots at). Strip only the trailing separator here — do NOT convert backslashes
--- to forward, which would mangle a UNC path (\\server\share -> //server/share)
--- that normpath does NOT recover as UNC on Windows; normpath normalizes
--- downstream. Empty/missing _mod_path => empty _mod_root (mods won't load).
+-- roots at, and what the Mods.lua.io.open/io.lines wrapper roots relative paths
+-- at — absolute paths pass through verbatim, no containment). Strip only the
+-- trailing separator here — do NOT convert backslashes to forward, which would
+-- mangle a UNC path (\\server\share -> //server/share) that normpath does NOT
+-- recover as UNC on Windows; normpath normalizes downstream. Empty/missing
+-- _mod_path => empty _mod_root (mods won't load).
 Mods._mod_path = RELAY_MOD_PATH or ""
 local _mp = Mods._mod_path
 if _mp ~= "" then
