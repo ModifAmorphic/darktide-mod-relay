@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.6.1...v1.0.0) (2026-08-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* Mod Relay 1.0.0 ([#20](https://github.com/ModifAmorphic/darktide-mod-relay/issues/20))
+
+### Features
+
+* Mod Relay 1.0.0 ([#20](https://github.com/ModifAmorphic/darktide-mod-relay/issues/20)) ([91afaae](https://github.com/ModifAmorphic/darktide-mod-relay/commit/91afaaeb5ebd6914a14941b7d689c57688d1b3d7))
+
 ## [0.6.1](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.6.0...v0.6.1) (2026-07-28)
 
 
