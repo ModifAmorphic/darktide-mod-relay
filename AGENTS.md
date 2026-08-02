@@ -72,11 +72,11 @@ src/                Mod Relay — the injected modding runtime + injector
                       one diagnostic if unavailable); init.lua also owns the
                       OPTIONAL Lua print tee (the process-lifetime, non-stacking
                       print/__print wrapper that copies Lua print output into
-                      relay.log when --lua-logs/RELAY_LUA_LOGS=1 — retires the
+                      relay.log when --log-lua/RELAY_LOG_LUA=1 — retires the
                       trampoline's private __mod_relay_lua_log_sink temp global
                       before its idempotency guard; originals stay authoritative;
-                      covered by tests/test_lua_logs.lua + the
-                      tests/probes/observational/lua_logs_probe/ live probe); lifecycle.lua is the
+                      covered by tests/test_log_lua.lua + the
+                      tests/probes/observational/log_lua_probe/ live probe); lifecycle.lua is the
                       bootstrap coordinator + the direct closure-wraps
                       (BootStateRequireGameScripts._state_update,
                       StateGame.update, GameStateMachine._change_state exit/enter
@@ -169,10 +169,11 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
 - **Launcher CLI** is flag-based (**flag > env var > default**; `--game-binary`
   is the only required flag; the shell DLL is hardcoded next to the launcher
   and self-locates the mod loader). `--mod-path` (env `RELAY_MOD_PATH`)
-  is the user-controlled mod-path **boundary** — a directory that *contains*
+  is the user-controlled mod path — a directory that *contains*
   a `mods/` subdirectory (DMF + user mods live at `<mod_path>/mods/`); the
-  loader derives `Mods._mod_root` as `<mod_path>/mods` and contains raw
-  `Mods.lua.io` reads at `_mod_path`. The loader root is self-located by the
+  loader derives `Mods._mod_root` as `<mod_path>/mods` and the
+  `Mods.lua.io` wrapper roots relative paths there (absolute paths pass
+  through verbatim). The loader root is self-located by the
   shell
   from its own DLL path (`<dll-dir>/mod_loader/`, set as the internal
   `MOD_LOADER_DIR` — not an env var/flag). A bare `--` (end-of-options
@@ -182,16 +183,18 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   flag-looking token after `--` is a raw game arg. No `--` is the legacy
   exe-only launch. `--version` prints the build-injected product version (read
   from `.release-please-manifest.json` at build time) and exits — callers like
-  Curator use it for version comparison. `--lua-logs` (env `RELAY_LUA_LOGS=1`,
+  Curator use it for version comparison. `--log-lua` (env `RELAY_LOG_LUA=1`,
   exact value `1` only; default off) is a value-less switch that tees Lua
-  `print`/`__print` output into `relay.log` as `INFO lua-print:` lines (a tee,
+  `print`/`__print` output into `relay.log` as `INFO lua:` lines (a tee,
   never a redirect — console stays authoritative); the launcher canonicalizes
-  the child env to `1` or removes it. `--skip-splash` (env `RELAY_SKIP_SPLASH=1`,
+  the child env to `1` or removes it. `--log-append` (env `RELAY_LOG_APPEND=1`,
+  same value-less/canonical-child-env policy) opens `relay.log` in append mode
+  instead of the default truncate (fresh file per launch). `--skip-splash` (env `RELAY_SKIP_SPLASH=1`,
   exact value `1` only; default off) is a value-less switch that skips the
   `StateSplash` intro splash state (advances directly to `StateTitle` without
   opening the splash view — a loader-side `on_enter` wrap that takes the
   engine's own skip branch cleanly); same canonical child-env policy as
-  `--lua-logs`. See
+  `--log-lua`. See
   `docs/architecture/MOD-RELAY.md` → `launcher/`
   for the full flag/env/default table + the env-var contract.
 - **Shell log** is `relay.log`, structured + level-filtered via `RELAY_LOG_LEVEL`
@@ -206,10 +209,10 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   `%APPDATA%\Fatshark\Darktide\console_logs\` on Windows, or
   `<compatdata>/pfx/drive_c/users/steamuser/AppData/Roaming/Fatshark/Darktide/console_logs/`
   under Proton) — NOT to `relay.log` and NOT to the Proton `steam-$APPID.log`
-  (Wine/Proton diagnostics only). With `--lua-logs`/`RELAY_LUA_LOGS=1` on,
+  (Wine/Proton diagnostics only). With `--log-lua`/`RELAY_LOG_LUA=1` on,
   Relay additionally copies `print`/`__print` output into `relay.log` as
-  `INFO lua-print:` lines (the console log stays complete/authoritative; it is a
-  tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua-print`
+  `INFO lua:` lines (the console log stays complete/authoritative; it is a
+  tee, not a redirect). `--log-level warn`/`error` filters the `INFO lua`
   lines out of `relay.log` while the console log is unaffected. See
   `docs/reference/relay/logging.md` for the normative logging contract
   (destinations, line/lifecycle, tee boundary, argument rendering,
@@ -266,6 +269,9 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
 - `docs/reference/relay/logging.md` — the normative Mod Relay logging contract
   (destinations, the `relay.log` line/lifecycle, and the optional Lua print
   tee).
+- `docs/reference/relay/shell.md` — the normative injected-shell contracts (the
+  two required hooks, the pcall#1 trampoline game-safety invariants, the two
+  trampoline-baked roots, the deliberately-not-hooked discovery anchor).
 - `docs/reference/darktide/darktide-binary.md` — validated game-binary constraints.
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing
   modding ecosystem the runtime patch replaces.
@@ -344,7 +350,7 @@ affects repo structure, build, architecture, or ops, update:
   root links to it.
 - **`docs/architecture/`** for any architecture change.
 - **`docs/reference/`** — categorized: `relay/` (Mod Relay-owned normative
-  contracts: logging), `darktide/` (game-binary facts),
+  contracts: logging, the injected shell), `darktide/` (game-binary facts),
   `community-tools/` (existing modding ecosystem).
 
 Then ensure `make build/check/test` + clippy pass. **Outdated docs in a PR are

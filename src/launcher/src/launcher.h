@@ -14,8 +14,7 @@
  * CreateProcessA's lpCommandLine ceiling: the documented max is 32,767
  * characters INCLUDING the terminating NUL (so ~32,766 usable). A command
  * line that would exceed it is unlaunchable on Windows regardless, so the
- * builder rejects it before any process is created. Shared by main(), the
- * command-line builder, and the injection tests, so it lives here.
+ * builder rejects it before any process is created.
  */
 #define RELAY_CMDLINE_MAX 32767
 
@@ -44,7 +43,8 @@ typedef struct {
     const char *steam_app_id;     /* default: 1361210                           */
     const char **game_arguments;  /* no env/default: borrowed `--` tail or NULL */
     int          game_argument_count;
-    int          lua_logs_enabled; /* default off (RELAY_LUA_LOGS=1 or --lua-logs) */
+    int          log_lua_enabled;    /* default off (RELAY_LOG_LUA=1 or --log-lua)      */
+    int          log_append_enabled; /* default off (RELAY_LOG_APPEND=1 or --log-append) */
     int          skip_splash_enabled; /* default off (RELAY_SKIP_SPLASH=1 or --skip-splash) */
 } relay_config;
 
@@ -66,7 +66,8 @@ typedef struct {
     const char **game_arguments;  /* borrowed argv tail after `--` (NULL if none) */
     int          game_argument_count;
     int          show_version;  /* set by the value-less --version flag        */
-    int          lua_logs_enabled; /* set by the value-less --lua-logs flag    */
+    int          log_lua_enabled;    /* set by the value-less --log-lua flag     */
+    int          log_append_enabled; /* set by the value-less --log-append flag  */
     int          skip_splash_enabled; /* set by the value-less --skip-splash flag */
 } relay_parsed_args;
 

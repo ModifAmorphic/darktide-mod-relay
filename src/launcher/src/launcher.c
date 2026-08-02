@@ -1,58 +1,19 @@
 /*
  * launcher.c — CreateRemoteThread DLL injector.
  *
- * Creates Darktide.exe in a SUSPENDED state, injects relay_shell.dll via
- * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the DLL to signal
- * that the lua_newstate hook is ready, then resumes. Zero files land in the
- * game directory (the DLL is loaded from a staging path).
+ * Creates Darktide.exe SUSPENDED, injects relay_shell.dll via
+ * CreateRemoteThread(LoadLibraryA, <dllpath>), waits for the shell's
+ * hook-ready signal, then resumes — the lua_newstate hook must arm before the
+ * engine's main() runs, and this ordering guarantees it. Zero files land in
+ * the game directory.
  *
- * Flow: CreateProcess(SUSPENDED) → inject → wait for hook-ready → ResumeThread,
- * with the correct Steam appID set in the child environment. The hook-ready
- * wait is essential: DllMain returns instantly (it only spawns a worker), and
- * the worker doesn't enable the lua_newstate hook until after discovery
- * completes — resuming before the hook is ready means the engine calls
- * lua_newstate before the hook is installed, so the hook never fires.
+ * Every setting follows flag > env > default (the canonical table is
+ * print_usage()). Game arguments are the verbatim rest-of-line after `--`,
+ * forwarded to the game as separate argv entries, in order. The injected DLL
+ * is hardcoded to <launcher-dir>\relay_shell.dll.
  *
- * Configuration model: every setting is flag > env > default. Game arguments
- * are NOT a setting — they are the verbatim rest-of-line after `--`.
- *   --game-binary <path>       [RELAY_GAME_BINARY]                REQUIRED
- *   --mod-path <path>          [RELAY_MOD_PATH]                   (optional; trampoline skips if unset)
- *   --log-file <path>          [RELAY_LOG_FILE]                   <launcher-dir>\relay.log
- *   --log-level <level>        [RELAY_LOG_LEVEL]                  info
- *   --steam-app-id <id>        [RELAY_STEAM_APP_ID]               1361210
- *   --version                  (value-less)                      print version and exit
- *   --lua-logs                 (value-less)                      tee Lua print output into relay.log
- *                                                                [RELAY_LUA_LOGS=1] (default: off)
- *   --skip-splash              (value-less)                      skip the StateSplash intro splash
- *                                                                [RELAY_SKIP_SPLASH=1] (default: off)
- *   --                         (end-of-options separator)        rest-of-line forwarded to the game
- *
- * `--` ends Relay's option parsing: EVERY token after it is forwarded to the
- * game verbatim as a separate argv entry, in order, CRT-quoted by the builder
- * and appended after the quoted exe. Relay's own flags must precede `--`; a
- * token that looks like `--version` or `--mod-path` after `--` is a raw game
- * argument, not a Relay flag. The `--` itself is consumed (not forwarded). No
- * `--` (or no tokens after it) yields the legacy exe-only launch byte-for-byte.
- * Example: `--game-binary X -- --lua-heap-mb-size 2048` forwards two game
- * arguments (`--lua-heap-mb-size` and `2048`). There is no env serialization of
- * the game-argument tail — the only input path is the command line after `--`.
- * --version prints the build-injected product version (RELAY_VERSION) and exits.
- *
- * Command-line quoting is ANSI only (the Windows active code page).
- * Darktide.exe arguments are ASCII (relative paths, ini-section identifiers,
- * HTTPS URLs); there is no known Darktide argument that takes a non-ANSI
- * value, so the launcher stays on CreateProcessA. If a non-ANSI value ever
- * needs forwarding, the launcher must widen to CreateProcessW (a separate
- * change). The full command line is capped at RELAY_CMDLINE_MAX (32,767 chars
- * incl. NUL — the CreateProcessA ceiling); an oversize line is rejected before
- * any process is created.
- *
- * The injected DLL is hardcoded to <launcher-dir>\relay_shell.dll (the shell
- * self-locates the mod loader from its own path) — NOT configurable.
- *
- * Windows native: build with cl.exe or x86_64-w64-mingw32-gcc.
- * Proton: build the launcher for Windows (mingw) and run it under Wine inside
- * the Steam Proton prefix (see docs/architecture/MOD-RELAY.md).
+ * Full flow + CLI table, and the timing/quoting/ANSI/ceiling hazards:
+ * docs/architecture/MOD-RELAY.md (launcher/) + src/README.md (Launcher CLI).
  */
 #include "launcher.h"
 #include <stdio.h>
@@ -78,7 +39,8 @@
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
-#define ENV_LUA_LOGS     "RELAY_LUA_LOGS"   /* exact value "1" enables the lua-print sink */
+#define ENV_LOG_LUA      "RELAY_LOG_LUA"    /* exact value "1" enables the lua-print sink */
+#define ENV_LOG_APPEND   "RELAY_LOG_APPEND" /* exact value "1" opens relay.log in append mode */
 #define ENV_SKIP_SPLASH  "RELAY_SKIP_SPLASH" /* exact value "1" enables the StateSplash skip */
 
 /* Named event for the launcher<->shell hook-ready handshake. Created
@@ -393,8 +355,9 @@ static int read_env(const char *env_name, char *out, size_t outsz) {
 
 /* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
  * empty, "0", "true", whitespace, oversized (would truncate the probe buffer),
- * and all other values return 0. This is the exact-match policy for the
- * value-less RELAY_LUA_LOGS switch: only the canonical "1" enables. */
+ * and all other values return 0. This is the exact-match policy shared by the
+ * value-less switches (RELAY_LOG_LUA / RELAY_LOG_APPEND / RELAY_SKIP_SPLASH):
+ * only the canonical "1" enables. */
 static int env_is_exact_one(const char *env_name) {
     char buf[16];
     DWORD n = GetEnvironmentVariableA(env_name, buf, sizeof(buf));
@@ -458,29 +421,28 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
 
         if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) return -2;
 
-        /* --version: value-less flag. Does NOT consume the following token
-         * (so {"--version","--game-binary","G"} still parses --game-binary).
-         * main() prints the build-injected version and exits 0. */
+        /* --version: value-less flag (does not consume the following token). */
         if (strcmp(flag, "--version") == 0) {
             out->show_version = 1;
             continue;
         }
 
-        /* --lua-logs: value-less flag. Does NOT consume the following token
-         * (so {"--lua-logs","--game-binary","G"} still parses --game-binary).
-         * Sets the parsed lua_logs_enabled field; relay_resolve_config turns
-         * it into the resolved cfg->lua_logs_enabled (flag > env > default).
-         * Only recognized before `--` (after `--` it is a raw game arg). */
-        if (strcmp(flag, "--lua-logs") == 0) {
-            out->lua_logs_enabled = 1;
+        /* --log-lua: value-less flag (does not consume the following token;
+         * only recognized before `--`). */
+        if (strcmp(flag, "--log-lua") == 0) {
+            out->log_lua_enabled = 1;
             continue;
         }
 
-        /* --skip-splash: value-less flag. Does NOT consume the following token
-         * (so {"--skip-splash","--game-binary","G"} still parses --game-binary).
-         * Sets the parsed skip_splash_enabled field; relay_resolve_config turns
-         * it into the resolved cfg->skip_splash_enabled (flag > env > default).
-         * Only recognized before `--` (after `--` it is a raw game arg). */
+        /* --log-append: value-less flag (does not consume the following token;
+         * only recognized before `--`). */
+        if (strcmp(flag, "--log-append") == 0) {
+            out->log_append_enabled = 1;
+            continue;
+        }
+
+        /* --skip-splash: value-less flag (does not consume the following
+         * token; only recognized before `--`). */
         if (strcmp(flag, "--skip-splash") == 0) {
             out->skip_splash_enabled = 1;
             continue;
@@ -555,15 +517,20 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
         : (read_env(ENV_STEAM_APP_ID, g_steam_app_id_buf, sizeof(g_steam_app_id_buf))
               ? g_steam_app_id_buf : RELAY_DEFAULT_STEAM_APPID);
 
-    /* lua_logs_enabled: an explicit --lua-logs flag enables; otherwise only the
-     * exact env value RELAY_LUA_LOGS=1 enables. Default off. No negative
+    /* log_lua_enabled: an explicit --log-lua flag enables; otherwise only the
+     * exact env value RELAY_LOG_LUA=1 enables. Default off. No negative
      * switch — unset/empty/"0"/"true"/whitespace/oversized/all-other-values
      * all resolve to disabled. */
-    cfg->lua_logs_enabled = args->lua_logs_enabled ? 1 : env_is_exact_one(ENV_LUA_LOGS);
+    cfg->log_lua_enabled = args->log_lua_enabled ? 1 : env_is_exact_one(ENV_LOG_LUA);
+
+    /* log_append_enabled: an explicit --log-append flag enables; otherwise only
+     * the exact env value RELAY_LOG_APPEND=1 enables. Default off. Same
+     * exact-match policy as log_lua_enabled. */
+    cfg->log_append_enabled = args->log_append_enabled ? 1 : env_is_exact_one(ENV_LOG_APPEND);
 
     /* skip_splash_enabled: an explicit --skip-splash flag enables; otherwise
      * only the exact env value RELAY_SKIP_SPLASH=1 enables. Default off. Same
-     * exact-match policy as lua_logs_enabled. */
+     * exact-match policy as log_lua_enabled. */
     cfg->skip_splash_enabled = args->skip_splash_enabled ? 1 : env_is_exact_one(ENV_SKIP_SPLASH);
 }
 
@@ -595,10 +562,16 @@ static void print_usage(FILE *out, const char *prog) {
         "                         [env: RELAY_STEAM_APP_ID]\n"
         "                         [default: 1361210]\n"
         "\n"
-        "  --lua-logs              include Lua print output in relay.log\n"
+        "  --log-lua              include Lua print output in relay.log\n"
         "                         (value-less; only the exact env value\n"
-        "                         RELAY_LUA_LOGS=1 enables)\n"
-        "                         [env: RELAY_LUA_LOGS=1] [default: off]\n"
+        "                         RELAY_LOG_LUA=1 enables)\n"
+        "                         [env: RELAY_LOG_LUA=1] [default: off]\n"
+        "\n"
+        "  --log-append           append to relay.log instead of overwriting\n"
+        "                         (value-less; only the exact env value\n"
+        "                         RELAY_LOG_APPEND=1 enables)\n"
+        "                         [env: RELAY_LOG_APPEND=1] [default: off\n"
+        "                         (truncates: fresh log per launch)]\n"
         "\n"
         "  --skip-splash           skip the StateSplash intro splash state\n"
         "                         (value-less; only the exact env value\n"
@@ -643,14 +616,12 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* --version: print the build-injected product version and exit 0 — but
-     * only when parse fully succeeded (returned 0). -h/--help (parse returns
-     * -2) and parse errors (unknown flag / missing value, returns -1) are
-     * checked above and take precedence, so e.g. `--version --help` prints help
-     * and `--version --bogus x` errors out. Reaching here also means --version
-     * appeared BEFORE `--` (after `--` it's a raw game arg). Checked before the
-     * required --game-binary check so it works on a bare command line (a caller
-     * like Curator uses this for version comparison). */
+    /* --version prints the build-injected version and exits 0, but only after
+     * a clean parse: -h/--help (parse returns -2) and parse errors (-1) are
+     * handled above and take precedence (so `--version --help` prints help,
+     * `--version --bogus x` errors). It is reached only when --version
+     * appeared before `--` (after `--` it is a raw game arg), and before the
+     * required --game-binary check so it works on a bare command line. */
     if (args.show_version) {
         printf("mod_relay %s\n", RELAY_VERSION);
         return 0;
@@ -679,20 +650,25 @@ int main(int argc, char **argv) {
     if (cfg.mod_path) {
         SetEnvironmentVariableA(ENV_MOD_PATH, cfg.mod_path);
     }
-    /* Canonical child inheritance for the value-less lua-print switch: set the
+    /* Canonical child inheritance for the value-less log switches: set the
      * exact "1" when enabled, or REMOVE it when disabled so a stale parent
      * value can't leak into the child as a non-"1" (the shell snapshots only
      * the exact "1"). Preserves flag > env > default: the resolved boolean is
      * the single source of truth re-exported here. */
-    if (cfg.lua_logs_enabled) {
-        SetEnvironmentVariableA(ENV_LUA_LOGS, "1");
+    if (cfg.log_lua_enabled) {
+        SetEnvironmentVariableA(ENV_LOG_LUA, "1");
     } else {
-        SetEnvironmentVariableA(ENV_LUA_LOGS, NULL);
+        SetEnvironmentVariableA(ENV_LOG_LUA, NULL);
     }
-    /* Same canonical-child-inheritance policy for the value-less splash skip:
-     * set the exact "1" when enabled, or REMOVE it when disabled so a stale
-     * parent value can't leak into the child as a non-"1" (the shell snapshots
-     * only the exact "1"). */
+    /* Same canonical-child policy as RELAY_LOG_LUA above: set the exact "1"
+     * when enabled, remove it when disabled. */
+    if (cfg.log_append_enabled) {
+        SetEnvironmentVariableA(ENV_LOG_APPEND, "1");
+    } else {
+        SetEnvironmentVariableA(ENV_LOG_APPEND, NULL);
+    }
+    /* Same canonical-child policy as RELAY_LOG_LUA above: set the exact "1"
+     * when enabled, remove it when disabled. */
     if (cfg.skip_splash_enabled) {
         SetEnvironmentVariableA(ENV_SKIP_SPLASH, "1");
     } else {

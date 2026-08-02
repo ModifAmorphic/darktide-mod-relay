@@ -24,8 +24,9 @@ return function(runner)
         mock.attach_logger(sb)
         -- file.lua loads path.lua via Mods.load_module at its top; wire it to
         -- the mock loader so the existing setup() keeps working. The wrapper
-        -- does NOT install here (no _mod_path set), so this sandbox tests the
-        -- raw Mods.file.* behavior only.
+        -- installs here too (it keys off _mod_root, which setup() sets), but
+        -- Mods.file.* closes over the raw _io_open captured before the wrapper
+        -- installs, so this sandbox tests the raw Mods.file.* behavior only.
         sb.Mods.load_module = function(name)
             return mock.run_module(name, sb)
         end
@@ -34,9 +35,9 @@ return function(runner)
     end
 
     -- Build a sandbox with the Mods.lua.io wrapper installed. Provides both
-    -- _mod_path (the containment boundary) and _mod_root (the mods dir) on
-    -- Mods, then loads file.lua — which loads path.lua + installs the
-    -- io.open/io.lines wrappers. Returns the sandbox + the io mock.
+    -- _mod_path (the mod-path config) and _mod_root (the mods dir) on Mods,
+    -- then loads file.lua — which loads path.lua + installs the io.open/
+    -- io.lines wrappers (keyed on _mod_root). Returns the sandbox + the io mock.
     local function setup_with_wrapper(files, mod_path)
         local sb = mock.new_sandbox()
         mod_path = mod_path or "C:/staged"
@@ -399,18 +400,19 @@ return function(runner)
     -- Mods.lua.io.open / io.lines wrapper (the raw-io redirection)
     -- ---------------------------------------------------------------------
     --
-    -- The wrapper prepends _mod_root, normalizes via path.normpath, and
-    -- verifies containment within _mod_path. These tests use the
+    -- The wrapper roots relative paths at _mod_root (normalized) and forwards
+    -- absolute paths verbatim. These tests use the
     -- setup_with_wrapper() helper which provides both _mod_path and _mod_root
-    -- and lets file.lua install the wrapper.
+    -- and lets file.lua install the wrapper (keyed on _mod_root).
 
     runner.register("io wrapper: resolves the DMF ./../mods/<mod>/<rest> convention", function()
         -- The strikamap-style data load: a mod opens "./../mods/strikemap/maps/foo.lua".
-        -- The wrapper prepends _mod_root (C:/staged/mods), normalizes
-        -- (collapsing the ./../mods back to _mod_root/strikemap/maps/foo.lua),
-        -- and verifies containment within _mod_path (C:/staged). The mock io
-        -- stages the file at the forward-slash form; the mock's normkey handles
-        -- the platform-native separator the wrapper produces.
+        -- The wrapper prepends _mod_root (C:/staged/mods), normalizes via
+        -- normpath (collapsing the ./../mods back to
+        -- _mod_root/strikemap/maps/foo.lua), and forwards to the underlying
+        -- io.open. The mock io stages the file at the forward-slash form; the
+        -- mock's normkey handles the platform-native separator the wrapper
+        -- produces.
         local files = { ["C:/staged/mods/strikemap/maps/foo.lua"] = "map geometry" }
         local sb, iot = setup_with_wrapper(files)
         local f, err = sb.Mods.lua.io.open("./../mods/strikemap/maps/foo.lua")
@@ -427,46 +429,26 @@ return function(runner)
         f:close()
     end)
 
-    runner.register("io wrapper: rejects traversal outside _mod_path", function()
-        -- ../../../Windows/System32/config/SAM from _mod_root (C:/staged/mods)
-        -- resolves to C:/Windows/System32/config/SAM — outside _mod_path
-        -- (C:/staged). The wrapper must return nil, err and NOT call the
-        -- underlying io.open with the traversal path.
-        local opened_with = nil
-        local files = {}
-        local sb = mock.new_sandbox()
-        sb.Mods = {
-            lua = {},
-            _mod_path = "C:/staged",
-            _mod_root = "C:/staged/mods",
-        }
-        local base_io = mock.make_io(files)
-        sb.Mods.lua.io = {
-            open = function(p, m) opened_with = p; return base_io.open(p, m) end,
-            lines = base_io.lines,
-        }
-        sb.Mods.lua.loadstring = sb.loadstring
-        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
-        sb.__print = function() end
-        mock.run_module("file", sb)
-        local f, err = sb.Mods.lua.io.open("../../../Windows/System32/config/SAM")
-        runner.assert_nil(f, "traversal must be rejected with nil")
-        runner.assert_eq("path escapes mod path boundary", err,
-            "rejection error must name the boundary")
-        runner.assert_nil(opened_with,
-            "the underlying io.open must NOT receive the traversal path")
-    end)
-
-    runner.register("io wrapper: rejects NUL byte in path (defense-in-depth, matching resolve())", function()
-        -- resolve() rejects NUL ("would truncate the path at the OS boundary");
-        -- the wrapper mirrors this so a crafted path can't slip a truncation
-        -- past the containment check. The underlying io must NOT be called.
+    runner.register("io wrapper: roots + forwards relative traversal paths without containment", function()
+        -- Containment was removed: a relative traversal path is rooted at
+        -- _mod_root, normpath'd, and FORWARDED to the underlying io.open —
+        -- NOT rejected. From _mod_root C:/staged/mods, the traversal
+        -- "../../Windows/System32/config/SAM" normpaths to the Windows dir.
+        -- Compute the expected path via path.normpath so the assertion is
+        -- platform-correct (backslashes on Windows, forward on Linux — matching
+        -- what the wrapper produces). The underlying io.open receives the rooted
+        -- path and misses there (normal io.open failure shape); no nil,err
+        -- rejection occurs.
+        local path_mod = mock.run_module("path", mock.new_sandbox())
+        local mod_root = "C:/staged/mods"
+        local rel = "../../Windows/System32/config/SAM"
+        local expected = path_mod.normpath(mod_root .. "/" .. rel)
         local opened_with = nil
         local sb = mock.new_sandbox()
         sb.Mods = {
             lua = {},
             _mod_path = "C:/staged",
-            _mod_root = "C:/staged/mods",
+            _mod_root = mod_root,
         }
         local base_io = mock.make_io({})
         sb.Mods.lua.io = {
@@ -477,26 +459,24 @@ return function(runner)
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
         mock.run_module("file", sb)
-        local f, err = sb.Mods.lua.io.open("foo\0bar")
-        runner.assert_nil(f, "NUL-byte path must be rejected with nil")
-        runner.assert_eq("nul byte in path", err, "rejection error must name NUL")
-        runner.assert_nil(opened_with,
-            "the underlying io.open must NOT receive the NUL-byte path")
+        local f, err = sb.Mods.lua.io.open(rel)
+        runner.assert_eq(expected, opened_with,
+            "underlying io.open must receive the normpath-resolved rooted path (rooted + forwarded)")
+        runner.assert_nil(f, "the file is not staged, so the underlying io.open returns nil (normal miss)")
+        runner.assert_truthy(err ~= nil, "the miss carries io.open's own err string (the wrapper did not reject)")
     end)
 
-    runner.register("io wrapper: allows sibling-prefix within _mod_path (boundary = _mod_path, not _mod_root)", function()
-        -- ./../mods_evil/foo from _mod_root (C:/staged/mods) resolves to
-        -- C:/staged/mods_evil/foo. This is OUTSIDE _mod_root (C:/staged/mods)
-        -- but INSIDE _mod_path (C:/staged). Containment is at _mod_path only
-        -- (no per-mod isolation); the wrapper must ALLOW it. Whether the open
-        -- then succeeds depends on whether the file is staged (normal io.open
-        -- failure shape on a miss). This test stages the file and verifies
-        -- the open reaches it.
+    runner.register("io wrapper: sibling-prefix path resolves + forwards (rooting only)", function()
+        -- ./../mods_evil/foo from _mod_root (C:/staged/mods) normpaths to
+        -- C:/staged/mods_evil/foo. The wrapper roots + forwards the path;
+        -- whether the open then succeeds depends on whether the file is staged
+        -- (normal io.open failure shape on a miss). This test stages the file
+        -- and verifies the open reaches it.
         local files = { ["C:/staged/mods_evil/foo.lua"] = "sibling content" }
         local sb = setup_with_wrapper(files)
         local f, err = sb.Mods.lua.io.open("./../mods_evil/foo.lua")
         runner.assert_not_nil(f,
-            "sibling-prefix within _mod_path must be allowed (boundary is _mod_path); got err: " .. tostring(err))
+            "sibling-prefix path must resolve + forward (rooting only); got err: " .. tostring(err))
         runner.assert_eq("sibling content", f:read("*all"))
         f:close()
     end)
@@ -511,16 +491,76 @@ return function(runner)
         runner.assert_eq({ "alpha", "beta" }, collected)
     end)
 
-    runner.register("io wrapper: rejects traversal on io.lines too", function()
-        local sb = setup_with_wrapper({})
-        -- io.lines that escapes returns nil, err (the wrapper mirrors the
-        -- nil,err shape on both surfaces). A non-escaping miss would raise
-        -- (the mock io.lines raises on not-found); the rejection must happen
-        -- before the mock is reached, so no raise.
-        local ok, f, err = pcall(sb.Mods.lua.io.lines, "../../../Windows/System32/foo")
-        runner.assert_eq(true, ok, "io.lines rejection must not raise (returns nil, err)")
-        runner.assert_nil(f, "io.lines rejection returns nil iterator")
-        runner.assert_eq("path escapes mod path boundary", err)
+    runner.register("io wrapper: io.lines forwards rooted traversal paths without containment", function()
+        -- Mirror of the io.open traversal test: io.lines forwards the rooted/
+        -- normpath'd traversal path to the underlying io.lines — NOT rejected.
+        -- io.lines returns an iterator (not nil,err), so the recording mock
+        -- captures what the underlying io.lines RECEIVED. The underlying mock
+        -- io.lines raises on a not-found path; since the wrapper forwarded
+        -- (did not reject), that raise propagates from the underlying io.lines.
+        local path_mod = mock.run_module("path", mock.new_sandbox())
+        local mod_root = "C:/staged/mods"
+        local rel = "../../somewhere/data.lst"
+        local expected = path_mod.normpath(mod_root .. "/" .. rel)
+        local lines_with = nil
+        local sb = mock.new_sandbox()
+        sb.Mods = {
+            lua = {},
+            _mod_path = "C:/staged",
+            _mod_root = mod_root,
+        }
+        local base_io = mock.make_io({})
+        sb.Mods.lua.io = {
+            open = base_io.open,
+            lines = function(p, ...) lines_with = p; return base_io.lines(p, ...) end,
+        }
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function() end
+        mock.run_module("file", sb)
+        local ok = pcall(sb.Mods.lua.io.lines, rel)
+        runner.assert_eq(false, ok,
+            "underlying io.lines raises on the unstaged forwarded path (no wrapper rejection)")
+        runner.assert_eq(expected, lines_with,
+            "underlying io.lines must receive the normpath-resolved rooted path")
+    end)
+
+    runner.register("io wrapper: absolute paths pass through verbatim (raw-io semantics)", function()
+        -- The Scores-mod class regression guard: mods persist to absolute paths
+        -- outside <mod_path> (e.g. %APPDATA%\...\scores_history\v1\<ts>.lua).
+        -- The wrapper must forward an absolute path VERBATIM — no _mod_root
+        -- prefix, no normalization, no separator rewrite. Stage nothing; use a
+        -- recording open to capture exactly what the underlying io.open got.
+        -- Both a forward-slash absolute path and a backslash absolute path are
+        -- covered (backslashes preserved on the latter).
+        local opened = {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {
+            lua = {},
+            _mod_path = "C:/staged",
+            _mod_root = "C:/staged/mods",
+        }
+        local base_io = mock.make_io({})
+        sb.Mods.lua.io = {
+            open = function(p, m) opened[#opened + 1] = { p = p, m = m }; return base_io.open(p, m) end,
+            lines = base_io.lines,
+        }
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function() end
+        mock.run_module("file", sb)
+        -- Forward-slash absolute path (the Scores APPDATA write):
+        local fwd = "C:/Users/example/AppData/Roaming/Fatshark/Darktide/scores_history/v1/123.lua"
+        sb.Mods.lua.io.open(fwd, "w")
+        -- Backslash absolute path forwarded with backslashes preserved:
+        local bwd = "C:\\Users\\example\\AppData\\Roaming\\Fatshark\\Darktide\\scores_history\\v1\\456.lua"
+        sb.Mods.lua.io.open(bwd, "w")
+        runner.assert_eq(2, #opened, "both absolute opens must reach the underlying io.open")
+        runner.assert_eq(fwd, opened[1].p,
+            "forward-slash absolute path must be forwarded verbatim (no rooting/normalization)")
+        runner.assert_eq("w", opened[1].m, "mode forwarded")
+        runner.assert_eq(bwd, opened[2].p,
+            "backslash absolute path must be forwarded verbatim (backslashes preserved)")
     end)
 
     runner.register("io wrapper: internal Mods.file.* is NOT double-wrapped", function()

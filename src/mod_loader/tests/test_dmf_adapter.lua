@@ -8,16 +8,10 @@
 --     writes DMF contract fields directly);
 --   - DMF-required entry-shape validation (success + failure reasons);
 --   - registers the Mods.file observer exactly once per adapter;
---   - installation-aware IO adaptation: a re-fire no-ops ONLY when both the
---     DMFMod table identity AND the exact Relay-installed io_dofile wrapper
---     still match; a genuinely new table adapts once io_dofile is a function;
---     the SAME table whose io_dofile was overwritten (core/io.lua on a reused
---     class table) re-adapts all eight; retire RETAINS the markers; no
---     fabrication when DMF absent;
---   - the eight DMFMod:io_* overrides: exact safe/unsafe routing, path
---     construction + default .lua extension, safe failure return + DMF error
---     logging, unsafe error propagation (no swallow), graceful missing
---     debug/error methods on the mod object.
+--   - installation-aware IO adaptation (table-identity + io_dofile-wrapper
+--     tracking; retire retains the markers; no fabrication when DMF absent);
+--   - the eight DMFMod:io_* overrides (safe/unsafe routing, path construction,
+--     DMF debug/error logging).
 --
 -- The adapter is a plain module (not a class). It writes the manager's physical
 -- DMF-visible fields directly; stock DMF keeps reading them off `Managers.mod`.

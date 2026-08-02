@@ -590,7 +590,7 @@ return function(runner)
         local sb, state = setup()
         -- Stage a REAL CLASS sentinel table (with content) so the identity +
         -- content assertions are non-vacuous (the manager must not replace or
-        -- wipe CLASS across reload; previously this compared nil==nil).
+        -- wipe CLASS across reload).
         local class_sentinel = { ModManager = "pre-existing-entry", tagged = true }
         sb.CLASS = class_sentinel
         stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
@@ -1003,7 +1003,7 @@ return function(runner)
     end)
 
     -- -----------------------------------------------------------------
-    -- _check_reload trigger-detection seam (Finding 2)
+    -- _check_reload trigger-detection seam
     -- -----------------------------------------------------------------
 
     runner.register("hot_reload: _check_reload exists on the class before any mod runs", function()

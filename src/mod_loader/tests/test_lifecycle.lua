@@ -801,7 +801,7 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
-    -- destroy wrapper — final state-exit dispatch before destruction (Finding 3)
+    -- destroy wrapper — final state-exit dispatch before destruction
     --
     -- Contract: when a GameStateMachine with a current named state is destroyed,
     -- exactly one on_game_state_changed("exit", name, object) is dispatched for
@@ -941,7 +941,7 @@ return function(runner)
     end)
 
     runner.register("lifecycle: destroy that internally _change_states produces exactly ONE final exit", function()
-        -- Contract point 9: a destroy that internally changes state must not
+        -- A destroy that internally changes state must not
         -- cause a duplicate exit. The destroy wrapper exits the current state,
         -- then the original destroy's internal _change_state would normally also
         -- exit it — the shared dedup (_claim_exit) suppresses the duplicate.
@@ -975,8 +975,8 @@ return function(runner)
         local gsm = sb.class("GameStateMachine")
         gsm._change_state = function(self, new_name) self._state = { name = new_name } end
         gsm.current_state_name = function(self) return self._state and self._state.name or nil end
-        -- The original destroy internally calls _change_state (which the Step 3
-        -- wrapper would normally exit-dispatch for the outgoing state).
+        -- The original destroy internally calls _change_state (which the
+        -- _change_state wrapper would normally exit-dispatch for the outgoing state).
         gsm.destroy = function(self, ...) self:_change_state("StateExit") end
         sb.Mods.coordinate_bootstrap()
         bsr._state_update(bsr)

@@ -1,7 +1,7 @@
--- lua_logs_probe.mod -- manual live diagnostic (not a harness test; not shipped).
+-- log_lua_probe.mod -- manual live diagnostic (not a harness test; not shipped).
 --
 -- An outer-driven observational probe for Relay's OPTIONAL Lua print tee
--- (--lua-logs / RELAY_LUA_LOGS=1). It emits unique [LUA_LOGS_PROBE] markers
+-- (--log-lua / RELAY_LOG_LUA=1). It emits unique [LOG_LUA_PROBE] markers
 -- through the engine's global `print` and `__print` surfaces, one case per tee
 -- policy: simple print, simple __print, multi-arg (primitive/nil), multiline +
 -- CRLF, literal % / format-looking text, control/NUL/DEL bytes (built safely),
@@ -16,8 +16,8 @@
 --
 -- Install: this scenario ships a complete bundle — its directory is itself the
 -- <mod_path>. Launch directly with
---   --mod-path <path-to-observational/lua_logs_probe>
--- (the bundle's mods/mods.lst already lists exactly `lua_logs_probe`). See
+--   --mod-path <path-to-observational/log_lua_probe>
+-- (the bundle's mods/mods.lst already lists exactly `log_lua_probe`). See
 -- README.md in the scenario root for launch variants, expected evidence, and
 -- cleanup.
 
@@ -34,13 +34,13 @@ local _type     = type
 local _char     = string.char
 local _rep      = string.rep
 
-local PREFIX   = "[LUA_LOGS_PROBE]"
-local LOG_PATH = "lua_logs_probe/lua_logs_probe.log"
+local PREFIX   = "[LOG_LUA_PROBE]"
+local LOG_PATH = "log_lua_probe/log_lua_probe.log"
 
 -- Process-lifetime load index (survives hot reload via _G, same Lua state). Each
 -- generation's init bumps it, so a marker's load=N aligns to one generation in
 -- relay.log — the basis of the no-duplicate-capture check.
-local LOAD_KEY = "_RELAY_LUA_LOGS_PROBE_LOAD"
+local LOAD_KEY = "_RELAY_LOG_LUA_PROBE_LOAD"
 if _type(_G[LOAD_KEY]) ~= "number" then _G[LOAD_KEY] = 0 end
 local function load_index()
     _G[LOAD_KEY] = _G[LOAD_KEY] + 1

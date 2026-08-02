@@ -2,7 +2,7 @@
  * test_steam_env.c — Unit tests for launcher's Steam environment setup.
  *
  * Tests that set_steam_env(app_id) correctly sets both SteamAppId and
- * SteamGameId to the supplied app id (was hardcoded; now caller-provided).
+ * SteamGameId to the supplied app id.
  */
 #include "test_runner.h"
 #include "../launcher/src/launcher.h"
@@ -54,7 +54,7 @@ void test_both_set_identical(void) {
 }
 
 void test_custom_appid_propagated(void) {
-    /* The new signature must forward an arbitrary id, not just the Darktide
+    /* set_steam_env must forward an arbitrary id, not just the Darktide
      * default — this is what makes steam_app_id configurable. */
     cleanup_env();
     set_steam_env("999111");

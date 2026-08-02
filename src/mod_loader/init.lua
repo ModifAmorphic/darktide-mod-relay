@@ -1,91 +1,44 @@
 -- init.lua — the mod loader entry.
 --
--- Runs at pcall#1 in engine-context (delivered by the runtime trampoline),
--- BEFORE main.lua executes. Captures the engine's Lua facilities before the
--- engine strips them from globals (~pcall#6), bootstrap-loads the Relay
--- modules from the loader root, wraps global require, and exposes the
--- bootstrap coordinator. The class registry install, boot wrapping, and mod
--- loading fire LATER, deferred via the require bridge as main.lua runs.
+-- Runs at pcall#1 in engine-context (BEFORE main.lua) to capture the engine's
+-- Lua facilities before they're stripped (~pcall#6), wrap global require,
+-- install the optional lua-print tee, and expose the bootstrap coordinator.
+-- Class registry install, boot wrapping, and mod loading fire LATER, deferred
+-- via the require bridge as main.lua runs.
 --
--- Two roots (globals set by the C trampoline before opening this entry):
---   - MOD_LOADER_DIR       — runtime-controlled, INTERNAL (trampoline-set, not
---                            a user env var/flag). This file + its modules
---                            (file/class_registry/lifecycle/require_bridge +
---                            mod_manager + dmf_adapter + path) live here.
---   - RELAY_MOD_PATH   — user/mod-manager-controlled. The mod-path
---                            BOUNDARY: a directory that contains a `mods/`
---                            subdirectory. DMF + user mods + mods.lst live at
---                            <mod_path>/mods/. Mods.file.* roots at
---                            Mods._mod_root (= _mod_path .. "/mods"); the
---                            Mods.lua.io wrapper contains reads at _mod_path.
---   - MOD_RELAY_VERSION — runtime-controlled, INTERNAL one-shot handoff of the
---                         manifest-derived product version. Snapshotted below
---                         and immediately retired; it is not a community API.
---   - RELAY_SKIP_SPLASH — runtime-controlled, INTERNAL one-shot handoff of the
---                         --skip-splash / RELAY_SKIP_SPLASH=1 opt-in. Snapshotted
---                         below into Mods._relay.skip_splash and immediately
---                         retired; it is not a community API.
---
--- The mod-path boundary contract:
---   - Mods._mod_path  = RELAY_MOD_PATH (the boundary; parent of `mods/`).
---   - Mods._mod_root  = _mod_path .. "/mods" (the mods dir; what Mods.file.*
---                       roots at — unchanged semantics for the internal ops).
--- Splitting the two lets the Mods.lua.io wrapper contain raw io.open/io.lines
--- reads at _mod_path (so DMF's "./../mods/<mod>/<rest>" convention resolves
--- correctly) while Mods.file.* continues to root at _mod_root as before.
---
--- Module bootstrap order: file -> class_registry -> lifecycle -> require_bridge.
--- Each module assumes its dependencies are already on Mods/_G. mod_manager is
--- loaded LATER by the lifecycle bootstrap (it calls class(), which only exists
--- once the class registry installs during main.lua's requires); mod_manager
--- in turn loads dmf_adapter (the stock-DMF compatibility boundary) at its
--- module top before class("ModManager").
+-- Full contract (pcall#1 capture, the deferred bootstrap, the captured
+-- surface, the trampoline-baked globals, the print tee):
+-- docs/architecture/MOD_LOADER-DMF.md.
 
--- 0. Retire the optional lua-log sink temp global (one-shot C handoff). The C
---    trampoline publishes __mod_relay_lua_log_sink — when the user opts in via
---    RELAY_LUA_LOGS=1 — immediately before running this chunk, and expects the
---    loader to consume it here and clear it. This MUST run before the _loaded
---    idempotency guard below so a repeated/partial entry retires a newly-
---    presented global even when the guard bails early (the trampoline is
---    one-shot, but the retirement is defensive). Only a function value is a
---    valid sink; any other value (absent/nil, or a stray non-function) is
---    retired and treated as no sink. The snapshot stays local + private — it is
---    never published under Mods, _G, or any community surface; only the wrapper
---    closures below retain it.
+-- 0. Retire the optional lua-log sink temp global (one-shot C handoff). MUST
+--    run before the _loaded idempotency guard below so a repeated/partial entry
+--    still retires a newly-presented global. Only a function value is a valid
+--    sink; anything else is retired and treated as no sink. The snapshot stays
+--    private — never published under Mods/_G; only the wrapper closures below
+--    retain it.
 local _lua_log_sink
 if type(__mod_relay_lua_log_sink) == "function" then
     _lua_log_sink = __mod_relay_lua_log_sink
 end
 __mod_relay_lua_log_sink = nil
 
--- 1. Idempotency guard. The C trampoline is one-shot, but if this entry ever
--- re-ran after global require is wrapped, recapturing `Mods.original_require
--- = require` would grab the WRAPPED function and clobber the saved original,
--- recursing on the next require. Bail if we've already loaded.
+-- 1. Idempotency guard. If this entry re-ran after require is wrapped,
+-- recapturing `Mods.original_require = require` would grab the WRAPPED function
+-- and clobber the saved original, recursing on the next require.
 if Mods and Mods._loaded then
     return true
 end
 
 -- 2. Capture the engine's real facilities (present at pcall#1, before the
--- engine strips stdlib ~pcall#6). These are the surfaces DMF consumes:
---   - Mods.original_require  (DMF core/require.lua uses it as the unhooked req)
---   - Mods.require_store     (DMF hook_require iterates per-path instances)
---   - Mods.lua.{io,loadstring,os,ffi}  (DMF deep-copies io/loadstring; its
---       debug modules read os/ffi)
---   - __print                (DMF aliases the engine print via __print)
+-- engine strips stdlib ~pcall#6).
 Mods = Mods or {}
--- Relay-private bootstrap snapshot. Keep the narrow capabilities needed by
--- later loader modules without publishing the debug library or retaining the
--- temporary C-trampoline global. The manager validates version content before
--- using it; malformed metadata must not abort this entry.
+-- Relay-private bootstrap snapshot. The manager validates version content
+-- before using it; malformed metadata must not abort this entry.
 Mods._relay = Mods._relay or {}
 Mods._relay.version = MOD_RELAY_VERSION
 MOD_RELAY_VERSION = nil
--- Snapshot the optional StateSplash skip (trampoline-set global from
--- --skip-splash / RELAY_SKIP_SPLASH=1). Nil-safe: the global may be unset or
--- empty (disabled). This is the single point that turns the trampoline global
--- into a loader-internal boolean; lifecycle.lua reads it once at module-eval
--- time. Internal/private — never consumed by community code.
+-- Snapshot the optional StateSplash skip (trampoline-set global). Nil-safe.
+-- lifecycle.lua reads this once at module-eval time. Internal/private.
 Mods._relay.skip_splash = (RELAY_SKIP_SPLASH == "1")
 RELAY_SKIP_SPLASH = nil
 do
@@ -102,35 +55,24 @@ Mods.require_store = {}
 Mods.lua = Mods.lua or {}
 Mods.lua.loadstring = loadstring
 Mods.lua.io = io
--- __print is captured here (ahead of the os/ffi block) so the FFI diagnostic
--- below uses the same print surface as the rest of the loader.
+-- Captured before the os/ffi block so the FFI diagnostic below uses the same
+-- print surface as the rest of the loader.
 __print = __print or print
 
--- Install the optional lua-log tee (process-lifetime, non-stacking). With a
--- valid sink (snapshotted + retired above), wrap the engine's global print and
--- __print so every SUCCESSFUL print also reaches the Relay shell log, best
--- effort. The originals stay authoritative: each wrapper calls its own original
--- FIRST with the exact args, propagates any error (capture skipped), and only
--- then — under protected capture — renders the args and hands one string to the
--- private sink. Renderer/sink failures are swallowed; they never change a
--- successful call's results. With no sink, today's behavior is exactly
--- preserved (print untouched; __print = __print or print already resolved).
---
--- A Relay-private marker under Mods._relay makes the wrap idempotent: a
--- partial/repeated entry cannot stack wrappers, and hot reload (which reuses
--- this same Lua state but never re-runs this one-shot entry) neither removes
--- nor reinstalls them. A mod that later replaces global print wins — the
--- wrapper does not fight it. Installed here, ahead of the os/ffi block, so the
--- FFI diagnostic and every later loader module / DMF / user-mod print is tee'd.
+-- Install the optional lua-print tee (process-lifetime, non-stacking). Wraps
+-- global print and __print so every SUCCESSFUL print also reaches the Relay
+-- shell log: the original is called FIRST with exact args and its error
+-- propagates; only then does a protected capture render args and hand one
+-- string to the private sink. Sink/render failures are swallowed — they never
+-- change a successful call's results. With no sink, print is untouched.
+-- Mods._relay._print_tee_installed makes the wrap idempotent: hot reload never
+-- re-runs this entry, and a mod that later replaces print wins (no fight).
 if _lua_log_sink and not Mods._relay._print_tee_installed then
     local _sink = _lua_log_sink
 
-    -- Capture the exact stdlib functions the wrappers need, ONCE, at install.
-    -- The wrappers are process-lifetime and must keep working even if later
-    -- engine stripping (~pcall#6) or community mutation replaces or removes the
-    -- globals. Each wrapper closes over these locals, so it never does a dynamic
-    -- global lookup for pcall/select/unpack/type/tostring/table.concat — the
-    -- original is the only other private upvalue.
+    -- Capture the stdlib functions ONCE at install. The wrappers are process-
+    -- lifetime and close over these locals so they keep working even if later
+    -- engine stripping or community mutation replaces/removes the globals.
     local _pcall = pcall
     local _select = select
     local _unpack = unpack
@@ -138,14 +80,12 @@ if _lua_log_sink and not Mods._relay._print_tee_installed then
     local _tostring = tostring
     local _concat = table.concat
 
-    -- Render one print argument list (n_args values in args[1..n_args]) into a
-    -- single tab-delimited string for the sink. Strings pass through byte-for-
-    -- byte; numbers/booleans/nil use ordinary textual forms; tables/functions/
-    -- threads/cdata/userdata use stable type placeholders, so a user __tostring
-    -- metamethod (which the original print already invoked once) is never
-    -- invoked a second time. An empty arg list renders as "". Multiline content
-    -- is handed through intact — the native sink owns CR/LF splitting,
-    -- control-byte sanitization, and chunking/truncation. No Lua 5.2+ APIs.
+    -- Render one print argument list into a single tab-delimited string.
+    -- Strings/numbers/booleans/nil use textual forms; tables/functions/etc use
+    -- stable type placeholders so a user __tostring metamethod (already invoked
+    -- once by the original print) is never re-invoked. Multiline content passes
+    -- through intact — the native sink owns CR/LF splitting, control-byte
+    -- sanitization, and chunking. No Lua 5.2+ APIs.
     local function _render_args(args, n_args)
         if n_args == 0 then return "" end
         local parts = {}
@@ -167,9 +107,7 @@ if _lua_log_sink and not Mods._relay._print_tee_installed then
             elseif tp == "thread" then
                 parts[i] = "<thread>"
             elseif tp == "cdata" then
-                -- LuaJIT 2.1: type(ffi.new(...)) == "cdata". Distinct from
-                -- userdata (a different type() return); gets its own placeholder
-                -- so the value is never re-converted and no metamethod runs.
+                -- LuaJIT 2.1: type(ffi.new(...)) == "cdata", distinct from userdata.
                 parts[i] = "<cdata>"
             else
                 parts[i] = "<userdata>"
@@ -178,29 +116,22 @@ if _lua_log_sink and not Mods._relay._print_tee_installed then
         return _concat(parts, "\t")
     end
 
-    -- Run render + sink under one pcall so a failure in EITHER is swallowed
-    -- (never changes a successful print). Takes the materialized args table +
-    -- count so it needs no access to the wrapper's varargs.
+    -- Run render + sink under one pcall so a failure in either is swallowed.
     local function _capture(args, n_args)
         _sink(_render_args(args, n_args))
     end
 
-    -- Lua-5.1-compatible varargs pack: records the EXACT count alongside the
-    -- values so a later _unpack(t, 1, t.n) preserves interior/trailing nils
-    -- (table construction drops nil slots, but unpack with an explicit stop
-    -- index pushes nil for absent integer keys, so cardinality is recovered).
+    -- 5.1-compatible varargs pack: records the count so unpack preserves
+    -- interior/trailing nils.
     local function _pack_n(...)
         return { n = _select("#", ...), ... }
     end
 
-    -- Build a wrapper around one original print surface. The original is called
-    -- DIRECTLY (NOT under pcall): if it throws, evaluation aborts before capture
-    -- is attempted and the error escapes naturally — its value, stack frames,
-    -- and traceback provenance are preserved for any outer pcall/xpcall/debug
-    -- handler (a pcall+rethrow would unwind the original's frame first). On
-    -- success the results are packed with their exact count, protected capture
-    -- runs, and the results are forwarded via _unpack(t, 1, n) so zero,
-    -- interior-nil, and trailing-nil cardinality are all preserved.
+    -- Wrap one original print surface. The original is called DIRECTLY, not under
+    -- pcall: if it throws, the error escapes naturally with its frame + traceback
+    -- intact (a pcall+rethrow would unwind the frame first). On success the
+    -- results are packed with their count, protected capture runs, and results
+    -- are forwarded via unpack(t,1,n) so nil cardinality is preserved.
     local function _make_wrapper(original)
         return function(...)
             local n_args = _select("#", ...)
@@ -216,21 +147,17 @@ if _lua_log_sink and not Mods._relay._print_tee_installed then
     local _print_is_fn = _type(_orig_print) == "function"
     local _dunder_is_fn = _type(_orig_dunder) == "function"
 
-    -- Set the marker FIRST so even a mid-wrap fault can never stack a second
-    -- wrapper on re-entry (Lua is single-threaded; the wrap is synchronous, but
-    -- the guard is defensive against a partial entry that errored later).
+    -- Set the marker FIRST so a mid-wrap fault can never stack a second wrapper.
     Mods._relay._print_tee_installed = true
 
     if _print_is_fn and _dunder_is_fn and _orig_print == _orig_dunder then
-        -- Same surface (e.g. __print was nil and resolved to print above): one
-        -- shared wrapper on both globals — no nested/double capture.
+        -- Same surface: one shared wrapper on both globals (no double capture).
         local _w = _make_wrapper(_orig_print)
         print = _w
         __print = _w
     else
-        -- Distinct or singly-present function surfaces: wrap each function
-        -- around its own original; do not collapse them, and do not touch a
-        -- non-function global (no "repairing" of malformed engine state).
+        -- Distinct/singly-present surfaces: wrap each around its own original; never
+        -- touch a non-function global (no "repairing" of malformed engine state).
         if _print_is_fn then
             print = _make_wrapper(_orig_print)
         end
@@ -240,22 +167,16 @@ if _lua_log_sink and not Mods._relay._print_tee_installed then
     end
 end
 
--- os is captured nil-safe (it may be absent in a stripped engine build). `or`
--- preserves a prior capture if init re-ran.
+-- os may be absent in a stripped build; `or` preserves a prior capture on re-run.
 Mods.lua.os = Mods.lua.os or os
 
--- Shared loader diagnostic logger — published on Mods._relay (loader-private)
--- BEFORE the module-bootstrap loop so every loader module (file/lifecycle/
--- mod_manager, loaded here or later by the lifecycle bootstrap) reads the same
--- helper. Each level emits exactly "{LEVEL} [mod_loader] {message}" (the
--- engine/DMF community shape; single source for ALL loader diagnostics). The
--- print runs under pcall and the message runs through a tostring-under-pcall
--- safe_text, so a bad argument or a print failure can NEVER become a second
--- failure path that breaks loading. Mechanism only — NO level threshold: the
--- loader's prints go to the authoritative console log (unfiltered), and the
--- lua-print tee copies everything at INFO; level filtering is the shell/tee's
--- job, not the loader's. _print resolves to the post-tee __print so loader
--- diagnostics are tee'd when --lua-logs is on.
+-- Shared loader diagnostic logger, published on Mods._relay BEFORE the module
+-- bootstrap loop so every loader module reads the same helper. The print runs
+-- under pcall and the message through safe_text so a bad argument or print
+-- failure can NEVER become a second failure path that breaks loading. Mechanism
+-- only — no level threshold: prints go to the console log unfiltered, and level
+-- filtering is the shell/tee's job. _print is post-tee __print so diagnostics
+-- are tee'd when --log-lua is on.
 do
     local _pcall = pcall
     local _tostring = tostring
@@ -280,12 +201,10 @@ do
 end
 
 -- Publish the engine LuaJIT FFI module at the community contract surface.
--- require("ffi") creates no global in LuaJIT 2.1, so a global grab yields nil;
--- the module is obtained from the pre-wrap original require (NOT the wrapped
--- global, which would record into Mods.require_store and advance the bootstrap
--- coordinator). Guarded + exactly-once (the _loaded guard already prevents
--- re-entry); a failure / nil / non-table degrades to nil with one diagnostic,
--- never aborting the loader.
+-- require("ffi") creates no global in LuaJIT 2.1, so it is obtained from the
+-- PRE-WRAP original require (the wrapped global would record into
+-- require_store and advance the bootstrap coordinator). Degrades to nil with
+-- one diagnostic on failure; never aborts the loader.
 if Mods.lua.ffi == nil and type(Mods.original_require) == "function" then
     local ok, result = pcall(Mods.original_require, "ffi")
     if ok and type(result) == "table" then
@@ -294,16 +213,14 @@ if Mods.lua.ffi == nil and type(Mods.original_require) == "function" then
         Mods._relay.log_warn("ffi module unavailable; Mods.lua.ffi remains nil")
     end
 end
--- The mod-path boundary (RELAY_MOD_PATH). _mod_path is the boundary — the
--- directory that CONTAINS a `mods/` subdir. _mod_root is derived as
--- _mod_path .. "/mods" (the mods dir, what Mods.file.* roots at — unchanged
--- semantics for the existing internal operations). Strip only the trailing
--- separator from _mod_path — do NOT convert backslashes to forward here (that
--- would mangle a UNC path like \\server\share into //server/share, which
--- normpath does NOT recover as UNC on Windows). normpath handles separator
--- normalization downstream (it does its own P:gsub('/', '\\') on Windows and
--- correctly preserves UNC/drive anchors). Empty/missing _mod_path => empty
--- _mod_root (mods won't load; same behavior as before).
+-- The mod path (RELAY_MOD_PATH). _mod_path is the dir containing a
+-- `mods/` subdir; _mod_root is derived as _mod_path .. "/mods" (what Mods.file.*
+-- roots at, and what the Mods.lua.io.open/io.lines wrapper roots relative paths
+-- at — absolute paths pass through verbatim). Strip only the
+-- trailing separator here — do NOT convert backslashes to forward, which would
+-- mangle a UNC path (\\server\share -> //server/share) that normpath does NOT
+-- recover as UNC on Windows; normpath normalizes downstream. Empty/missing
+-- _mod_path => empty _mod_root (mods won't load).
 Mods._mod_path = RELAY_MOD_PATH or ""
 local _mp = Mods._mod_path
 if _mp ~= "" then
@@ -315,24 +232,19 @@ else
 end
 
 local _io = Mods.lua.io
--- Capture the raw io.open for _load_module. file.lua's wrapper (installed when
--- _mod_path is set) replaces Mods.lua.io.open; since _io is a table reference,
--- _io.open would become the wrapper too. Capturing the function directly keeps
--- loader-module reads on the raw surface (the wrapper would double-prefix
--- loader-root paths and break the bootstrap).
+-- Capture the raw io.open for _load_module. file.lua's wrapper replaces
+-- Mods.lua.io.open; since _io is a table reference, _io.open would become the
+-- wrapper too. Capturing the function directly keeps loader-module reads raw
+-- (the wrapper would double-prefix loader-root paths and break bootstrap).
 local _io_open = _io.open
 local _loadstring = Mods.lua.loadstring
 local _pcall = pcall
 local _setfenv = setfenv
 local _getfenv = getfenv
 
--- _load_module — the shared dofile-style loader for Relay modules, rooted at
--- MOD_LOADER_DIR. Reads + compiles + runs the chunk in the entry's env
--- (setfenv(fn, getfenv(1)) so modules share _G with the entry — the engine's
--- globals in production, the test sandbox in tests). Returns (ok, result):
--- ok is true/false; result is the chunk's return value on success or nil on
--- failure. Logs an ERROR line on open/parse/run failure so a mis-staged module
--- is diagnosable in the shell log.
+-- Shared dofile-style loader for Relay modules, rooted at MOD_LOADER_DIR.
+-- Runs the chunk in the entry's env (setfenv so modules share _G) and returns
+-- (ok, result); logs an ERROR on open/parse/run failure.
 local function _load_module(name)
     local base = MOD_LOADER_DIR or ""
     local path = base .. "/" .. name .. ".lua"
@@ -360,16 +272,14 @@ local function _load_module(name)
     return true, rerr
 end
 
--- bootstrap_load — install-only contract for the entry's bootstrap loop.
+-- Install-only contract for the entry's bootstrap loop.
 local function bootstrap_load(name)
     local ok = _load_module(name)
     return ok
 end
 
--- A dofile-style loader so the lifecycle bootstrap can load mod_manager from
--- the loader root AFTER class() exists (mod_manager calls class("ModManager"),
--- which only appears once the class registry installs during main.lua's
--- requires). Returns the chunk's result on success or nil on failure.
+-- Dofile-style loader for the lifecycle bootstrap to load mod_manager from the
+-- loader root AFTER class() exists (mod_manager calls class("ModManager")).
 Mods.load_module = function(name)
     local ok, result = _load_module(name)
     if ok then
@@ -388,9 +298,8 @@ for _, mod in ipairs(modules) do
     end
 end
 
--- 4. Wrap global require. The wrapped require records table results into
--- Mods.require_store (identity-deduped) and calls the lifecycle bootstrap
--- coordinator after every successful require.
+-- 4. Wrap global require (records table results into Mods.require_store and
+-- drives the bootstrap coordinator after each successful require).
 Mods.install_require_bridge()
 
 Mods._relay.log_info("loaded at pcall#1")

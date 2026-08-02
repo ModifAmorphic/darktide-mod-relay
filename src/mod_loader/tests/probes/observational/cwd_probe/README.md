@@ -25,7 +25,7 @@ distinguishes generations across hot reloads.
 | `cwd_ffi` | `cwd_ffi=<path>` | primary CWD via LuaJIT FFI + Win32 `GetCurrentDirectoryW` (UTF-16 → UTF-8) |
 | `exe_path` | `exe_path=<path>` | host exe full path via `GetModuleFileNameW(NULL,…)` (NULL module = current process exe) |
 | `cwd_popen` | `cwd_popen=<path>` | cross-check via the engine's raw `io.popen("cd")` (the exact surface popen-using mods hit — Relay wraps `io.open`/`io.lines` but NOT `io.popen`) |
-| `context` | `mod_path=<p> mod_root=<r>` | the eventual chdir targets — `Mods._mod_path` (the boundary) + `Mods._mod_root` (the mods dir) |
+| `context` | `mod_path=<p> mod_root=<r>` | the eventual chdir targets — `Mods._mod_path` (the mod-path config) + `Mods._mod_root` (the mods dir) |
 
 The probe is **read-only**: it installs no hooks, raises no errors (every case
 is `pcall`-contained), and **never** calls `SetCurrentDirectory`,
@@ -70,8 +70,8 @@ Point `--mod-path` at this scenario root (`<path-to-observational/cwd_probe>`):
 | Variant | Invocation |
 | --- | --- |
 | Default off | `mod_relay.exe --game-binary <exe> --mod-path <path-to-observational/cwd_probe>` |
-| `--lua-logs` on | add `--lua-logs` (so the probe lines also reach `relay.log`) |
-| Env on | `RELAY_LUA_LOGS=1` (and no `--lua-logs`) |
+| `--log-lua` on | add `--log-lua` (so the probe lines also reach `relay.log`) |
+| Env on | `RELAY_LOG_LUA=1` (and no `--log-lua`) |
 | Vanilla | launch the game from Steam (without Relay) — unaffected |
 
 ## Expected evidence
@@ -79,10 +79,10 @@ Point `--mod-path` at this scenario root (`<path-to-observational/cwd_probe>`):
 - **Darktide console log** (`console-*.log`): every `[CWD_PROBE]` line the
   probe printed, regardless of the tee (console remains authoritative and
   unchanged; the tee only adds `relay.log` copies).
-- **`relay.log`** (next to the launcher): when the tee is on (`--lua-logs` /
-  `RELAY_LUA_LOGS=1`), one structured `INFO  lua-print:` line per probe line.
+- **`relay.log`** (next to the launcher): when the tee is on (`--log-lua` /
+  `RELAY_LOG_LUA=1`), one structured `INFO  lua:` line per probe line.
   A captured probe line looks like:
-  `2026-07-25T12:34:56-04:00 INFO  lua-print: [CWD_PROBE] case=cwd_ffi load=1 cwd_ffi=C:\Program Files (x86)\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries`
+  `2026-07-25T12:34:56-04:00 INFO  lua: [CWD_PROBE] case=cwd_ffi load=1 cwd_ffi=C:\Program Files (x86)\Steam\steamapps\common\Warhammer 40,000 DARKTIDE\binaries`
 - **Scenario log** (`<mod_path>/mods/cwd_probe/cwd_probe.log`): every probe
   line (same content as the console) — operator convenience, a persistent
   record that survives console-log truncation at process exit.
@@ -103,8 +103,8 @@ Point `--mod-path` at this scenario root (`<path-to-observational/cwd_probe>`):
 
 | # | Check | Expected result |
 | --- | --- | --- |
-| 1 | **Default off** (no flag/env) | console log + scenario log have the probe markers; `relay.log` has **no** `lua-print:` probe lines (and no `[CWD_PROBE]`). |
-| 2 | **`--lua-logs` on** (or `RELAY_LUA_LOGS=1`) | every probe marker appears once in console **and** once as a `lua-print:` line in `relay.log`. |
+| 1 | **Default off** (no flag/env) | console log + scenario log have the probe markers; `relay.log` has **no** `lua:` probe lines (and no `[CWD_PROBE]`). |
+| 2 | **`--log-lua` on** (or `RELAY_LOG_LUA=1`) | every probe marker appears once in console **and** once as a `lua:` line in `relay.log`. |
 | 3 | **`cwd_ffi == cwd_popen`** | the FFI CWD and the popen CWD agree (same path string). |
 | 4 | **`exe_path` present** | `exe_path` is non-empty (a real path to the host exe). |
 | 5 | **No duplication across reloads** | perform at least **three** clean hot reloads (LEFT Ctrl + LEFT Shift + R). Per generation, each case produces **exactly one** `load=N` set — never duplicates. |

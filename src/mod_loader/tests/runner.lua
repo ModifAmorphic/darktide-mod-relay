@@ -105,7 +105,7 @@ local test_files = {
     "test_hot_reload",
     "test_loader_hardening",
     "test_entry",
-    "test_lua_logs",
+    "test_log_lua",
     "test_negative",
     "test_probes",
 }

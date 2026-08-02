@@ -128,6 +128,9 @@ attests the Windows runtime bundle to each release).
   loader, the IO adaptation, the load timing, the two-path split.
 - `docs/reference/relay/logging.md` — the normative logging contract: the
   destinations, the `relay.log` line/lifecycle, and the optional Lua print tee.
+- `docs/reference/relay/shell.md` — the normative injected-shell contracts: the
+  two required hooks, the pcall#1 trampoline game-safety invariants, the two
+  trampoline-baked roots, the deliberately-not-hooked discovery anchor.
 - `docs/reference/darktide/darktide-binary.md` — the validated game-binary
   constraints (addresses, struct offsets, sandboxed `_G`, discovery methodology).
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing

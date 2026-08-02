@@ -1,20 +1,17 @@
 /*
  * test_quoting.c — Unit tests for relay_build_command_line().
  *
- * Two layers of assertion, as required by the item brief:
+ * Two layers of assertion:
  *
  *   1. Exact-byte spine — assert the built command line equals a hand-written
- *      expected string. This is the deterministic backward-compat backbone
- *      (esp. the zero-arg case, which must be byte-for-byte the legacy
+ *      expected string (the zero-arg case must be byte-for-byte the legacy
  *      "\"%s\"" form).
  *
  *   2. CommandLineToArgvW round-trip oracle — convert the built ANSI line to
  *      wide (CP_ACP; all test values are ASCII so the conversion is lossless),
- *      hand it to the OS's OWN argv parser (CommandLineToArgvW), and assert
- *      it re-parses back to exactly: the exe as argv[0], then each original
- *      game-argument token in order. This is the real correctness check: it
- *      proves the bytes actually round-trip through Windows' CRT parser, not
- *      just through my expectations.
+ *      hand it to the OS's OWN argv parser, and assert it re-parses back to
+ *      exactly: the exe as argv[0], then each original game-argument token in
+ *      order.
  *
  * CommandLineToArgvW implements the same MSVC CRT rules the builder targets,
  * so a passing round-trip is direct evidence the quoting is correct.

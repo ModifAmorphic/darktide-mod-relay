@@ -1,21 +1,11 @@
 /*
  * trampoline.c — pure helpers for the production trampoline.
  *
- * Implementation of the helpers declared in trampoline.h. The trampoline chunk
- * (set MOD_LOADER_DIR + RELAY_MOD_PATH + RELAY_SKIP_SPLASH -> io.open the
- * staged entry -> read -> loadstring -> run) is the proven engine-context
- * entry mechanism (see dllmain.c). The production path uses two roots:
- * the mod loader root (init.lua + its modules — runtime-controlled, self-
- * located by the shell next to the DLL) joined with init.lua into the entry
- * path, plus the mod root (DMF + user mods — user/mod-manager-controlled,
- * optional). trampoline_build_chunk takes both roots, the entry, the
- * build-injected product version, and the splash-skip flag: it sets
- * MOD_LOADER_DIR from the mod loader root, RELAY_MOD_PATH from the mod root
- * (empty string if NULL/empty), hands off the private version value, sets
- * RELAY_SKIP_SPLASH from the flag (empty string when disabled), and bakes the
- * joined entry path into io.open. This file has NO Windows, Lua, or hook
- * dependencies — only string ops — so it compiles directly into both the shell
- * DLL and the C unit-test exes.
+ * Implementation of the helpers declared in trampoline.h. This file has NO
+ * Windows, Lua, or hook dependencies — only string ops — so it compiles
+ * directly into both the shell DLL and the C unit-test exes. The trampoline's
+ * game-safety and two-roots contracts are normative in
+ * docs/reference/relay/shell.md.
  */
 #include "trampoline.h"
 
@@ -23,17 +13,13 @@
 #include <string.h>
 
 /* The trampoline chunk template. The five `%s` receive, in order: the escaped
- * mod loader root (set as MOD_LOADER_DIR — an internal global, NOT a user env
- * var), the escaped mod root (set as RELAY_MOD_PATH — the empty string when
- * the mod root is unset), the complete version assignment value (a quoted,
- * escaped string or nil), the splash-skip token (the literal "1" or "" — a
- * fixed token, not escaped, set as the internal RELAY_SKIP_SPLASH global), and
- * the escaped entry-file path (opened + loaded + run). The chunk returns "OK"
- * or a "FAIL <step>: <err>" status string. Verbatim step order (io.open ->
- * read -> loadstring -> run), guarded at each step so the only way it
- * propagates an error is an unguarded step (e.g. f:read, which the outer pcall
- * then catches and reports as CHUNK PCALL FAILED). These globals are a private
- * bootstrap handoff — not a Lua-facility shim or public compatibility surface. */
+ * mod loader root, the escaped mod root (empty string when unset), the version
+ * assignment value (a quoted escaped string or nil), the splash-skip token
+ * (literal "1" or "", not escaped), and the escaped entry-file path — each
+ * becomes an internal bootstrap global (see trampoline.h). Step order is
+ * io.open -> read -> loadstring -> run, guarded at each step except f:read, so
+ * a read error is the one unguarded failure and surfaces as CHUNK PCALL FAILED
+ * (caught by the outer pcall in trampoline_run). */
 static const char TRAMPOLINE_CHUNK_FMT[] =
     "MOD_LOADER_DIR = \"%s\"\n"
     "RELAY_MOD_PATH = \"%s\"\n"

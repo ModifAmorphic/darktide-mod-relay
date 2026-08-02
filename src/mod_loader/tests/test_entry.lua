@@ -133,10 +133,10 @@ return function(runner)
     end)
 
     runner.register("entry: derives Mods._mod_path + _mod_root from RELAY_MOD_PATH", function()
-        -- The contract: _mod_path is the boundary (parent of mods/), _mod_root
-        -- is derived as _mod_path/mods. Use a distinct boundary so the
+        -- The contract: _mod_path is the config (parent of mods/), _mod_root
+        -- is derived as _mod_path/mods. Use a distinct config so the
         -- derivation is visible (mock.MOD_ROOT is "/mods"; using it as the
-        -- boundary would make _mod_root "/mods/mods" which obscures the test).
+        -- config would make _mod_root "/mods/mods" which obscures the test).
         local sb = mock.new_sandbox()
         sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
         sb.RELAY_MOD_PATH = "/staged"
@@ -145,7 +145,7 @@ return function(runner)
         sb.io = mock.make_io(mock.stage_mod_loader())
         mock.load_module("init", sb)()
         runner.assert_eq("/staged", sb.Mods._mod_path,
-            "_mod_path is the boundary (RELAY_MOD_PATH verbatim, normalized)")
+            "_mod_path is the config (RELAY_MOD_PATH verbatim, normalized)")
         runner.assert_eq("/staged/mods", sb.Mods._mod_root,
             "_mod_root is derived as _mod_path .. '/mods'")
     end)
@@ -225,7 +225,7 @@ return function(runner)
     end)
 
     -- -----------------------------------------------------------------
-    -- FFI module publication (Finding 1)
+    -- FFI module publication
     -- -----------------------------------------------------------------
 
     runner.register("entry: Mods.lua.ffi is the engine FFI module (required via original_require)", function()

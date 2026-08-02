@@ -58,11 +58,6 @@ void test_injection_stub(void) {
     }
     CloseHandle(hDll);
 
-    /* Create the hook-ready event BEFORE injection (the real launcher does
-     * this inside inject_and_resume, but for the test we need to verify the
-     * handshake works. Actually, inject_and_resume creates it internally,
-     * so we just call it and let it do its thing.) */
-
     /* Execute the full injection flow with a 30-second timeout. Build the
      * child command line (exe-only, matching the legacy launch form) the way
      * main() does, then pass the mutable buffer to inject_and_resume. */
@@ -74,14 +69,10 @@ void test_injection_stub(void) {
     int rc = inject_and_resume(stub_exe, stub_dll, 30000, cmdline);
     ASSERT_EQ(0, rc);
 
-    /* The stub_target sleeps 2 seconds then exits 0. Wait for it to finish.
-     * Note: inject_and_resume() already closed pi.hProcess, so we need a
-     * different approach. We'll use the fact that the process was created
-     * and resumed; we just need to verify it existed and exited cleanly.
-     * Since inject_and_resume returns 0 only on full success (including
-     * ResumeThread), and the stub exits 0, we consider this sufficient.
-     * For extra validation, we could track the PID and check exit code via
-     * OpenProcess, but that's overkill for this test. */
+    /* The stub_target sleeps 2s then exits 0. inject_and_resume() returns
+     * 0 only on full success (inject + hook-ready + ResumeThread) and
+     * closes pi.hProcess internally, so this test cannot wait on the stub
+     * process — the 0 return above is the pass signal. */
 }
 
 void test_injection_fails_no_such_exe(void) {

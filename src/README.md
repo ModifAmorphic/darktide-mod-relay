@@ -26,7 +26,7 @@ plus the launcher that delivers it.
 | **`discovery/`** | Rust crate — the LuaJIT discovery engine. A pure library (no I/O, no global state): a PE image (`&[u8]`) → the 16 LuaJIT/engine function addresses. 100% safe Rust in core logic; offline-testable. Compiled to a C-ABI staticlib (`librelay_discovery.a`). |
 | **`shell/`** | The injected C DLL — **`relay_shell.dll`**. Installs two production MinHook detours (`lua_newstate` → capture the Lua VM; `lua_pcall` → run the staged mod loader one-shot at pcall#1), discovers the LuaJIT function addresses in-process, and loads the staged mod loader in engine context. Linked with the Rust discovery staticlib + MinHook. Carries `VS_VERSION_INFO` PE version resources compiled from `shell/src/relay_shell.rc`. |
 | **`launcher/`** | The C injector — **`mod_relay.exe`**. `CreateProcess(Darktide.exe, SUSPENDED)` → inject `relay_shell.dll` → wait for the hook-ready signal → `ResumeThread`. Resolves the flag/env config and publishes it into the child env. Carries `VS_VERSION_INFO` PE version resources compiled from `launcher/src/launcher.rc`. |
-| **`mod_loader/`** | The Lua mod loader. Runs in engine context, bridges pcall#1 to the engine's late boot (deferred bootstrap), and loads DMF + user mods. Entry `init.lua` + modules (`path`, `file`, `class_registry`, `lifecycle`, `require_bridge`, `mod_manager`, `dmf_adapter`). `init.lua` publishes the engine LuaJIT FFI module via the pre-wrap module loader (`Mods.original_require("ffi")` — `require("ffi")` creates no global in LuaJIT 2.1). `lifecycle.lua` is the bootstrap coordinator + the direct closure-wraps (`BootStateRequireGameScripts._state_update`, `StateGame.update`, `GameStateMachine._change_state` exit/enter dispatch, and `GameStateMachine.destroy` — a final-exit wrapper that dispatches one deduplicated `on_game_state_changed("exit",…)` for the active state before destruction). `path.lua` is a pure-string path utility (`normpath` extracted from Penlight `pl.path` + `is_within` adapted from `pl.path.relpath`'s segment comparison) used by `file.lua`'s `Mods.lua.io.open`/`io.lines` wrapper to root DMF's `./../mods/<rest>` convention at the mod-path boundary. `mod_manager.lua` is the generic scan/load/lifecycle driver **and the hot-reload state machine** (request seam, `_check_reload` trigger-detection seam for the community reload-control contract, keyboard trigger, two-frame teardown/replacement sequencing, reload-data association, failure isolation); `dmf_adapter.lua` is the stock-DMF compatibility boundary (persisted developer-mode restoration, DMF-visible contract fields + transitions, entry-shape validation, the eight `DMFMod:io_*` overrides + the file observer that drives them, **installation-aware** re-adaptation across reload (tracks `DMFMod` table identity + the exact Relay `io_dofile` wrapper so a reused class table whose methods `core/io.lua` overwrites is re-adapted, not left on stock `./../mods`), and stale-generation-global retirement). Relay-controlled (ships with the build) and independently implemented for Relay's injected runtime architecture. |
+| **`mod_loader/`** | The Lua mod loader. Runs in engine context, bridges pcall#1 to the engine's late boot (deferred bootstrap), and loads DMF + user mods. Entry `init.lua` + modules (`path`, `file`, `class_registry`, `lifecycle`, `require_bridge`, `mod_manager`, `dmf_adapter`). `init.lua` publishes the engine LuaJIT FFI module via the pre-wrap module loader (`Mods.original_require("ffi")` — `require("ffi")` creates no global in LuaJIT 2.1). `lifecycle.lua` is the bootstrap coordinator + the direct closure-wraps (`BootStateRequireGameScripts._state_update`, `StateGame.update`, `GameStateMachine._change_state` exit/enter dispatch, and `GameStateMachine.destroy` — a final-exit wrapper that dispatches one deduplicated `on_game_state_changed("exit",…)` for the active state before destruction). `path.lua` is a pure-string path utility (`normpath` extracted from Penlight `pl.path`) used by `file.lua`'s `Mods.lua.io.open`/`io.lines` wrapper to root DMF's `./../mods/<rest>` convention. `mod_manager.lua` is the generic scan/load/lifecycle driver **and the hot-reload state machine** (request seam, `_check_reload` trigger-detection seam for the community reload-control contract, keyboard trigger, two-frame teardown/replacement sequencing, reload-data association, failure isolation); `dmf_adapter.lua` is the stock-DMF compatibility boundary (persisted developer-mode restoration, DMF-visible contract fields + transitions, entry-shape validation, the eight `DMFMod:io_*` overrides + the file observer that drives them, **installation-aware** re-adaptation across reload (tracks `DMFMod` table identity + the exact Relay `io_dofile` wrapper so a reused class table whose methods `core/io.lua` overwrites is re-adapted, not left on stock `./../mods`), and stale-generation-global retirement). Relay-controlled (ships with the build) and independently implemented for Relay's injected runtime architecture. |
 | **`tests/`** | C unit tests (run via wine). |
 | **`bin/`** | Build outputs (gitignored). Where `make build` lands everything. |
 
@@ -164,7 +164,8 @@ shell DLL, log file, and mod loader root all default next to the launcher exe.
 | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
 | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
-| `--lua-logs` | `RELAY_LUA_LOGS=1` | off (value-less; exact env value `1` enables) |
+| `--log-lua` | `RELAY_LOG_LUA=1` | off (value-less; exact env value `1` enables) |
+| `--log-append` | `RELAY_LOG_APPEND=1` | off (value-less; exact env value `1` enables; appends instead of truncating) |
 | `--skip-splash` | `RELAY_SKIP_SPLASH=1` | off (value-less; exact env value `1` enables; skips the intro splash state) |
 | `--` (separator) | — (none) | unset (rest-of-line forwarded to the game) |
 | `--version` | — (none) | — (prints the build-injected version; see below) |
@@ -225,10 +226,10 @@ Relay writes to **two** separate logs by default:
   **Authoritative and complete** for Lua output; Relay never redirects or
   suppresses it.
 
-**Optional Lua print tee** — `--lua-logs` (or `RELAY_LUA_LOGS=1`, exact value
+**Optional Lua print tee** — `--log-lua` (or `RELAY_LOG_LUA=1`, exact value
 `1`; default off). When enabled, Relay wraps the engine's global `print` and
 `__print` **once per process** so every successful call through those surfaces
-is **also** copied into `relay.log` as structured `INFO  lua-print:` lines
+is **also** copied into `relay.log` as structured `INFO  lua:` lines
 (after the original still goes to the console). It is a **tee, never a
 redirect**: the console log remains complete and authoritative.
 
@@ -252,9 +253,9 @@ Two interactions worth knowing:
   reload; a mod that later replaces global `print` wins (Relay does not fight
   it).
 
-The launcher canonicalizes the child env: it sets `RELAY_LUA_LOGS=1` when
+The launcher canonicalizes the child env: it sets `RELAY_LOG_LUA=1` when
 enabled and **removes** it when disabled (a stale parent value cannot leak in as
-a non-`1`). Direct shell injectors may set `RELAY_LUA_LOGS=1` themselves; that
+a non-`1`). Direct shell injectors may set `RELAY_LOG_LUA=1` themselves; that
 is the external non-launcher contract. The normative logging contract
 (destinations, the `relay.log` line/lifecycle, the tee boundary, argument
 rendering, and byte-safety) is in
@@ -274,12 +275,12 @@ values:
   — **Relay-controlled**. Holds `init.lua` + its modules. Ships with the build
   (`make build` stages it); a DMF/mod update never requires a Relay rebuild.
 - **`RELAY_MOD_PATH`** (from `--mod-path` / `RELAY_MOD_PATH`) —
-  **user-controlled**. The **mod-path boundary**: a directory that *contains*
+  **user-controlled**. The **mod path**: a directory that *contains*
   a `mods/` subdirectory. DMF + user mods + `mods.lst` (the load-order file;
-  you author it, or your app generates it) live at `<mod_path>/mods/`. The
+  you author it, or a mod manager generates it) live at `<mod_path>/mods/`. The
   loader derives `Mods._mod_root` as `<mod_path>/mods` (what `Mods.file.*`
-  roots at) and `Mods._mod_path` as the containment boundary for the
-  `Mods.lua.io` raw-read wrapper.
+  roots at; the `Mods.lua.io.open`/`io.lines` wrapper roots relative paths
+  there and passes absolute paths through verbatim).
 
 The split keeps the loader's own code Relay-owned while the mods it loads are
 user-owned. Detail in

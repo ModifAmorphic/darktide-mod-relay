@@ -1,7 +1,7 @@
 {
   "release-type": "simple",
   "include-component-in-tag": false,
-  "prerelease": true,
+  "prerelease": false,
   "packages": {
     "src": {}
   }

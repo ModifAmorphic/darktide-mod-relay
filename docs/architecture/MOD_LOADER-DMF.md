@@ -53,11 +53,11 @@ by the C trampoline before the entry opens:
   `dmf_adapter`). `make build` stages these into `bin/mod_loader/`. The entry's
   module loader (exposed as `Mods.load_module`) roots here.
 - **Mod root** (`RELAY_MOD_PATH`, from `--mod-path` / `RELAY_MOD_PATH`;
-  user-controlled) — the **boundary**: a directory that *contains* a `mods/`
+  user-controlled) — the directory that *contains* a `mods/`
   subdirectory. DMF + user mods + `mods.lst` live at `<mod_path>/mods/`.
-  `Mods._mod_path` is the boundary; `Mods._mod_root` (= `_mod_path/mods`) is
-  what `Mods.file.*` roots at. The `Mods.lua.io.open`/`io.lines` wrapper
-  contains raw-io reads at `_mod_path` (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
+  `Mods._mod_path` is that config value; `Mods._mod_root` (= `_mod_path/mods`)
+  is what `Mods.file.*` roots at. The `Mods.lua.io.open`/`io.lines` wrapper
+  roots relative paths at `_mod_root` and passes absolute paths through verbatim (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
 
 So the loader's own code is Relay-owned (ships with the build), while the
 mods it loads are user-owned — the split keeps a DMF/mod update from requiring a
@@ -306,11 +306,11 @@ logic is the loader **logic**.
 | --- | --- | --- |
 | `Mods.original_require` | entry | the engine's real `require` (captured before globals are stripped ~pcall#6) |
 | `Mods.require_store` | entry + `require_bridge` | per-path array of distinct table identities returned by the engine `require`; the wrapped `require` records them identity-deduped (enables DMF's `hook_require`) |
-| `Mods.lua.io` / `Mods.lua.loadstring` | entry + `file.lua` | the engine's real `io` / `loadstring` (captured before stripped). `io.open`/`io.lines` are wrapped by `file.lua` to root DMF's `./../mods/<rest>` convention at `_mod_path` (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)) |
+| `Mods.lua.io` / `Mods.lua.loadstring` | entry + `file.lua` | the engine's real `io` / `loadstring` (captured before stripped). `io.open`/`io.lines` are wrapped by `file.lua` to root DMF's `./../mods/<rest>` convention at `_mod_root` (absolute paths pass through verbatim — see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)) |
 | `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable. See the [pinned FFI contract](../reference/darktide/darktide-binary.md#ffi-module-loading). |
 | `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table`; plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
-| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--lua-logs` / `RELAY_LUA_LOGS=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
+| `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--log-lua` / `RELAY_LOG_LUA=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
 
 There is **no** `Mods.hook` — the loadstring-driven hook chain (`set`/`enable`/
 `remove`/`set_on_file`/`enable_by_file`, the `MODS_HOOKS`/`MODS_HOOKS_BY_FILE`
@@ -326,7 +326,7 @@ pcall#1 code reach classes that don't exist until late in boot.
 
 ## Lua print tee
 
-The optional Lua print tee (`--lua-logs` / `RELAY_LUA_LOGS=1`, default off) is
+The optional Lua print tee (`--log-lua` / `RELAY_LOG_LUA=1`, default off) is
 **process-lifetime bootstrap plumbing**, installed in `init.lua` at pcall#1 —
 **not** generation policy, so it lives in the entry, not the DMF adapter or mod
 manager. When a valid sink is present, the entry installs wrappers on global
@@ -370,7 +370,7 @@ not fight it.
 a DMF/mod path is captured **only if** its runtime ultimately calls one of those
 wrapped globals. DMF's `mod:info` / `mod:warning` / `mod:error` and other
 logging APIs may bypass them — whether they are tee'd is a black-box
-observation (the operator can confirm with the `lua_logs_probe`), never an
+observation (the operator can confirm with the `log_lua_probe`), never an
 assumption. The tee never wraps DMF methods directly and introduces no public
 mod logging interface.
 
@@ -521,33 +521,33 @@ root at the stable mod-facing IO boundary.
 The `DMFMod:io_*` adaptation above covers mods that go through DMF's
 `mod:io_dofile()` etc. It does **not** cover mods that call
 `Mods.lua.io.open()` (the raw captured `io`) directly — a common, legitimate
-pattern for loading runtime data files (e.g. the strikemap mod's map geometry).
-DMF mods that load data this way use the stock-DMF path convention
+pattern for loading (and writing) runtime data files (e.g. the strikemap mod's
+map geometry; the Scores mod's match history under `%APPDATA%`). DMF mods that
+load data this way use the stock-DMF path convention
 `./../mods/<modname>/<rest>`; unredirected, that path resolves against the
 engine CWD (the game's `binaries/` dir) and silently misses (the open returns
 `nil`, the data is absent, features break).
 
 The redirection lives in `file.lua` (at the bottom, after the `Mods.file.*`
-operations) and installs **only when `_mod_path` is set and non-empty**. It
+operations) and installs **only when `_mod_root` is set and non-empty**. It
 wraps `Mods.lua.io.open` and `Mods.lua.io.lines`:
 
-- **Resolve:** prepend `_mod_root` (the mods dir, `<mod_path>/mods`), normalize
-  via `path.normpath` (extracted from Penlight `pl.path`; see
-  `THIRD_PARTY_NOTICES.md` §7) — so `./../mods/foo` collapses back to
-  `<mod_path>/mods/foo`.
-- **Contain:** verify the resolved path is within `_mod_path` (the boundary =
-  parent of `mods/`) via `path.is_within`. Escapes are rejected with
-  `nil, "path escapes mod path boundary"` (mirroring `io.open`'s `nil, err`
-  failure shape). A NUL byte in the caller's path is rejected with
-  `nil, "nul byte in path"` (matching `resolve()`'s defense-in-depth). **Note:**
-  on the `io.lines` wrapper this `nil, err` return is a deliberate deviation
-  from stock `io.lines`, which raises on failure — the wrapper returns
-  `nil, err` for graceful containment failure instead. Mods that want strict
-  behavior can check the return value; a caller doing `for line in io.lines(p)
-  do` against an escaping path gets a nil iterator and a "for" iterator error
-  (an error, just not the most informative one).
-- **Dispatch:** on a clean resolve, forward to the original captured
+- **Resolve:** for a RELATIVE path, prepend `_mod_root` (the mods dir,
+  `<mod_path>/mods`) and normalize via `path.normpath` (extracted from Penlight
+  `pl.path`; see `THIRD_PARTY_NOTICES.md` §7) — so `./../mods/foo` collapses
+  back to `<mod_path>/mods/foo`. For an ABSOLUTE path (drive-qualified like
+  `C:\…`/`C:/…`/`C:…`, root-anchored like `/abs`/`\abs`, or UNC like
+  `\\server\share`), forward the path **verbatim** — no rooting, no
+  normalization, the caller's separators preserved. A non-string path is
+  forwarded as-is (the original io handles/raises).
+- **Dispatch:** forward the resolved path to the original captured
   `io.open`/`io.lines`.
+
+The mod-facing `io.open`/`io.lines` surface is pass-through: relative paths
+resolve against `_mod_root`; absolute paths reach their target verbatim. A mod
+that writes `%APPDATA%\…\scores_history\v1\<ts>.lua` via `Mods.lua.io.open`
+reaches that path directly, matching stock-DMF io semantics and letting mods
+persist data anywhere (inside or outside `<mod_path>`).
 
 The raw `io` captured by `file.lua` as `_io` at module top is **preserved** for
 the internal `Mods.file.*` operations (which already root paths via `resolve()`
@@ -560,8 +560,8 @@ Mods that shell out via `io.popen("dir ..\\mods\\<mod>\\audio /b /a-d")` lean
 on the same stock-DMF relative-path convention (CWD assumed one level below
 `mods/`); unredirected, those commands miss the same way. Because `popen`'s
 argument is an opaque shell command string — there is no clean path to
-extract, normalize, or contain — the open/lines resolve+contain approach does
-not apply. The only lever is the shell's own CWD, so the wrapper prepends
+extract, normalize, or rewrite — the open/lines resolve approach does not
+apply. The only lever is the shell's own CWD, so the wrapper prepends
 `cd /d "<normpath _mod_root>" && ` to the command string:
 
 - **Child-scope CWD:** `io.popen` always spawns `cmd.exe /c <command>`, so the
@@ -580,45 +580,24 @@ not apply. The only lever is the shell's own CWD, so the wrapper prepends
   `Mods.lua.io.popen` is a function; otherwise `popen` is left untouched. A
   non-string command (e.g. `nil`) is forwarded to the original unmodified.
 
-This makes the common legitimate convention work; it is **not** a containment
-boundary (see the threat model below).
+This makes the common stock-DMF relative-path convention resolve correctly.
 
-**Contract change — the mod-path boundary.** This redirection changes the
-`--mod-path` / `RELAY_MOD_PATH` contract:
+**`_mod_path` + `_mod_root`.** Both are set in `init.lua`:
 
-- `Mods._mod_path` = `RELAY_MOD_PATH` — the **boundary** (a directory that
+- `Mods._mod_path` = `RELAY_MOD_PATH` — the mod-path config (a directory that
   *contains* a `mods/` subdirectory).
 - `Mods._mod_root` = derived as `_mod_path .. "/mods"` (the mods dir; what
-  `Mods.file.*` roots at — unchanged semantics for existing internal ops).
+  `Mods.file.*` roots at — unchanged semantics for existing internal ops, and
+  what the io.open/lines wrapper roots relative paths at).
 
-Both are set in `init.lua`. The split lets the wrapper contain raw io reads at
-`_mod_path` while `Mods.file.*` continues to root at `_mod_root` as before.
+`_mod_path` is the mod-path config from which `_mod_root` is derived.
 
-**Threat model + known gaps.** Containment is **lexical** (string-level path
-normalization + segment comparison), not OS-level sandboxing. It prevents
-accidental and naive traversal (the `binaries/`-CWD miss; `../../etc/passwd`
-attempts). It is NOT a security boundary against a hostile mod:
-
-- **Per-mod isolation is an explicit non-goal.** Mods can traverse to sibling
-  mods' files within `<mod_path>/mods/`. A shared Lua VM means per-mod
-  filesystem isolation is security theater (any mod can read another's in-VM
-  state directly).
-- **Symlinks/junctions** inside `<mod_path>` could redirect outside the
-  boundary in ways `normpath` doesn't catch (lexical resolution doesn't follow
-  links).
-- **`io.popen` is now partially covered** (relative paths only): a popen call
-  using the stock-DMF `..\mods\...` convention resolves against the mods dir via
-  the cd-prepend wrapper above. What remains unconstrained: (i) **absolute
-  paths** embedded anywhere in a popen command string (the wrapper does not
-  parse or rewrite them — a mod can still shell out to an arbitrary absolute
-  path), (ii) **`os.execute`** (not wrapped), and (iii) **FFI / native calls**
-  (the published `os`/`ffi` engine modules are available to DMF for debug
-  modules; a mod that calls into native code is unconstrained by any Lua-level
-  wrapper).
-
-The wrapper exists to make the common, legitimate DMF path convention work
-correctly (root data reads at the user's staging area, not the engine CWD),
-not to constrain a hostile mod author who already runs Lua in-process.
+The wrapper is a routing shim, not a sandbox. A mod runs Lua in-process and can
+read or write any path via `io.open`/`io.lines`/`io.popen`, `os.execute`, and
+FFI; the wrapper's only role is resolving the stock-DMF relative-path
+convention against `_mod_root` so data reads aren't lost to the `binaries/`
+CWD. There is no path isolation between mods, or between a mod and the
+filesystem.
 
 ## Two-level driving
 
