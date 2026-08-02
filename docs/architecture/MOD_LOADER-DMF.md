@@ -57,8 +57,7 @@ by the C trampoline before the entry opens:
   subdirectory. DMF + user mods + `mods.lst` live at `<mod_path>/mods/`.
   `Mods._mod_path` is that config value; `Mods._mod_root` (= `_mod_path/mods`)
   is what `Mods.file.*` roots at. The `Mods.lua.io.open`/`io.lines` wrapper
-  roots relative paths at `_mod_root` and passes absolute paths through
-  verbatim (no containment — see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
+  roots relative paths at `_mod_root` and passes absolute paths through verbatim (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
 
 So the loader's own code is Relay-owned (ships with the build), while the
 mods it loads are user-owned — the split keeps a DMF/mod update from requiring a
@@ -544,13 +543,11 @@ wraps `Mods.lua.io.open` and `Mods.lua.io.lines`:
 - **Dispatch:** forward the resolved path to the original captured
   `io.open`/`io.lines`.
 
-There is **no containment** and **no filtering** (the former lexical `is_within`
-boundary and the NUL-byte check were removed): the mod-facing
-`io.open`/`io.lines` surface is intentionally uncontained, matching stock-DMF
-io semantics. A mod that writes
-`%APPDATA%\…\scores_history\v1\<ts>.lua` via `Mods.lua.io.open` now reaches
-that absolute path verbatim, fixing the whole class of mods that persist
-outside `<mod_path>`.
+The mod-facing `io.open`/`io.lines` surface is pass-through: relative paths
+resolve against `_mod_root`; absolute paths reach their target verbatim. A mod
+that writes `%APPDATA%\…\scores_history\v1\<ts>.lua` via `Mods.lua.io.open`
+reaches that path directly, matching stock-DMF io semantics and letting mods
+persist data anywhere (inside or outside `<mod_path>`).
 
 The raw `io` captured by `file.lua` as `_io` at module top is **preserved** for
 the internal `Mods.file.*` operations (which already root paths via `resolve()`
@@ -583,8 +580,7 @@ apply. The only lever is the shell's own CWD, so the wrapper prepends
   `Mods.lua.io.popen` is a function; otherwise `popen` is left untouched. A
   non-string command (e.g. `nil`) is forwarded to the original unmodified.
 
-This makes the common legitimate convention work; it is **not** a containment
-boundary (see the threat model below).
+This makes the common stock-DMF relative-path convention resolve correctly.
 
 **`_mod_path` + `_mod_root`.** Both are set in `init.lua`:
 
@@ -594,18 +590,14 @@ boundary (see the threat model below).
   `Mods.file.*` roots at — unchanged semantics for existing internal ops, and
   what the io.open/lines wrapper roots relative paths at).
 
-`_mod_path` is no longer a containment boundary — it is just the mod-path
-config from which `_mod_root` is derived.
+`_mod_path` is the mod-path config from which `_mod_root` is derived.
 
-**Threat model + known gaps.** The mod-facing io surface
-(`Mods.lua.io.open`/`io.lines`/`io.popen`) is intentionally **uncontained**.
-A mod runs Lua in-process and is unconstrained by any Lua-level wrapper:
-`os.execute`, FFI / native calls, and absolute-path `io.popen` were always
-open, and `io.open`/`io.lines` now match them (absolute paths pass through
-verbatim; relative paths are rooted only so the stock-DMF convention resolves).
-The wrapper exists solely to make the common, legitimate DMF path convention
-work correctly (root data reads at the user's staging area, not the engine
-CWD) — not to constrain a mod author who already runs Lua in-process.
+The wrapper is a routing shim, not a sandbox. A mod runs Lua in-process and can
+read or write any path via `io.open`/`io.lines`/`io.popen`, `os.execute`, and
+FFI; the wrapper's only role is resolving the stock-DMF relative-path
+convention against `_mod_root` so data reads aren't lost to the `binaries/`
+CWD. There is no path isolation between mods, or between a mod and the
+filesystem.
 
 ## Two-level driving
 

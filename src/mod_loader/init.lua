@@ -216,7 +216,7 @@ end
 -- The mod path (RELAY_MOD_PATH). _mod_path is the dir containing a
 -- `mods/` subdir; _mod_root is derived as _mod_path .. "/mods" (what Mods.file.*
 -- roots at, and what the Mods.lua.io.open/io.lines wrapper roots relative paths
--- at — absolute paths pass through verbatim, no containment). Strip only the
+-- at — absolute paths pass through verbatim). Strip only the
 -- trailing separator here — do NOT convert backslashes to forward, which would
 -- mangle a UNC path (\\server\share -> //server/share) that normpath does NOT
 -- recover as UNC on Windows; normpath normalizes downstream. Empty/missing

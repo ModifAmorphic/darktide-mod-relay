@@ -401,7 +401,7 @@ return function(runner)
     -- ---------------------------------------------------------------------
     --
     -- The wrapper roots relative paths at _mod_root (normalized) and forwards
-    -- absolute paths verbatim (no containment). These tests use the
+    -- absolute paths verbatim. These tests use the
     -- setup_with_wrapper() helper which provides both _mod_path and _mod_root
     -- and lets file.lua install the wrapper (keyed on _mod_root).
 
@@ -461,17 +461,17 @@ return function(runner)
         mock.run_module("file", sb)
         local f, err = sb.Mods.lua.io.open(rel)
         runner.assert_eq(expected, opened_with,
-            "underlying io.open must receive the normpath-resolved rooted path (no containment rejection)")
+            "underlying io.open must receive the normpath-resolved rooted path (rooted + forwarded)")
         runner.assert_nil(f, "the file is not staged, so the underlying io.open returns nil (normal miss)")
         runner.assert_truthy(err ~= nil, "the miss carries io.open's own err string (the wrapper did not reject)")
     end)
 
-    runner.register("io wrapper: sibling-prefix path resolves + forwards (rooting only, no boundary)", function()
+    runner.register("io wrapper: sibling-prefix path resolves + forwards (rooting only)", function()
         -- ./../mods_evil/foo from _mod_root (C:/staged/mods) normpaths to
-        -- C:/staged/mods_evil/foo. There is no containment now, so the wrapper
-        -- simply roots + forwards the path; whether the open then succeeds
-        -- depends on whether the file is staged (normal io.open failure shape
-        -- on a miss). This test stages the file and verifies the open reaches it.
+        -- C:/staged/mods_evil/foo. The wrapper roots + forwards the path;
+        -- whether the open then succeeds depends on whether the file is staged
+        -- (normal io.open failure shape on a miss). This test stages the file
+        -- and verifies the open reaches it.
         local files = { ["C:/staged/mods_evil/foo.lua"] = "sibling content" }
         local sb = setup_with_wrapper(files)
         local f, err = sb.Mods.lua.io.open("./../mods_evil/foo.lua")

@@ -8,7 +8,7 @@
 -- code site for the exact rules.
 --
 -- Rooting + raw-io redirection (the mod-facing Mods.lua.io wrapper roots
--- relative paths and passes absolute paths through verbatim — no containment):
+-- relative paths and passes absolute paths through verbatim):
 -- docs/architecture/MOD_LOADER-DMF.md (Surfaces + Raw Mods.lua.io redirection).
 
 local _io = Mods.lua.io
@@ -22,8 +22,7 @@ local _error = error
 local _tostring = tostring
 
 -- Load path utilities. Must load before the Mods.lua.io wrapper below, which
--- uses path.normpath (is_within remains a tested pure utility in path.lua;
--- file.lua no longer consumes it after the io wrapper dropped containment).
+-- uses path.normpath.
 local path = Mods.load_module("path")
 
 Mods.file = Mods.file or {}
@@ -279,17 +278,17 @@ end
 --     stock DMF (e.g. the Scores mod's %APPDATA% history writes)
 --   - non-string    -> forwarded as-is (the original io handles/raises)
 --
--- There is NO containment and NO filtering: a mod runs Lua in-process and is
--- unconstrained by any Lua-level wrapper (os.execute/FFI/absolute io.popen were
--- always open, and so is io.open/io.lines now). The wrapper exists solely
--- because the engine CWD is binaries/, not mods/ — without rooting, DMF's
--- ./../mods/<rest> convention resolves to the wrong directory.
+-- The wrapper is a routing shim, not a sandbox: a mod runs Lua in-process and
+-- can read or write any path via os.execute/FFI/absolute io.popen (and now
+-- io.open/io.lines). It exists solely because the engine CWD is binaries/, not
+-- mods/ — without rooting, DMF's ./../mods/<rest> convention resolves to the
+-- wrong directory.
 --
 -- The raw io captured above (_io) is preserved for internal Mods.file.* ops,
 -- which already root via resolve() and must not be double-wrapped.
 --
 -- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection" for
--- the raw-io semantics + threat model.
+-- the raw-io semantics.
 -- ---------------------------------------------------------------------------
 if Mods._mod_root and Mods._mod_root ~= "" then
     local _mod_root = Mods._mod_root

@@ -173,7 +173,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   a `mods/` subdirectory (DMF + user mods live at `<mod_path>/mods/`); the
   loader derives `Mods._mod_root` as `<mod_path>/mods` and the
   `Mods.lua.io` wrapper roots relative paths there (absolute paths pass
-  through verbatim — no containment). The loader root is self-located by the
+  through verbatim). The loader root is self-located by the
   shell
   from its own DLL path (`<dll-dir>/mod_loader/`, set as the internal
   `MOD_LOADER_DIR` — not an env var/flag). A bare `--` (end-of-options

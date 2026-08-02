@@ -2,9 +2,7 @@
 -- filesystem access).
 --
 -- Attribution (MIT-licensed; see THIRD_PARTY_NOTICES.md §7): `normpath` is
--- copied VERBATIM from Penlight `pl.path.normpath` 1.15.0; `is_within` is
--- adapted from `pl.path.relpath`'s segment-comparison logic minus its
--- `lfs.currentdir()` fallback (both inputs are always passed absolute).
+-- copied VERBATIM from Penlight `pl.path.normpath` 1.15.0.
 -- Source:
 -- <https://github.com/lunarmodules/Penlight/blob/e0bc8f7fce3b6a4fdef3660066f5006bf8456b32/lua/pl/path.lua>
 
@@ -85,41 +83,6 @@ function M.normpath(P)
     P = anchor .. concat(parts, sep)
     if P == "" then P = "." end
     return P
-end
-
--- Is `p` equal to or nested inside `base`? ADAPTED from Penlight pl.path.relpath's
--- segment-comparison logic minus its `lfs.currentdir()` call (both inputs are
--- always passed absolute).
---
--- Contract: BOTH inputs must be absolute + already-normalized (caller runs
--- normpath first). Segment-level comparison (so `C:\staged\mods_evil` is NOT
--- within `C:\staged\mods`); case-insensitive on Windows.
-function M.is_within(p, base)
-    assert_string(1, p)
-    assert_string(2, base)
-    local compare
-    if is_windows then
-        compare = function(v) return v:lower() end
-    else
-        compare = function(v) return v end
-    end
-    -- Inputs are pre-normalized (no `.`/`..`/empty segments), so gmatch over
-    -- non-separator runs is exact.
-    local pl, bl = {}, {}
-    for seg in p:gmatch("[^" .. sep .. "]+") do pl[#pl + 1] = seg end
-    for seg in base:gmatch("[^" .. sep .. "]+") do bl[#bl + 1] = seg end
-    if #pl < #bl then return false end
-    -- Windows drive-letter fast-out: a differing drive (e.g. C: vs D:)
-    -- short-circuits before the segment walk.
-    if is_windows and #bl > 0 and at(pl[1], 2) == ":" and compare(pl[1]) ~= compare(bl[1]) then
-        return false
-    end
-    for i = 1, #bl do
-        if compare(bl[i]) ~= compare(pl[i]) then
-            return false
-        end
-    end
-    return true
 end
 
 return M
