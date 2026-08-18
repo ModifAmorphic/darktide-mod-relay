@@ -260,7 +260,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   inner culprit. Guarded in-game alerts repeat at a controlled cadence until a
   completed developer-mode hot reload or process exit. Cleanup is best effort;
   restart remains the safe recovery when side effects may survive.
-- **CI** runs on PRs to `main` (`.github/workflows/pr.yml`: mingw Linux
+- **CI** runs on PRs to any branch (`.github/workflows/pr.yml`: mingw Linux
   cross-compile + wine tests, and msvc Windows native). Pushes to `main` run
   the release pipeline (`.github/workflows/release.yml`: release-please
   versions + tags, then builds + attaches the Windows x64 runtime bundle to the
