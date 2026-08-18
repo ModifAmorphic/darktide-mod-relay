@@ -7,7 +7,7 @@
  * trampoline to fire one-shot at pcall#1.
  *
  * Contracts/hazards: docs/reference/relay/shell.md (the two required hooks +
- * FATAL-on-failure, pcall#1 game-safety invariants, the two trampoline-baked
+ * FATAL-on-failure, pcall#1 game-safety invariants, the trampoline-baked
  * roots, the not-hooked lua_resource::bytecode). Mechanism:
  * docs/architecture/MOD-RELAY.md -> shell.
  */
@@ -102,9 +102,10 @@ static volatile int  g_in_trampoline = 0;     /* re-entrancy guard for the tramp
  * The staged chunk (built once at worker startup) + the one-shot guard that
  * fires it at pcall#1. Lua is single-threaded on the engine's main thread, so
  * these are touched only from that thread; the guard is Interlocked as the
- * cheap Win32 one-shot idiom. The two roots + entry path are documented in the
+ * cheap Win32 one-shot idiom. The roots + entry path are documented in the
  * file header and trampoline.h. */
 #define MOD_PATH_ENV         "RELAY_MOD_PATH"   /* mod root dir (user/mod-manager-controlled; optional) */
+#define MOD_MANAGER_ENV      "RELAY_MOD_MANAGER" /* alternate mod manager file (user-controlled; optional when unset, fatal when set-but-unreadable/too-long/control-bearing) */
 #define SKIP_SPLASH_ENV      "RELAY_SKIP_SPLASH" /* StateSplash skip (user-controlled; optional; exact "1") */
 #define MOD_LOADER_DIRNAME   "mod_loader"            /* the loader dir, self-located next to the DLL */
 #define MOD_LOADER_ENTRY     "init.lua"              /* the loader bootstrap entry */
@@ -293,8 +294,10 @@ static void open_log(void) {
  * path unreadable/too long, no dir separator, join overflow, escape/overflow)
  * the chunk len stays 0 and trampoline_run will log SKIPPED. The mod dir
  * (RELAY_MOD_PATH) is OPTIONAL: unset/too long is logged and treated as
- * unset (mod_path = NULL -> the chunk emits an empty RELAY_MOD_PATH).
- * Idempotent: called once from the worker.
+ * unset (mod_path = NULL -> the chunk emits an empty RELAY_MOD_PATH). The
+ * alternate manager (RELAY_MOD_MANAGER) is optional when unset, FATAL when
+ * set-but-bad (see the read site below). Idempotent: called once from the
+ * worker.
  */
 static void trampoline_stage_chunk(void) {
     /* Mod loader root: self-located from this DLL's path. Deployment layout is
@@ -348,6 +351,38 @@ static void trampoline_stage_chunk(void) {
         mod_path = mod_dir;
     }
 
+    /* Alternate mod manager: optional when unset, FATAL when set-but-bad —
+     * unreadable, too long, or control-bearing. No degrade-to-unset: a
+     * configured manager that cannot be read intact must not be silently
+     * dropped, or the game would resume managerless. ExitProcess fires while
+     * the launcher still holds the main thread suspended, so the game never
+     * runs half-configured. Contract: docs/reference/relay/shell.md. */
+    char manager_path[1024];
+    const char *mod_manager = NULL;
+    DWORD mm = GetEnvironmentVariableA(MOD_MANAGER_ENV, manager_path,
+                                       sizeof(manager_path));
+    if (mm == 0) {
+        DWORD e = GetLastError();
+        if (e != ERROR_ENVVAR_NOT_FOUND) {
+            relay_log(RELAY_LOG_ERROR, "trampoline",
+                      "FATAL: %s is set but unreadable (lu=%lu); exiting before the game resumes managerless\n",
+                      MOD_MANAGER_ENV, e);
+            ExitProcess(1);
+        }
+    } else if (mm >= sizeof(manager_path)) {
+        relay_log(RELAY_LOG_ERROR, "trampoline",
+                  "FATAL: %s too long (%lu chars, max %zu); exiting before the game resumes managerless\n",
+                  MOD_MANAGER_ENV, mm, sizeof(manager_path) - 1);
+        ExitProcess(1);
+    } else if (trampoline_path_has_control(manager_path, mm)) {
+        relay_log(RELAY_LOG_ERROR, "trampoline",
+                  "FATAL: %s contains a control character; exiting before the game resumes managerless\n",
+                  MOD_MANAGER_ENV);
+        ExitProcess(1);
+    } else {
+        mod_manager = manager_path;
+    }
+
     /* StateSplash skip (optional). Snapshot the exact RELAY_SKIP_SPLASH=1 once
      * here via the same exact-"1" policy as RELAY_LOG_LUA; the chunk bakes the
      * boolean into the RELAY_SKIP_SPLASH global ("1" or "") for init.lua. */
@@ -363,7 +398,8 @@ static void trampoline_stage_chunk(void) {
         return;
     }
 
-    int n = trampoline_build_chunk(mod_loader_dir, mod_path, path, RELAY_VERSION,
+    int n = trampoline_build_chunk(mod_loader_dir, mod_path, mod_manager,
+                                    path, RELAY_VERSION,
                                     skip_splash,
                                     g_trampoline_chunk, sizeof(g_trampoline_chunk));
     if (n < 0) {
@@ -376,6 +412,11 @@ static void trampoline_stage_chunk(void) {
         relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", MOD_PATH_ENV, mod_path);
     } else {
         relay_log(RELAY_LOG_INFO, "trampoline", "%s unset (mods will not load)\n", MOD_PATH_ENV);
+    }
+    if (mod_manager) {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", MOD_MANAGER_ENV, mod_manager);
+    } else {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s unset (no alternate mod manager)\n", MOD_MANAGER_ENV);
     }
     relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", SKIP_SPLASH_ENV, skip_splash ? "1" : "0");
     relay_log(RELAY_LOG_INFO, "trampoline", "entry path=%s\n", path);

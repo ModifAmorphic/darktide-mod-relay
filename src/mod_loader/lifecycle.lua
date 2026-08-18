@@ -3,15 +3,16 @@
 -- Mods.coordinate_bootstrap runs after every require (via require_bridge) and
 -- advances two idempotent steps: install the class registry once `class` is a
 -- function, and wrap BootStateRequireGameScripts._state_update once it exists.
--- That boot wrapper calls the original first (returns preserved incl. trailing
--- nils; errors not swallowed), then a protected advance_bootstrap retrying only
--- the missing steps — load mod_manager + Managers.mod, wrap StateGame.update +
--- GameStateMachine._change_state/.destroy (and, opt-in --skip-splash, the
--- StateSplash skip) — until a `completed` flag short-circuits.
+-- That boot wrapper calls the original first, then a protected
+-- advance_bootstrap retrying only the missing steps — load the manager
+-- (built-in or the configured RELAY_MOD_MANAGER alternate), the chassis
+-- duties, the engine wraps (StateGame.update, GameStateMachine
+-- _change_state/.destroy, opt-in StateSplash skip) — until a `completed`
+-- flag short-circuits.
 --
 -- Full contract (deferred bootstrap, the exact-once state-exit dedup, the
--- GameStateMachine read-only rule): docs/architecture/MOD_LOADER-DMF.md
--- (Deferred bootstrap + Intentional shutdown).
+-- GameStateMachine read-only rule, the alternate-manager failure policy):
+-- docs/architecture/MOD_LOADER-DMF.md + docs/reference/relay/manager-slot.md.
 
 local _pcall = pcall
 local _tostring = tostring
@@ -19,6 +20,7 @@ local _unpack = unpack
 local _select = select
 local _rawget = rawget
 local _type = type
+local _string_find = string.find
 
 -- Leveled diagnostics (init.lua publishes the helper on Mods._relay before this
 -- module loads).
@@ -27,10 +29,143 @@ local log_debug = Mods._relay.log_debug
 local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
 
+-- ---------------------------------------------------------------------------
+-- Throttled containment-error logging for the five chassis containment sites
+-- (Step-2 update, Step-3 exit/enter dispatches, Step-4 final exit, and the
+-- boot wrapper's advance_bootstrap containment). NEVER log-once-and-swallow:
+-- the first occurrence per (site, error) key logs immediately; without a
+-- usable clock the helper degrades to logging every occurrence. Full policy
+-- (keying, recurrence window + count suffix, key cap):
+-- docs/architecture/MOD_LOADER-DMF.md → "Deferred bootstrap".
+-- ---------------------------------------------------------------------------
+local _THROTTLE_INTERVAL_S = 10
+local _THROTTLE_MAX_KEYS = 32
+local _throttle_entries = {}
+local _throttle_key_count = 0
+
+local function log_contained_error(prefix, err)
+    local text = _tostring(err)
+    local now = nil
+    local lua_surface = (_type(Mods) == "table") and Mods.lua or nil
+    local os_surface = (_type(lua_surface) == "table") and lua_surface.os or nil
+    if _type(os_surface) == "table" and _type(os_surface.time) == "function" then
+        local ok, t = _pcall(os_surface.time)
+        if ok and _type(t) == "number" then
+            now = t
+        end
+    end
+    if now == nil then
+        log_error(prefix .. text)
+        return
+    end
+    local entry = _throttle_entries[prefix .. "\0" .. text]
+    if entry == nil then
+        if _throttle_key_count >= _THROTTLE_MAX_KEYS then
+            _throttle_entries = {}
+            _throttle_key_count = 0
+            log_debug("containment error throttle table reset (" .. _THROTTLE_MAX_KEYS
+                .. "+ distinct errors); recurrence counts start fresh")
+        end
+        _throttle_entries[prefix .. "\0" .. text] = { last = now, suppressed = 0 }
+        _throttle_key_count = _throttle_key_count + 1
+        log_error(prefix .. text)
+        return
+    end
+    if now - entry.last >= _THROTTLE_INTERVAL_S then
+        log_error(prefix .. text .. " [x" .. (entry.suppressed + 1)
+            .. " in the last " .. _THROTTLE_INTERVAL_S .. "s]")
+        entry.last = now
+        entry.suppressed = 0
+    else
+        entry.suppressed = entry.suppressed + 1
+    end
+end
+
+-- Load dmf_adapter exactly ONCE per process (module scope) and publish it on
+-- Mods._relay.dmf_adapter. Mods.load_module re-runs a chunk on every call, so
+-- a second load would create an independent module table (and, via its
+-- factories, a second io observer). mod_manager reads the published table at
+-- init time; on failure nothing is published and manager creation fails
+-- clearly per-tick (corrupted-install semantics unchanged).
+do
+    local loader = Mods and Mods.load_module
+    if _type(loader) == "function" then
+        local ok, adapter_module = _pcall(loader, "dmf_adapter")
+        if ok and _type(adapter_module) == "table" then
+            Mods._relay.dmf_adapter = adapter_module
+        end
+    end
+end
+
+-- Process-lifetime Crashify version publication (chassis-owned). Attempted
+-- once at manager creation (Step 1c) and retried opportunistically by the
+-- StateGame.update wrap until success — Crashify may appear (or recover) late.
+-- Absence/throw never breaks bootstrap or update (fully pcall-contained); each
+-- failure case logs once. The crashify_version_published guard lives on
+-- Mods._relay (chassis-owned state, same field the manager used previously).
+local _CRASHIFY_VERSION_MAX_BYTES = 128
+local _version_invalid_logged = false
+local _version_unavailable_logged = false
+local _version_publish_failed_logged = false
+
+local function _publish_crashify_version()
+    local relay = (_type(Mods) == "table") and _rawget(Mods, "_relay") or nil
+    if _type(relay) == "table" and relay.crashify_version_published == true then
+        return
+    end
+    local version = (_type(relay) == "table") and _rawget(relay, "version") or nil
+    if _type(version) ~= "string" or version == "" or #version > _CRASHIFY_VERSION_MAX_BYTES
+       or _string_find(version, "%c") then
+        if not _version_invalid_logged then
+            log_debug("Relay version crash metadata unavailable (missing or invalid private build value)")
+            _version_invalid_logged = true
+        end
+        return
+    end
+    local ok, published = _pcall(function()
+        local crashify = _rawget(_G, "Crashify")
+        if _type(crashify) ~= "table" or _type(crashify.print_property) ~= "function" then
+            return false
+        end
+        crashify.print_property("ModRelay:Version", version)
+        return true
+    end)
+    if ok and published then
+        if _type(relay) == "table" then
+            relay.crashify_version_published = true
+        end
+        return
+    end
+    if not ok then
+        if not _version_publish_failed_logged then
+            log_warn("Crashify version publication failed; will retry")
+            _version_publish_failed_logged = true
+        end
+    elseif not _version_unavailable_logged then
+        log_debug("Crashify unavailable; version crash metadata will retry")
+        _version_unavailable_logged = true
+    end
+end
+
 -- Snapshot the StateSplash skip ONCE at module-eval time (init.lua stored it in
 -- Mods._relay.skip_splash). Nil-safe. When true, advance_bootstrap gains a 5th
 -- idempotent step that wraps CLASS.StateSplash.on_enter.
 local _skip_splash_enabled = Mods and Mods._relay and Mods._relay.skip_splash == true
+
+-- Snapshot the alternate mod manager path ONCE at module-eval time (init.lua
+-- published it as Mods._relay.mod_manager_path from the trampoline-baked
+-- RELAY_MOD_MANAGER global). A non-empty string means Step 1a loads the class
+-- from that EXACT path (verbatim, never rooted); anything else (nil / "" /
+-- non-string) is the built-in path, byte-identical to before. Selection +
+-- failure policy: docs/architecture/MOD_LOADER-DMF.md → "The manager slot".
+local _alternate_manager_path = nil
+do
+    local relay = Mods and Mods._relay
+    local configured = (_type(relay) == "table") and relay.mod_manager_path or nil
+    if _type(configured) == "string" and configured ~= "" then
+        _alternate_manager_path = configured
+    end
+end
 
 -- Resolve StateTitle (StateSplash's _next_state) via the engine's require. It's
 -- cached in package.loaded by the time StateSplash is entered. Resolved lazily
@@ -84,11 +219,21 @@ end
 local bs = {
     boot_wrapped = false,
     completed = false,
-    -- manager step (load + create are separately idempotent)
+    -- manager step (load + create + chassis duties are separately idempotent)
     manager_class = nil,
     manager_class_loaded = false,
     manager_created = false,
     manager_missing_logged = false,
+    -- alternate-manager failure modes already logged (a set; tracked
+    -- separately from the built-in's manager_missing_logged and used only
+    -- when an alternate is configured)
+    alternate_failure_logged = {},
+    -- chassis-duties step (Step 1c): establish + observer + version attempt.
+    -- chassis_adapter retains the chassis-constructed adapter instance (the
+    -- alternate-manager path) so a failed-then-retried pass reuses it instead
+    -- of registering a second io observer.
+    chassis_duties_done = false,
+    chassis_adapter = nil,
     -- state-game step
     state_game_wrapped = false,
     state_game_missing_logged = false,
@@ -104,6 +249,86 @@ local bs = {
 }
 
 -- ---------------------------------------------------------------------------
+-- Alternate mod manager (RELAY_MOD_MANAGER) — permanent-failure handling.
+-- A configured alternate is a hard operator commitment: failures retry
+-- through the normal bootstrap machinery only while the engine is not yet
+-- ready; once ready, a failure is permanent (never a managerless game).
+-- Normative failure policy: docs/reference/relay/manager-slot.md.
+-- ---------------------------------------------------------------------------
+
+-- Engine-ready: every manager-independent bootstrap step (2-4) is wrapped.
+-- The pass that completes those steps runs them AFTER step 1, so a failing
+-- step-1/1b pass always retries at least once before this gate can be
+-- satisfied (a natural two-attempt minimum).
+local function _engine_ready()
+    return bs.state_game_wrapped and bs.change_state_wrapped and bs.destroy_wrapped
+end
+
+-- Terminate the process: log the final ERROR first (naming the configured
+-- path, the failure, and the policy), then exit via the first workable
+-- surface — ffi.C.ExitProcess(1) (cdef'd once; re-cdef is legal in LuaJIT so
+-- the guard is efficiency-only; x64 has a single calling convention),
+-- os.exit(1), or a contained raise if neither works. ffi/os are read from
+-- Mods.lua at CALL time (so a test sandbox can mock them). The helper is
+-- double-invocation guarded — the first call wins; later calls are silent
+-- no-ops (no exit surface re-invoked, nothing logged).
+local _hard_exit_attempted = false
+local _exit_cdef_attempted = false
+
+-- The real engine's ffi.C (the LuaJIT C namespace) is a userdata cdata
+-- object, NOT a table; test sandboxes mock it as a table. The exit branch
+-- must accept both shapes — a table-only check silently disables it in
+-- production (every exit would fall through to the os fallback).
+local function _ffi_c_usable(c)
+    local c_type = _type(c)
+    return c_type == "userdata" or c_type == "table"
+end
+
+local function _hard_exit(failure)
+    if _hard_exit_attempted then
+        return
+    end
+    _hard_exit_attempted = true
+    log_error("Relay is exiting: an alternate mod manager is configured ("
+        .. _alternate_manager_path
+        .. ") and the game must not continue without it. Final failure: " .. failure)
+    local lua_surface = (_type(Mods) == "table") and Mods.lua or nil
+    local ffi = (_type(lua_surface) == "table") and lua_surface.ffi or nil
+    if _type(ffi) == "table" and _ffi_c_usable(ffi.C) and _type(ffi.cdef) == "function" then
+        if not _exit_cdef_attempted then
+            _exit_cdef_attempted = true
+            _pcall(ffi.cdef, "void ExitProcess(unsigned int);")
+        end
+        if _pcall(function() ffi.C.ExitProcess(1) end) then
+            return
+        end
+    end
+    local os_surface = (_type(lua_surface) == "table") and lua_surface.os or nil
+    if _type(os_surface) == "table" and _type(os_surface.exit) == "function" then
+        if _pcall(os_surface.exit, 1) then
+            return
+        end
+    end
+    error("Relay could not terminate the process (no usable ffi/os exit surface); "
+        .. "underlying failure: " .. failure, 0)
+end
+
+-- Record one alternate-manager failure: log once per distinct mode (the
+-- configured path is in the message), then apply the engine-ready gate —
+-- not ready yet -> the failure simply retries through the existing machinery
+-- on the next pass; ready -> permanent -> terminate.
+local function _alternate_manager_failed(mode, detail)
+    if not bs.alternate_failure_logged[mode] then
+        bs.alternate_failure_logged[mode] = true
+        log_warn("bootstrap: alternate mod manager failed (" .. detail .. ") at "
+            .. _alternate_manager_path .. "; will retry until the engine is ready")
+    end
+    if _engine_ready() then
+        _hard_exit(detail)
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- advance_bootstrap — attempts only missing steps (each independently
 -- idempotent). Called protected after every _state_update.
 -- ---------------------------------------------------------------------------
@@ -112,13 +337,42 @@ local function advance_bootstrap()
         return
     end
 
-    -- Step 1a: load the mod_manager class from the loader root (idempotent).
+    -- Step 1a: load the manager class (idempotent). Built-in: from the loader
+    --    root. Alternate (a non-empty RELAY_MOD_MANAGER was baked): from that
+    --    EXACT path via the raw-io chunk helper — verbatim, never rooted —
+    --    and the chunk must return a table (the class). Alternate failures
+    --    log once per distinct mode and, once the engine is ready, terminate
+    --    the process (see _alternate_manager_failed).
     if not bs.manager_class_loaded then
-        local ModManager = Mods.load_module("mod_manager")
+        local ModManager
+        if _alternate_manager_path then
+            local load_chunk = Mods and Mods._relay and Mods._relay.load_chunk
+            if _type(load_chunk) ~= "function" then
+                _alternate_manager_failed("helper",
+                    "the loader chunk helper is unavailable (corrupted install?)")
+            else
+                -- Protected so even a raising seam stays inside the gate (a
+                -- tracked failure, never an unbounded managerless retry).
+                local pok, ok, result, mode = _pcall(load_chunk, _alternate_manager_path)
+                if pok and ok and _type(result) == "table" then
+                    ModManager = result
+                elseif pok and ok then
+                    _alternate_manager_failed("return", "chunk did not return a class table")
+                elseif pok then
+                    local load_mode = mode or "run"
+                    _alternate_manager_failed(load_mode, "chunk load failed (" .. load_mode .. ")")
+                else
+                    _alternate_manager_failed("seam",
+                        "the chunk seam raised: " .. _tostring(ok))
+                end
+            end
+        else
+            ModManager = Mods.load_module("mod_manager")
+        end
         if ModManager then
             bs.manager_class = ModManager
             bs.manager_class_loaded = true
-        else
+        elseif not _alternate_manager_path then
             if not bs.manager_missing_logged then
                 log_debug("bootstrap: mod_manager not yet loadable; will retry")
                 bs.manager_missing_logged = true
@@ -128,13 +382,68 @@ local function advance_bootstrap()
 
     -- Step 1b: instantiate Managers.mod exactly once. Separate from the load so
     --    a load that succeeds but a :new() that raises can retry creation
-    --    without re-loading.
+    --    without re-loading. Under an alternate, :new() is contained + tracked
+    --    (a class that cannot instantiate is broken, not early): a raise or a
+    --    nil instance is a failure through the same engine-ready gate; before
+    --    ready it simply retries. The built-in branch is unchanged: an error
+    --    escapes to the boot wrapper's containment, creation retries next tick.
     if bs.manager_class_loaded and not bs.manager_created then
-        Managers = Managers or {}
-        if not Managers.mod then
-            Managers.mod = bs.manager_class:new()
+        if _alternate_manager_path then
+            if not (Managers and Managers.mod) then
+                Managers = Managers or {}
+                local ok, instance = _pcall(function()
+                    return bs.manager_class:new()
+                end)
+                if ok and instance ~= nil then
+                    Managers.mod = instance
+                else
+                    _alternate_manager_failed("new", ok
+                        and ":new() returned no instance"
+                        or (":new() raised: " .. _tostring(instance)))
+                end
+            end
+            if Managers and Managers.mod then
+                bs.manager_created = true
+            end
+        else
+            Managers = Managers or {}
+            if not Managers.mod then
+                Managers.mod = bs.manager_class:new()
+            end
+            bs.manager_created = true
         end
-        bs.manager_created = true
+    end
+
+    -- Step 1c: manager-agnostic chassis duties, once after creation: resolve
+    --    the ONE registering dmf_adapter instance (the manager's own
+    --    _adapter when compatible — the built-in path; else a chassis-
+    --    constructed instance retained for the process), establish(), the io
+    --    observer, and the Crashify version attempt. A failure raises to the
+    --    boot wrapper's containment and retries next tick. Detail:
+    --    MOD_LOADER-DMF.md → "Chassis duties (Step 1c)".
+    if bs.manager_created and not bs.chassis_duties_done then
+        local m = Managers and Managers.mod
+        local adapter = nil
+        local own = (_type(m) == "table") and _rawget(m, "_adapter") or nil
+        if _type(own) == "table"
+           and _type(own.establish) == "function"
+           and _type(own.register_io_observer) == "function" then
+            adapter = own
+        else
+            adapter = bs.chassis_adapter
+            if adapter == nil then
+                local adapter_module = Mods and Mods._relay and _rawget(Mods._relay, "dmf_adapter")
+                if _type(adapter_module) ~= "table" or _type(adapter_module.new) ~= "function" then
+                    error("dmf_adapter module unavailable on Mods._relay (corrupted install?)")
+                end
+                adapter = adapter_module.new(m)
+                bs.chassis_adapter = adapter
+            end
+        end
+        adapter:establish()
+        adapter:register_io_observer()
+        _publish_crashify_version()
+        bs.chassis_duties_done = true
     end
 
     -- Step 2: wrap CLASS.StateGame.update so Managers.mod:update(dt) runs BEFORE
@@ -147,11 +456,15 @@ local function advance_bootstrap()
             sg.update = function(self, dt, ...)
                 local m = Managers and Managers.mod
                 if m then
+                    -- Opportunistic version-publication retry (cheap flag
+                    -- check; contained). Short-circuits for the process
+                    -- lifetime once the property is published.
+                    _publish_crashify_version()
                     local ok, err = _pcall(function()
                         m:update(dt)
                     end)
                     if not ok then
-                        log_error("Managers.mod:update failed: " .. _tostring(err))
+                        log_contained_error("Managers.mod:update failed: ", err)
                     end
                 end
                 return orig_update(self, dt, ...)
@@ -189,7 +502,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("exit", old_name, old_state)
                     end)
                     if not ok then
-                        log_error("state exit drive failed: " .. _tostring(err))
+                        log_contained_error("state exit drive failed: ", err)
                     end
                 end
                 -- Call the original exactly once with unchanged self/varargs.
@@ -203,7 +516,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("enter", new_name, new_state)
                     end)
                     if not ok then
-                        log_error("state enter drive failed: " .. _tostring(err))
+                        log_contained_error("state enter drive failed: ", err)
                     end
                 end
                 return _unpack(results, 1, results.n)
@@ -242,7 +555,7 @@ local function advance_bootstrap()
                         m:on_game_state_changed("exit", cur_name, cur_state)
                     end)
                     if not ok then
-                        log_error("final state exit drive failed: " .. _tostring(err))
+                        log_contained_error("final state exit drive failed: ", err)
                     end
                 end
                 -- Original runs exactly once with unchanged self/varargs. Its
@@ -304,13 +617,14 @@ local function advance_bootstrap()
         end
     end
 
-    -- All steps complete -> short-circuit. The splash step is gated on the
-    -- opt-in: opted OUT, it is never attempted and must not block completion.
-    -- Opted IN, completion needs the splash step RESOLVED — wrapped or
-    -- logged-missing. The missing-logged term is load-bearing: without it, an
-    -- absent (optional) StateSplash would block completion forever, re-checking
-    -- every tick (StateSplash's absence is benign, unlike a missing StateGame).
-    if bs.manager_created and bs.state_game_wrapped
+    -- All steps complete -> short-circuit. The chassis-duties step must also
+    --    be resolved (a manager whose establish/observer duties keep failing
+    --    is a degraded install; keep retrying, never complete silently).
+    --    Opted in, the splash step must be RESOLVED — wrapped or
+    --    logged-missing (an absent optional StateSplash must not block
+    --    completion forever, unlike a missing StateGame).
+    if bs.manager_created and bs.chassis_duties_done
+       and bs.state_game_wrapped
        and bs.change_state_wrapped and bs.destroy_wrapped
        and (not _skip_splash_enabled or bs.splash_wrapped or bs.splash_missing_logged) then
         bs.completed = true
@@ -340,7 +654,7 @@ local function coordinate_bootstrap()
                 local results = _pack(orig_state_update(self, ...))
                 local ok, err = _pcall(advance_bootstrap)
                 if not ok then
-                    log_error("bootstrap failed: " .. _tostring(err))
+                    log_contained_error("bootstrap failed: ", err)
                 end
                 return _unpack(results, 1, results.n)
             end

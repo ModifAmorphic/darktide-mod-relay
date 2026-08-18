@@ -4,7 +4,7 @@
  * Implementation of the helpers declared in trampoline.h. This file has NO
  * Windows, Lua, or hook dependencies — only string ops — so it compiles
  * directly into both the shell DLL and the C unit-test exes. The trampoline's
- * game-safety and two-roots contracts are normative in
+ * game-safety and roots contracts are normative in
  * docs/reference/relay/shell.md.
  */
 #include "trampoline.h"
@@ -12,17 +12,19 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The trampoline chunk template. The five `%s` receive, in order: the escaped
- * mod loader root, the escaped mod root (empty string when unset), the version
- * assignment value (a quoted escaped string or nil), the splash-skip token
- * (literal "1" or "", not escaped), and the escaped entry-file path — each
- * becomes an internal bootstrap global (see trampoline.h). Step order is
+/* The trampoline chunk template. The six `%s` receive, in order: the escaped
+ * mod loader root, the escaped mod root (empty string when unset), the escaped
+ * alternate-manager path (empty string when unset), the version assignment
+ * value (a quoted escaped string or nil), the splash-skip token (literal "1"
+ * or "", not escaped), and the escaped entry-file path — each becomes an
+ * internal bootstrap global (see trampoline.h). Step order is
  * io.open -> read -> loadstring -> run, guarded at each step except f:read, so
  * a read error is the one unguarded failure and surfaces as CHUNK PCALL FAILED
  * (caught by the outer pcall in trampoline_run). */
 static const char TRAMPOLINE_CHUNK_FMT[] =
     "MOD_LOADER_DIR = \"%s\"\n"
     "RELAY_MOD_PATH = \"%s\"\n"
+    "RELAY_MOD_MANAGER = \"%s\"\n"
     "MOD_RELAY_VERSION = %s\n"
     "RELAY_SKIP_SPLASH = \"%s\"\n"
     "local f, err = io.open(\"%s\", \"r\")\n"
@@ -49,7 +51,17 @@ int trampoline_escape_path(const char *path, size_t path_len,
     return (int)off;
 }
 
+int trampoline_path_has_control(const char *s, size_t len) {
+    if (!s) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7f) return 1;
+    }
+    return 0;
+}
+
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
+                           const char *mod_manager,
                            const char *entry_path, const char *relay_version,
                            int skip_splash,
                            char *out, size_t out_cap) {
@@ -76,6 +88,16 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
         int mn = trampoline_escape_path(mod_path, strlen(mod_path),
                                         esc_mod, sizeof(esc_mod));
         if (mn < 0) return -1;
+    }
+
+    /* The alternate-manager path is optional the same way: NULL/empty yields
+     * the empty-string global ("no alternate manager"). */
+    char esc_mgr[2048];
+    esc_mgr[0] = '\0';
+    if (mod_manager && mod_manager[0] != '\0') {
+        int gn = trampoline_escape_path(mod_manager, strlen(mod_manager),
+                                        esc_mgr, sizeof(esc_mgr));
+        if (gn < 0) return -1;
     }
 
     /* Product-version handoff is deliberately non-fatal. The 256-byte input
@@ -120,7 +142,7 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
     }
 
     int n = snprintf(out, out_cap, TRAMPOLINE_CHUNK_FMT,
-                     esc_loader, esc_mod, version_value,
+                     esc_loader, esc_mod, esc_mgr, version_value,
                      skip_splash ? "1" : "",
                      esc_entry);
     if (n < 0 || (size_t)n >= out_cap) return -1;  /* encoding error or overflow */

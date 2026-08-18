@@ -48,8 +48,9 @@ signals hook-ready.
   the mod loader sets it.
 - **Production trampoline + the mod loader.** The production trampoline is
    wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
-   engine's pcall) it injects the proven chunk — set the two root globals
-   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH`), the internal `RELAY_SKIP_SPLASH`
+   engine's pcall) it injects the proven chunk — set the root globals
+   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH` + the optional
+   `RELAY_MOD_MANAGER` alternate-manager path), the internal `RELAY_SKIP_SPLASH`
    switch (`"1"`/`""` from `--skip-splash`/`RELAY_SKIP_SPLASH=1`; the loader
    snapshots it to wrap `StateSplash.on_enter` when opted in), plus a temporary
    private handoff of the same manifest-derived full product version used by
@@ -100,18 +101,27 @@ signals hook-ready.
     closure-wraps `BootStateRequireGameScripts._state_update` exactly once it
     exists. That wrapper calls the original first (preserving its returns,
     never swallowing its errors), then a protected `advance_bootstrap` that —
-    with per-step retry/idempotency — loads the loader driver
-    (`mod_manager.lua`, which itself loads the DMF adapter
-    `dmf_adapter.lua` from the loader root), instantiates `Managers.mod`, and
-    directly closure-wraps `StateGame.update` + `GameStateMachine._change_state`
+    with per-step retry/idempotency — loads the **manager-slot occupant**
+    (the built-in `mod_manager.lua` from the loader root, or — when
+    `RELAY_MOD_MANAGER` is configured — the alternate manager class from
+    that exact path; a permanent alternate failure hard-exits, never a
+    managerless game — see
+    `docs/reference/relay/manager-slot.md`), loads `dmf_adapter.lua` exactly
+    once (published on `Mods._relay.dmf_adapter`), instantiates
+    `Managers.mod`, runs the manager-agnostic **chassis duties** (the
+    adapter's `establish()` publishing `Managers.mod` + restoring `_settings`
+    when nil, the DMF io observer, and the process-lifetime
+    `ModRelay:Version` Crashify publication with an update-wrap retry), and
+    directly closure-wraps
+    `StateGame.update` + `GameStateMachine._change_state`
     + `GameStateMachine.destroy` (no generic hook API, no loadstring-generated
     hook chain, no string-path deferred queue). The `destroy` wrapper dispatches
     one final `on_game_state_changed("exit", …)` for the active state before
     destruction (deduplicated against `_change_state` per state machine).
   The loader splits load into two phases: `init()` SCANs (reads `mods.lst`,
     builds the `_mods` table — the order file is authoritative, the loader
-    injects nothing — restores persisted manager settings via the adapter, and
-    registers the DMF IO observer via the adapter; no mod loaded), and the first
+    injects nothing; no mod loaded — the settings restore + observer
+    registration are chassis Step-1c duties, run under any manager), and the first
     `StateGame.update` tick LOADs (per-mod `run()` → nil/table validation →
     optional object `init()`, then
     `_state="done"` via the adapter) — deferred so boot-complete globals like
@@ -138,9 +148,10 @@ signals hook-ready.
     transition methods. Successful `run()` calls accept only nil (DMF-driven)
     or a table (outer-driven); malformed values fail only their entry and both
     initial/replacement attempts finalize unconditionally. Accepted descriptors
-    publish guarded per-generation `Mod:<name> = true` Crashify metadata, while
-    the private version snapshot publishes process-lifetime
-    `ModRelay:Version` exactly once and is never removed during reload.
+    publish guarded per-generation `Mod:<name> = true` Crashify metadata
+    (built-in manager), while the chassis publishes the process-lifetime
+    `ModRelay:Version` (attempted at manager creation, retried on the update
+    wrap until success) and never removes it during reload.
     The first escaped outer `init`/`update`/state-change error disables and
     best-effort unloads that entry for the generation. If the escaped outer
     boundary is `dmf`, Relay stops and reverse-cleans all current outer objects
@@ -169,6 +180,10 @@ signals hook-ready.
 
 This is **`mod_relay.exe`** — the C injector (`src/launcher/`), the
 process that creates the game suspended, injects the shell, and resumes it.
+Resolve config → **pre-flight the alternate mod manager** when configured
+(the target must exist as a regular file; otherwise a stderr diagnostic
+naming the path + its source flag/env, and the launcher exits 2 — the game
+process is never created) → publish the child env →
 `CreateProcess(Darktide.exe, SUSPENDED)`
 → inject `relay_shell.dll` → wait for `relay_hook_ready` → `ResumeThread` →
 exit. Sets `SteamAppId`/`SteamGameId`.
@@ -184,6 +199,7 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   | --- | --- | --- |
   | `--game-binary <path>` | `RELAY_GAME_BINARY` | — **(required)** |
   | `--mod-path <path>` | `RELAY_MOD_PATH` | unset (mods won't load) |
+  | `--mod-manager <file>` | `RELAY_MOD_MANAGER` | unset (no alternate manager; launch refuses if the configured file is missing, a directory, or — env-sourced — oversized) |
   | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
   | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
   | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
@@ -197,9 +213,9 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   self-locates the mod loader (`<dll-dir>\mod_loader\`); neither path is
   configurable. The launcher resolves the config, then publishes the
   shell-contract values (`SteamAppId`/`SteamGameId`, `RELAY_MOD_PATH`,
-  `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`, and — only when enabled —
-  `RELAY_LOG_LUA=1` and `RELAY_SKIP_SPLASH=1`) into the child env before
-  `CreateProcess`, so the injected shell inherits them. `RELAY_LOG_LUA` and
+  `RELAY_MOD_MANAGER`, `RELAY_LOG_FILE`, `RELAY_LOG_LEVEL`, and — only when
+  enabled — `RELAY_LOG_LUA=1` and `RELAY_SKIP_SPLASH=1`) into the child env
+  before `CreateProcess`, so the injected shell inherits them. `RELAY_LOG_LUA` and
   `RELAY_SKIP_SPLASH` are canonicalized: the launcher sets each to exactly `1`
   when the resolved config enables the feature (`--log-lua`/`--skip-splash` or
   the env `1` itself), and **removes** it (not set to `0`) when disabled, so a
@@ -236,6 +252,13 @@ app (it's the runtime that powers Mod Curator, but any caller works).
   relative paths there (absolute paths pass through verbatim — no
   containment; see
   `docs/architecture/MOD_LOADER-DMF.md` → "Raw `Mods.lua.io` redirection").
+- **The manager slot is replaceable:** the built-in manager is Relay's own
+  scan/load driver, but `--mod-manager` / `RELAY_MOD_MANAGER` points Relay at
+  an **alternate mod manager** file (used verbatim; the launch is refused if
+  the configured target is missing or not a file — and the game never
+  continues managerless under a configured alternate). The manager-facing
+  contract is normative in
+  `docs/reference/relay/manager-slot.md`.
 - **`mods.lst`** is a plain text file you author (or a mod manager generates): one
   mod folder name per line, in load order. It is **the Relay↔caller load-order
   contract** — the mod loader reads it authoritatively and loads exactly the
@@ -272,6 +295,7 @@ global, so no loader-path env var exists.
 | Env var | Set by | Read by | Meaning |
 | --- | --- | --- | --- |
 | `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod path** config value — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here; the `Mods.lua.io.open`/`io.lines` wrapper roots relative paths there and passes absolute paths through verbatim). Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
+| `RELAY_MOD_MANAGER` | launcher (only when `--mod-manager`/env configured) | shell trampoline + mod loader | the **alternate mod manager** selection — a file path used verbatim (no canonicalization/absolutization; relative paths resolve against the game's CWD at Lua load time, like `--mod-path`). The launcher pre-flights it (must exist as a regular file) before creating the game process and refuses to launch otherwise — an env value too long for the launcher's buffer is refused the same way, never degraded to the built-in; the shell reads it during trampoline staging — unset ⇒ empty `RELAY_MOD_MANAGER` (no alternate manager), but a **set** value that is unreadable/too-long/control-bearing is FATAL (logged at `ERROR`, `ExitProcess(1)` before the game resumes) so a configured manager is never silently dropped. |
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
 | `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
 | `RELAY_LOG_LUA` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_LUA=1` when the resolved config enables it (`--log-lua` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LOG_LUA=1` themselves — that is the external non-launcher contract. |

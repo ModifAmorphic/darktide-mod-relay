@@ -36,6 +36,7 @@
 
 #define ENV_GAME_BINARY  "RELAY_GAME_BINARY"
 #define ENV_MOD_PATH     "RELAY_MOD_PATH"
+#define ENV_MOD_MANAGER  "RELAY_MOD_MANAGER"
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
@@ -340,17 +341,25 @@ RELAY_INTERNAL int relay_build_command_line(const char *exe,
  * across resolve_config() calls — callers must copy out before re-resolving. */
 static char g_game_binary_buf[RELAY_PATH_MAX];
 static char g_mod_path_buf[RELAY_PATH_MAX];
+static char g_mod_manager_buf[RELAY_PATH_MAX];
 static char g_log_file_buf[RELAY_PATH_MAX];
 static char g_log_level_buf[32];
 static char g_steam_app_id_buf[32];
 
 /* Reads env_name into out. Returns 1 if the var is set and fit in outsz, 0 if
- * unset, empty, too long, or errored (treated as "not provided" so the next
- * precedence level — default — applies). */
-static int read_env(const char *env_name, char *out, size_t outsz) {
+ * unset, empty, or errored (treated as "not provided" so the next precedence
+ * level — default — applies), or -1 if the var is set but too long for outsz
+ * (would truncate; GetEnvironmentVariableA then returns the required size). */
+static int read_env_len(const char *env_name, char *out, size_t outsz) {
     DWORD n = GetEnvironmentVariableA(env_name, out, (DWORD)outsz);
-    if (n == 0 || n >= outsz) return 0;  /* unset/error, or truncated */
+    if (n == 0) return 0;
+    if (n >= outsz) return -1;
     return 1;
+}
+
+/* Boolean form for optional settings: only a clean read counts as provided. */
+static int read_env(const char *env_name, char *out, size_t outsz) {
+    return read_env_len(env_name, out, outsz) == 1;
 }
 
 /* Returns 1 only if env_name is set to exactly "1" (byte-for-byte). Unset,
@@ -452,6 +461,7 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
         const char **target;
         if      (strcmp(flag, "--game-binary")   == 0) target = &out->game_binary;
         else if (strcmp(flag, "--mod-path")      == 0) target = &out->mod_path;
+        else if (strcmp(flag, "--mod-manager")   == 0) target = &out->mod_manager;
         else if (strcmp(flag, "--log-file")      == 0) target = &out->log_file;
         else if (strcmp(flag, "--log-level")     == 0) target = &out->log_level;
         else if (strcmp(flag, "--steam-app-id")  == 0) target = &out->steam_app_id;
@@ -469,8 +479,16 @@ RELAY_INTERNAL int relay_parse_args(int argc, char **argv,
     return 0;
 }
 
-RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
-                                         relay_config *cfg) {
+/* Resolve flag > env > default into cfg (uses resolver-owned buffers for
+ * values not sourced from argv). game_arguments is threaded through unchanged
+ * (no env/default layer). Returns 0 on success; 1 on a fatal env error (the
+ * diagnostic is printed here; cfg is then partially filled and must not be
+ * used — main() refuses the launch): an env RELAY_MOD_MANAGER that is present
+ * but too long for the buffer must REFUSE, not degrade to the built-in
+ * manager (the never-silently-substitute policy). RELAY_MOD_PATH keeps its
+ * degrade-to-unset: it is optional, not an operator commitment. */
+RELAY_INTERNAL int relay_resolve_config(const relay_parsed_args *args,
+                                        relay_config *cfg) {
     /* game_arguments: purely flag-driven (the `--` rest-of-line tail) — no
      * env/default layer. Threaded through unchanged; it's a borrowed slice of
      * argv (not heap-owned), so nothing to free. */
@@ -492,6 +510,34 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
         cfg->mod_path = g_mod_path_buf;
     } else {
         cfg->mod_path = NULL;
+    }
+
+    /* mod_manager: optional — the alternate mod manager file, used verbatim
+     * (no canonicalization/absolutization, like mod_path). NULL (unset) means
+     * the trampoline emits an empty RELAY_MOD_MANAGER (no alternate manager);
+     * when set, main() pre-flights existence before creating the game. Unlike
+     * mod_path, an env value too long for the buffer is a REFUSAL, not a
+     * degrade-to-unset: the operator configured an alternate, and silently
+     * launching with the built-in would violate the never-substitute policy. */
+    if (args->mod_manager) {
+        cfg->mod_manager = args->mod_manager;
+    } else {
+        int mm = read_env_len(ENV_MOD_MANAGER, g_mod_manager_buf,
+                              sizeof(g_mod_manager_buf));
+        if (mm == 1) {
+            cfg->mod_manager = g_mod_manager_buf;
+        } else if (mm < 0) {
+            cfg->mod_manager = NULL;  /* never the built-in by substitution */
+            fprintf(stderr, "[launcher] error: env %s needs a %lu-char buffer "
+                    "(max %d); refusing to launch rather than fall back to "
+                    "the built-in manager\n",
+                    ENV_MOD_MANAGER,
+                    GetEnvironmentVariableA(ENV_MOD_MANAGER, NULL, 0),
+                    RELAY_PATH_MAX);
+            return 1;
+        } else {
+            cfg->mod_manager = NULL;
+        }
     }
 
     /* log_file: default <launcher-dir>\relay.log */
@@ -532,6 +578,36 @@ RELAY_INTERNAL void relay_resolve_config(const relay_parsed_args *args,
      * only the exact env value RELAY_SKIP_SPLASH=1 enables. Default off. Same
      * exact-match policy as log_lua_enabled. */
     cfg->skip_splash_enabled = args->skip_splash_enabled ? 1 : env_is_exact_one(ENV_SKIP_SPLASH);
+
+    return 0;
+}
+
+/* ---- alternate mod manager pre-flight ------------------------------------- */
+
+/* Verify the configured alternate mod manager exists and is a regular file
+ * BEFORE any process is created: a configured-but-missing manager must refuse
+ * the launch (never silently launch a managerless game). `source` names where
+ * the value came from ("--mod-manager" or "env RELAY_MOD_MANAGER") so the
+ * diagnostic tells the operator which setting to fix. Returns 0 when
+ * unconfigured (NULL) or valid, 1 on missing/directory (with a stderr
+ * diagnostic). */
+RELAY_INTERNAL int relay_check_mod_manager(const char *mod_manager,
+                                           const char *source) {
+    if (mod_manager == NULL) return 0;
+
+    DWORD attrs = GetFileAttributesA(mod_manager);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        fprintf(stderr, "[launcher] error: alternate mod manager not found: "
+                "%s (from %s)\n", mod_manager, source);
+        return 1;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        fprintf(stderr, "[launcher] error: alternate mod manager is a "
+                "directory (expected a file): %s (from %s)\n",
+                mod_manager, source);
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- usage --------------------------------------------------------------- */
@@ -553,6 +629,9 @@ static void print_usage(FILE *out, const char *prog) {
         "Optional:\n"
         "  --mod-path <path>      staged mods dir; mods won't load if unset\n"
         "                         [env: RELAY_MOD_PATH] [default: unset]\n"
+        "  --mod-manager <file>   alternate mod manager file; the launch is\n"
+        "                         refused unless it exists as a regular file\n"
+        "                         [env: RELAY_MOD_MANAGER] [default: unset]\n"
         "  --log-file <path>      launcher/shell log file\n"
         "                         [env: RELAY_LOG_FILE]\n"
         "                         [default: <launcher-dir>\\relay.log]\n"
@@ -628,12 +707,27 @@ int main(int argc, char **argv) {
     }
 
     relay_config cfg;
-    relay_resolve_config(&args, &cfg);
+    if (relay_resolve_config(&args, &cfg) != 0) {
+        /* Fatal env error (diagnostic already printed — e.g. an oversized
+         * env RELAY_MOD_MANAGER must refuse, never degrade to the built-in). */
+        return 2;
+    }
 
     if (!cfg.game_binary) {
         fprintf(stderr, "[launcher] error: --game-binary is required "
                 "(or set %s)\n", ENV_GAME_BINARY);
         print_usage(stderr, argv[0]);
+        return 2;
+    }
+
+    /* Pre-flight the alternate mod manager before anything is created: when
+     * one is configured it must exist as a regular file, or the launch is
+     * refused (never launch a silently managerless game). The source label
+     * distinguishes flag vs env in the diagnostic (flag wins when both set,
+     * so the flag is the one named). */
+    if (relay_check_mod_manager(cfg.mod_manager,
+                                args.mod_manager ? "--mod-manager"
+                                                 : "env " ENV_MOD_MANAGER) != 0) {
         return 2;
     }
 
@@ -649,6 +743,12 @@ int main(int argc, char **argv) {
     SetEnvironmentVariableA(ENV_LOG_LEVEL, cfg.log_level);
     if (cfg.mod_path) {
         SetEnvironmentVariableA(ENV_MOD_PATH, cfg.mod_path);
+    }
+    /* RELAY_MOD_MANAGER follows the same set-only-when-configured policy as
+     * RELAY_MOD_PATH (presence in the child env IS the configuration; no
+     * canonicalization/removal when unset). */
+    if (cfg.mod_manager) {
+        SetEnvironmentVariableA(ENV_MOD_MANAGER, cfg.mod_manager);
     }
     /* Canonical child inheritance for the value-less log switches: set the
      * exact "1" when enabled, or REMOVE it when disabled so a stale parent

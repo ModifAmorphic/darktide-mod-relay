@@ -38,6 +38,7 @@
 typedef struct {
     const char *game_binary;      /* required: no default (NULL if unresolved)  */
     const char *mod_path;         /* optional: NULL => trampoline skips        */
+    const char *mod_manager;      /* optional alternate mod manager file: NULL => trampoline emits "" */
     const char *log_file;         /* default: <launcher-dir>\relay.log */
     const char *log_level;        /* default: info                              */
     const char *steam_app_id;     /* default: 1361210                           */
@@ -60,6 +61,7 @@ typedef struct {
 typedef struct {
     const char *game_binary;
     const char *mod_path;
+    const char *mod_manager;
     const char *log_file;
     const char *log_level;
     const char *steam_app_id;
@@ -112,8 +114,24 @@ int relay_parse_args(int argc, char **argv, relay_parsed_args *out);
 
 /* Resolve flag > env > default into cfg (uses resolver-owned buffers for
  * values not sourced from argv). game_arguments is threaded through unchanged
- * (no env/default layer). */
-void relay_resolve_config(const relay_parsed_args *args, relay_config *cfg);
+ * (no env/default layer). Returns 0 on success; 1 on a fatal env error (the
+ * stderr diagnostic is printed by the resolver, cfg->mod_manager is left
+ * NULL, and the REST of cfg is partially filled and must not be used — the
+ * caller refuses the launch): an env
+ * RELAY_MOD_MANAGER that is present but too long for the resolver buffer
+ * refuses rather than degrading to the built-in manager. RELAY_MOD_PATH keeps
+ * its degrade-to-unset (an optional value). */
+int relay_resolve_config(const relay_parsed_args *args, relay_config *cfg);
+
+/* Pre-flight the configured alternate mod manager (the RELAY_MOD_MANAGER
+ * config value): when one is configured it must exist and be a regular file
+ * before the game process is created — a missing target would otherwise
+ * silently launch a managerless game. NULL (not configured) is an immediate
+ * pass. `source` names where the value came from ("--mod-manager" or
+ * "env RELAY_MOD_MANAGER") for the stderr diagnostic. Returns 0 when
+ * unconfigured or valid; 1 (after a stderr diagnostic naming the path and its
+ * source) when the target is missing or a directory. */
+int relay_check_mod_manager(const char *mod_manager, const char *source);
 
 /* Build the child command line for CreateProcessA: the exe as argv[0]
  * (always wrapped in double quotes, byte-for-byte the legacy form), followed

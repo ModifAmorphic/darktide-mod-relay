@@ -2,7 +2,8 @@
 --
 -- All mod-relative access roots at Mods._mod_root (= _mod_path .. "/mods"); this
 -- is the surface mod_manager + DMF's adapted io_* methods delegate to. Callers
--- pass a mod-RELATIVE path; resolve() rejects NUL/drive/UNC/absolute/".." for
+-- pass a mod-RELATIVE path (or join-form components — see normalize_args);
+-- resolve() rejects NUL/drive/UNC/absolute/".." for
 -- the internal code-loading surface (Mods.file.*) only — path validation, not
 -- OS-level sandboxing (mods still hold the captured raw io). See the resolve()
 -- code site for the exact rules.
@@ -111,6 +112,60 @@ local function resolve(relative)
     return mod_root .. "/" .. norm
 end
 
+-- Validate one join-form component as a single path segment: a non-empty
+-- string with no "..", separator, NUL, or ":" (a colon spliced mid-path
+-- could qualify a drive or an NTFS alternate data stream — resolve() only
+-- rejects those at the path start). Returns (component) | (nil, reason).
+local function check_component(value)
+    if type(value) ~= "string" then
+        return nil, "non-string path component"
+    end
+    if value == "" then
+        return nil, "empty path component"
+    end
+    if value == ".." then
+        return nil, "'..' path component"
+    end
+    if value:find("\0", 1, true) then
+        return nil, "nul byte in path component"
+    end
+    if value:find("/", 1, true) or value:find("\\", 1, true) then
+        return nil, "path separator in path component"
+    end
+    if value:find(":", 1, true) then
+        return nil, "':' in path component"
+    end
+    return value
+end
+
+-- Normalize a public op's arguments to (relative_path, args), or
+-- (nil, nil, reason) on a join-form component violation. A STRING second
+-- argument selects the join form — (name, ext) -> "<name>.<ext>" or
+-- (dir, name, ext[, args]) -> "<dir>/<name>.<ext>", ext BARE ("mod", not
+-- ".mod"; components validated per check_component) — so the joined basename
+-- always carries an extension (resolve()'s .lua append never fires on it).
+-- Any other second argument is the path form, returned verbatim. Full
+-- surface contract: docs/reference/relay/manager-slot.md.
+local function normalize_args(first, second, third, fourth)
+    if type(second) ~= "string" then
+        return first, second
+    end
+    if third == nil then
+        local name, nerr = check_component(first)
+        if not name then return nil, nil, nerr end
+        local ext, eerr = check_component(second)
+        if not ext then return nil, nil, eerr end
+        return name .. "." .. ext, fourth
+    end
+    local dir, derr = check_component(first)
+    if not dir then return nil, nil, derr end
+    local name, nerr = check_component(second)
+    if not name then return nil, nil, nerr end
+    local ext, eerr = check_component(third)
+    if not ext then return nil, nil, eerr end
+    return dir .. "/" .. name .. "." .. ext, fourth
+end
+
 -- Open-once raw reader. Guarantees f:close() even if read raises. Returns
 -- (true, content) | (false, err); unsafe callers convert the err to a raised
 -- error.
@@ -186,67 +241,84 @@ end
 -- Safe variants return false on failure and the chunk value (with-return) or
 -- true (boolean exec) on success. Unsafe variants propagate compile/runtime
 -- failures. Observers fire only after a successful execution.
+--
+-- Every op takes two argument shapes, selected by the second argument (the
+-- discriminator + component rules live in normalize_args): the path form
+-- (path, args?) — args any non-string type, ignored by reads — or the join
+-- form (name, ext) / (dir, name, ext[, args]) — the manager-slot convention
+-- (AML: exec_with_return(folder, folder, "mod")). Full surface contract:
+-- docs/reference/relay/manager-slot.md.
 -- ---------------------------------------------------------------------------
 
 -- Safe dofile (with return). Returns the chunk value, or false on failure.
-function Mods.file.dofile(path, args)
-    local full, rerr = resolve(path)
+function Mods.file.dofile(...)
+    local rel, args, err = normalize_args(...)
+    if err ~= nil then return false, err end
+    local full, rerr = resolve(rel)
     if not full then return false, rerr end
     local ok, data = read_raw(full)
     if not ok then return false, data end
     local success, value = execute(full, data, args, false)
     if not success then return false, value end
-    notify_observers(path, args, value)
+    notify_observers(rel, args, value)
     return value
 end
 
 -- Unsafe dofile (with return). Propagates compile/runtime failures.
-function Mods.file.dofile_unsafe(path, args)
-    local full, rerr = resolve(path)
+function Mods.file.dofile_unsafe(...)
+    local rel, args, err = normalize_args(...)
+    if err ~= nil then _error(err, 2) end
+    local full, rerr = resolve(rel)
     if not full then _error(rerr, 2) end
     local ok, data = read_raw(full)
     if not ok then _error(_tostring(data), 2) end
     local value = execute(full, data, args, true)
-    notify_observers(path, args, value)
+    notify_observers(rel, args, value)
     return value
 end
 
 -- Safe exec (boolean). Returns true on success, false on failure.
-function Mods.file.exec(path, args)
-    local full, rerr = resolve(path)
+function Mods.file.exec(...)
+    local rel, args, err = normalize_args(...)
+    if err ~= nil then return false end
+    local full, rerr = resolve(rel)
     if not full then return false end
     local ok, data = read_raw(full)
     if not ok then return false end
     local success = execute(full, data, args, false)
     if not success then return false end
-    notify_observers(path, args, true)
+    notify_observers(rel, args, true)
     return true
 end
 
 -- Unsafe exec (boolean). Propagates compile/runtime failures.
-function Mods.file.exec_unsafe(path, args)
-    local full, rerr = resolve(path)
+function Mods.file.exec_unsafe(...)
+    local rel, args, err = normalize_args(...)
+    if err ~= nil then _error(err, 2) end
+    local full, rerr = resolve(rel)
     if not full then _error(rerr, 2) end
     local ok, data = read_raw(full)
     if not ok then _error(_tostring(data), 2) end
     execute(full, data, args, true)
-    notify_observers(path, args, true)
+    notify_observers(rel, args, true)
     return true
 end
 
 -- Safe exec with return. Same contract as dofile.
-function Mods.file.exec_with_return(path, args)
-    return Mods.file.dofile(path, args)
+function Mods.file.exec_with_return(...)
+    return Mods.file.dofile(...)
 end
 
 -- Unsafe exec with return. Same contract as dofile_unsafe.
-function Mods.file.exec_unsafe_with_return(path, args)
-    return Mods.file.dofile_unsafe(path, args)
+function Mods.file.exec_unsafe_with_return(...)
+    return Mods.file.dofile_unsafe(...)
 end
 
 -- Safe raw-content read. Returns the file content, or false on failure.
-function Mods.file.read_content(path)
-    local full, rerr = resolve(path)
+function Mods.file.read_content(...)
+    local rel, _, err = normalize_args(...)
+    if err ~= nil then return false end
+    local full, rerr = resolve(rel)
     if not full then return false end
     local ok, data = read_raw(full)
     if not ok then return false end
@@ -255,8 +327,10 @@ end
 
 -- Safe trimmed line-list read. Skips blank and "--" comment lines.
 -- Returns the line list, or false on failure.
-function Mods.file.read_content_to_table(path)
-    local full, rerr = resolve(path)
+function Mods.file.read_content_to_table(...)
+    local rel, _, err = normalize_args(...)
+    if err ~= nil then return false end
+    local full, rerr = resolve(rel)
     if not full then return false end
     local ok, list = read_lines(full)
     if not ok then return false end

@@ -100,6 +100,7 @@ local test_files = {
     "test_class_registry",
     "test_require_bridge",
     "test_lifecycle",
+    "test_alternate_manager",
     "test_mod_manager",
     "test_dmf_adapter",
     "test_hot_reload",

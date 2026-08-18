@@ -36,6 +36,14 @@ local M = {}
 M.MOD_LOADER_ROOT = "/mod_loader"
 M.MOD_ROOT = "/mods"
 
+-- The conventional staged alternate mod manager path (RELAY_MOD_MANAGER /
+-- --mod-manager). Tests set this onto the sandbox as the trampoline-baked
+-- RELAY_MOD_MANAGER global and stage their replacement-manager chunk at the
+-- same key in the io files map. Production bakes the user-configured path
+-- VERBATIM — tests asserting verbatim pass-through stage their own exact
+-- strings (the io mock normalizes only its own lookup keys, never the arg).
+M.MOD_MANAGER_PATH = "/alt/mod_manager.lua"
+
 -- The loader's active modules (the entry bootstraps them in this order).
 -- Excludes tests/ (harness) — not runtime.
 M.MOD_LOADER_MODULES = { "file", "class_registry", "lifecycle", "require_bridge" }
@@ -199,6 +207,10 @@ function M.stage_mod_loader()
     -- path.lua is loaded on-demand by file.lua (not in the bootstrap list),
     -- but must be staged at the loader root so Mods.load_module("path") finds it.
     files[M.MOD_LOADER_ROOT .. "/path.lua"] = M.read_module("path")
+    -- dmf_adapter.lua is loaded on-demand by lifecycle.lua at module scope
+    -- (published on Mods._relay.dmf_adapter; mod_manager reads it from there),
+    -- so it must likewise be staged at the loader root.
+    files[M.MOD_LOADER_ROOT .. "/dmf_adapter.lua"] = M.read_module("dmf_adapter")
     return files
 end
 
