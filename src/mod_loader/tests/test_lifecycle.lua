@@ -4,7 +4,9 @@
 --   - coordinator installs class_registry once `class` appears
 --   - BootStateRequireGameScripts._state_update wrapped exactly once
 --   - original _state_update runs FIRST (its return preserved); bootstrap runs after
---   - bootstrap loads mod_manager + instantiates Managers.mod once
+--   - bootstrap loads mod_manager + instantiates Managers.mod once, then runs the
+--     manager-agnostic chassis duties (Step 1c: single dmf_adapter module load +
+--     establish + exactly-one io observer + Crashify version publication)
 --   - StateGame.update wrapped once; Managers.mod:update runs BEFORE engine update
 --   - GameStateMachine._change_state wrapped once; exit BEFORE + enter AFTER the transition
 --   - missing class/method degrades to a log + vanilla (no crash)
@@ -22,6 +24,12 @@ return function(runner)
         -- lifecycle reads leveled diagnostics from Mods._relay.log_<level> (the
         -- helper init.lua publishes in production). Isolated test — attach it.
         mock.attach_logger(sb)
+        -- A valid version + silent Crashify stub so the chassis Step-1c version
+        -- publication succeeds quietly (tests asserting log positions depend on
+        -- the extra diagnostics NOT appearing; version-publication behavior is
+        -- covered by the dedicated chassis tests below).
+        sb.Mods._relay.version = "0.3.0-beta.2"
+        sb.Crashify = { print_property = function() end }
         sb.Managers = {}
         sb.__print = print_fn or function() end
 
@@ -33,10 +41,16 @@ return function(runner)
 
         -- fake ModManager (loaded by the bootstrap via Mods.load_module).
         -- new() yields an instance whose update/on_game_state_changed are
-        -- spies the test can observe.
+        -- spies the test can observe. dmf_adapter is served REAL: lifecycle's
+        -- module scope loads it exactly once (the chassis publish Step 1c and
+        -- mod_manager's init read), and its establish/register are
+        -- manager-agnostic.
         local manager_updates = {}
         local manager_gsc = {}
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return {
                     new = function()
@@ -280,10 +294,15 @@ return function(runner)
         local sb = mock.new_sandbox()
         sb.Mods = {}
         mock.attach_logger(sb)
+        sb.Mods._relay.version = "0.3.0-beta.2"
+        sb.Crashify = { print_property = function() end }
         sb.Managers = {}
         sb.__print = opts.print_fn or function() end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return {
                     new = function()
@@ -865,6 +884,9 @@ return function(runner)
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return { new = function()
                     return {
@@ -954,6 +976,9 @@ return function(runner)
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return { new = function()
                     return {
@@ -997,6 +1022,9 @@ return function(runner)
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return { new = function()
                     return {
@@ -1038,6 +1066,9 @@ return function(runner)
         sb.__print = function() end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return { new = function()
                     news = news + 1
@@ -1095,6 +1126,9 @@ return function(runner)
         sb.__print = function(m) table.insert(logged, m) end
         sb.class = function(name) return { name = name } end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return { new = function()
                     return { update = function() end, on_game_state_changed = function() end }
@@ -1161,6 +1195,8 @@ return function(runner)
         sb.Mods = {}
         sb.Mods._relay = { skip_splash = true }  -- the opt-in (init.lua sets this)
         mock.attach_logger(sb)  -- adds log_<level> alongside skip_splash
+        sb.Mods._relay.version = "0.3.0-beta.2"
+        sb.Crashify = { print_property = function() end }
         sb.Managers = {}
         sb.__print = opts.print_fn or function() end
         sb.class = function(name) return { name = name } end
@@ -1174,6 +1210,9 @@ return function(runner)
             return nil
         end
         sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
             if name == "mod_manager" then
                 return {
                     new = function()
@@ -1427,5 +1466,559 @@ return function(runner)
             end
         end
         runner.assert_truthy(splash_logged, "absent StateSplash is logged (diagnosable)")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Chassis duties (Step 1c): single dmf_adapter module load, adapter
+    -- establish (Managers.mod publication + settings restore-if-nil), exactly
+    -- one io-observer registration under any manager, and the process-lifetime
+    -- Crashify version publication (attempt at creation, retry on the
+    -- StateGame.update wrap).
+    -- ---------------------------------------------------------------------
+
+    -- Full-boot helper for the chassis-duty tests: coordinator + BSR wrap + one
+    -- advance tick with StateGame/GSM declared so the bootstrap completes on
+    -- that tick. The manager comes from the sandbox's (possibly overridden)
+    -- load_module fake. Returns (bsr, sg).
+    local function setup_booted(sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        local sg = sb.class("StateGame")
+        sg.update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, n) self._state = { name = n } end
+        gsm.current_state_name = function(self)
+            return self._state and self._state.name or nil
+        end
+        gsm.destroy = function() end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)
+        return bsr, sg
+    end
+
+    runner.register("lifecycle: chassis + real built-in manager -> exactly one io observer + version precedes mod keys", function()
+        -- Full-real integration: real lifecycle + real dmf_adapter + real
+        -- mod_manager. The built-in's init constructs its own adapter (for its
+        -- per-mod driving); the chassis Step 1c must use THAT instance for
+        -- establish + register, so exactly one io observer registers per
+        -- process no matter how many boot/update ticks run.
+        local sb = mock.new_sandbox()
+        sb.Mods = { file = {} }
+        mock.attach_logger(sb)
+        sb.Mods._relay.version = "0.4.0-test"
+        local add_calls = 0
+        sb.Mods.file.add_observer = function(fn) add_calls = add_calls + 1 end
+        sb.Mods.file.read_content_to_table = function(path)
+            runner.assert_eq("mods.lst", path)
+            return { "some_dmf_mod" }
+        end
+        sb.Mods.file.exec_with_return = function(path)
+            if path == "some_dmf_mod/some_dmf_mod.mod" then
+                return { run = function() end }  -- DMF-driven (nil result)
+            end
+            return false
+        end
+        local crash_calls = {}
+        sb.Crashify = {
+            print_property = function(key, value)
+                crash_calls[#crash_calls + 1] = { key, value }
+            end,
+            remove_print_property = function() end,
+        }
+        sb.Keyboard = {
+            button_index = function() return 1 end,
+            pressed = function() return false end,
+            button = function() return 0 end,
+        }
+        sb.Managers = {}
+        sb.__print = function() end
+        -- class usable by the real mod_manager (declares class("ModManager")).
+        sb.class = function(name)
+            local meta = { name = name }
+            meta.__index = meta
+            meta.new = function(self, ...)
+                local inst = setmetatable({}, meta)
+                if meta.init then meta.init(inst, ...) end
+                return inst
+            end
+            return meta
+        end
+        sb.Mods.load_module = function(name)
+            return mock.run_module(name, sb)
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)  -- chassis loads dmf_adapter once here
+
+        local bsr, sg = setup_booted(sb)
+        local mm = sb.Managers.mod
+        runner.assert_not_nil(mm, "the real built-in manager was created")
+        runner.assert_not_nil(rawget(mm, "_adapter"),
+            "the built-in constructed its own adapter instance")
+        runner.assert_eq(false, mm._settings.developer_mode,
+            "chassis establish restored _settings (default false)")
+        runner.assert_eq(1, add_calls,
+            "exactly one io observer registered (chassis used the manager's adapter)")
+
+        -- The version property published once at creation, BEFORE any per-mod
+        -- key from the load pass (which runs on the first StateGame tick).
+        sg.update(sg, 0.016)
+        runner.assert_eq({ { "ModRelay:Version", "0.4.0-test" },
+                           { "Mod:some_dmf_mod", true } }, crash_calls,
+            "version precedes per-mod keys; one of each")
+        runner.assert_eq("done", mm._state, "the real manager completed its load pass")
+
+        -- Later ticks (boot + update) register/publish nothing further.
+        bsr._state_update(bsr)
+        sg.update(sg, 0.016)
+        runner.assert_eq(1, add_calls, "observer count stays one across later ticks")
+        runner.assert_eq(2, #crash_calls, "no further property publications")
+    end)
+
+    runner.register("lifecycle: chassis establish restores settings-if-nil for a manager that set none", function()
+        local sb = setup()
+        local mgr
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    mgr = { update = function() end, on_game_state_changed = function() end }
+                    return mgr
+                end }
+            end
+        end
+        setup_booted(sb)
+        runner.assert_eq(mgr, sb.Managers.mod, "the alternate manager occupies the slot")
+        runner.assert_type("table", mgr._settings,
+            "chassis establish restored _settings for a manager that set none")
+        runner.assert_eq(false, mgr._settings.developer_mode)
+        runner.assert_nil(rawget(mgr, "_adapter"),
+            "the chassis adapter instance is NOT stored on the manager")
+    end)
+
+    runner.register("lifecycle: chassis establish is a no-op for a manager that set its own _settings", function()
+        local sb = setup()
+        local own_settings = { developer_mode = true, log_level = 3 }
+        local mgr
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    mgr = {
+                        _settings = own_settings,
+                        update = function() end,
+                        on_game_state_changed = function() end,
+                    }
+                    return mgr
+                end }
+            end
+        end
+        setup_booted(sb)
+        runner.assert_eq(own_settings, mgr._settings,
+            "a manager-set _settings keeps its identity (restore-if-nil only)")
+        runner.assert_eq(true, mgr._settings.developer_mode)
+        runner.assert_eq(3, mgr._settings.log_level, "unrelated fields untouched")
+    end)
+
+    runner.register("lifecycle: a transient Step-1c failure retries without double observer registration", function()
+        -- The manager exposes a shape-compatible _adapter (the built-in path).
+        -- Its establish raises on the first attempt: the boot wrapper contains
+        -- + logs the failure, creation is NOT redone, and the retry tick
+        -- re-runs the duties — register fires only after establish succeeds,
+        -- exactly once.
+        local logged = {}
+        local sb = setup(function(m) table.insert(logged, m) end)
+        local establish_calls, register_calls = 0, 0
+        sb.Mods.load_module = function(name)
+            if name == "mod_manager" then
+                return { new = function()
+                    return {
+                        _adapter = {
+                            establish = function(self)
+                                establish_calls = establish_calls + 1
+                                if establish_calls == 1 then
+                                    error("transient establish boom")
+                                end
+                            end,
+                            register_io_observer = function(self)
+                                register_calls = register_calls + 1
+                            end,
+                        },
+                        update = function() end,
+                        on_game_state_changed = function() end,
+                    }
+                end }
+            end
+        end
+        local bsr, sg = setup_booted(sb)
+        runner.assert_eq(1, establish_calls, "first tick attempted establish")
+        runner.assert_eq(0, register_calls, "register never ran past the failed establish")
+        runner.assert_not_nil(sb.Managers.mod, "the manager itself was created once")
+        local failed_logged = false
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("bootstrap failed", 1, true) then
+                failed_logged = true; break
+            end
+        end
+        runner.assert_truthy(failed_logged, "the Step-1c failure is logged + contained")
+
+        -- Retry tick: establish succeeds, register fires exactly once, and the
+        -- bootstrap completes (a third tick short-circuits — no more attempts).
+        bsr._state_update(bsr)
+        runner.assert_eq(2, establish_calls, "retry tick re-ran establish")
+        runner.assert_eq(1, register_calls, "register fired exactly once")
+        bsr._state_update(bsr)
+        runner.assert_eq(2, establish_calls, "completed flag stops further duty attempts")
+        runner.assert_eq(1, register_calls)
+    end)
+
+    runner.register("lifecycle: version published exactly once at creation when Crashify present", function()
+        local sb = setup()
+        local prints = {}
+        sb.Crashify = {
+            print_property = function(key, value)
+                prints[#prints + 1] = { key, value }
+            end,
+        }
+        sb.Mods._relay.version = "9.9.9-test"
+        local bsr, sg = setup_booted(sb)
+        runner.assert_eq({ { "ModRelay:Version", "9.9.9-test" } }, prints,
+            "published once at manager creation")
+        runner.assert_eq(true, sb.Mods._relay.crashify_version_published)
+        -- Boot + update ticks never re-publish.
+        bsr._state_update(bsr)
+        sg.update(sg, 0.016)
+        sg.update(sg, 0.016)
+        runner.assert_eq(1, #prints, "the flag short-circuits all later ticks")
+    end)
+
+    runner.register("lifecycle: version publication retries across update ticks when Crashify appears late", function()
+        local logged = {}
+        local sb = setup(function(m) table.insert(logged, m) end)
+        sb.Crashify = nil  -- absent at creation
+        local prints = {}
+        local bsr, sg = setup_booted(sb)
+        runner.assert_eq(0, #prints, "nothing published while Crashify is absent")
+        sg.update(sg, 0.016)
+        sg.update(sg, 0.016)
+        runner.assert_eq(0, #prints, "contained retries publish nothing while absent")
+        local unavailable_logs = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("Crashify unavailable", 1, true) then
+                unavailable_logs = unavailable_logs + 1
+            end
+        end
+        runner.assert_eq(1, unavailable_logs, "the unavailable case logs once")
+
+        -- Crashify appears: the next update tick publishes, exactly once.
+        sb.Crashify = {
+            print_property = function(key, value)
+                prints[#prints + 1] = { key, value }
+            end,
+        }
+        sg.update(sg, 0.016)
+        runner.assert_eq({ { "ModRelay:Version", "0.3.0-beta.2" } }, prints,
+            "late Crashify publishes on the next update tick")
+        sg.update(sg, 0.016)
+        bsr._state_update(bsr)
+        runner.assert_eq(1, #prints, "still exactly one publication after success")
+    end)
+
+    runner.register("lifecycle: a throwing Crashify.print_property never breaks bootstrap or update", function()
+        local logged = {}
+        local sb, manager_updates = setup(function(m) table.insert(logged, m) end)
+        local prints = {}
+        sb.Crashify = {
+            print_property = function() error("crashify boom") end,
+        }
+        -- Install the counting engine update BEFORE the wrap (it becomes the
+        -- wrapped original the bootstrap calls after m:update).
+        local engine_updates = 0
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        local sg = sb.class("StateGame")
+        sg.update = function() engine_updates = engine_updates + 1 end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, n) self._state = { name = n } end
+        gsm.current_state_name = function(self)
+            return self._state and self._state.name or nil
+        end
+        gsm.destroy = function() end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)  -- completes: the Step-1c throw is contained
+        runner.assert_not_nil(sb.Managers.mod,
+            "the throw was contained: manager creation + duties completed")
+
+        -- The update wrap retries publication before m:update; a throwing
+        -- print_property must not break the wrap, the manager update, or the
+        -- engine update.
+        local ok, err = pcall(function() sg.update(sg, 0.016) end)
+        runner.assert_eq(true, ok, "update must not propagate the Crashify throw: " .. tostring(err))
+        runner.assert_eq(1, engine_updates, "engine update still ran")
+        runner.assert_eq(0.016, manager_updates[1], "manager update still ran")
+        runner.assert_eq(0, #prints, "nothing published while print_property throws")
+        local throw_logs = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("version publication failed", 1, true) then
+                throw_logs = throw_logs + 1
+            end
+        end
+        runner.assert_eq(1, throw_logs, "the throw case logs once")
+
+        -- Recovery: print_property stops raising; a later tick publishes.
+        sb.Crashify = {
+            print_property = function(key, value)
+                prints[#prints + 1] = { key, value }
+            end,
+        }
+        sg.update(sg, 0.016)
+        runner.assert_eq({ { "ModRelay:Version", "0.3.0-beta.2" } }, prints,
+            "publication succeeds once print_property recovers")
+        sg.update(sg, 0.016)
+        runner.assert_eq(1, #prints)
+    end)
+
+    runner.register("lifecycle: an invalid private version logs once and never publishes", function()
+        local logged = {}
+        local sb = setup(function(m) table.insert(logged, m) end)
+        sb.Mods._relay.version = "bad\nversion"  -- control byte -> invalid
+        local prints = {}
+        sb.Crashify = {
+            print_property = function(key, value)
+                prints[#prints + 1] = { key, value }
+            end,
+        }
+        local bsr, sg = setup_booted(sb)
+        runner.assert_not_nil(sb.Managers.mod, "the invalid version never blocks bootstrap")
+        sg.update(sg, 0.016)
+        sg.update(sg, 0.016)
+        runner.assert_eq(0, #prints, "an invalid version is never published")
+        runner.assert_nil(sb.Mods._relay.crashify_version_published)
+        local invalid_logs = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find("version crash metadata unavailable", 1, true) then
+                invalid_logs = invalid_logs + 1
+            end
+        end
+        runner.assert_eq(1, invalid_logs, "the invalid-version case logs once")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Throttled containment-error logging (log_contained_error). The five
+    -- chassis containment sites coalesce same-key recurrences: first
+    -- occurrence immediate (byte-identical plain ERROR), recurrences within
+    -- 10s counted silently, first recurrence after the window logs with a
+    -- suppressed-count suffix, keys are per-site + per-error-text, and a
+    -- missing/broken clock degrades to logging every occurrence.
+    -- ---------------------------------------------------------------------
+
+    -- Full boot with a mock clock on Mods.lua.os.time (read at CALL time by
+    -- the helper; advance rec.clock.now between drives) and a manager whose
+    -- update / on_game_state_changed raise whatever the test stages on
+    -- mgr.update_err / mgr.gsc_exit_err / mgr.gsc_enter_err (error level 0 so
+    -- the error value is exactly the staged string — no position prefix).
+    -- Errors use error(msg, 0) so tostring(err) is byte-exact for assertions.
+    local function setup_throttled(opts)
+        opts = opts or {}
+        local clock = { now = opts.t0 or 1000 }
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.Mods = {}
+        mock.attach_logger(sb)
+        sb.Mods._relay.version = "0.3.0-beta.2"
+        sb.Crashify = { print_property = function() end }
+        sb.Managers = {}
+        sb.__print = function(m) logged[#logged + 1] = m end
+        if opts.no_clock then
+            sb.Mods.lua = {}  -- no os surface -> unthrottled degradation
+        else
+            sb.Mods.lua = { os = { time = function() return clock.now end } }
+        end
+        sb.class = function(name) return { name = name } end
+        local mgr = { update_err = nil, gsc_exit_err = nil, gsc_enter_err = nil }
+        sb.Mods.load_module = function(name)
+            if name == "dmf_adapter" then
+                return mock.run_module("dmf_adapter", sb)
+            end
+            if name == "mod_manager" then
+                return {
+                    new = function()
+                        return {
+                            update = function()
+                                if mgr.update_err then error(mgr.update_err, 0) end
+                            end,
+                            on_game_state_changed = function(_, status)
+                                if status == "exit" and mgr.gsc_exit_err then
+                                    error(mgr.gsc_exit_err, 0)
+                                elseif status == "enter" and mgr.gsc_enter_err then
+                                    error(mgr.gsc_enter_err, 0)
+                                end
+                            end,
+                        }
+                    end,
+                }
+            end
+        end
+        mock.run_module("class_registry", sb)
+        mock.run_module("lifecycle", sb)
+        sb.Mods.coordinate_bootstrap()
+        local bsr = sb.class("BootStateRequireGameScripts")
+        bsr._state_update = function() end
+        local sg = sb.class("StateGame")
+        sg.update = function() end
+        local gsm = sb.class("GameStateMachine")
+        gsm._change_state = function(self, n) self._state = { name = n } end
+        gsm.current_state_name = function(self)
+            return self._state and self._state.name or nil
+        end
+        gsm.destroy = function() end
+        sb.Mods.coordinate_bootstrap()
+        bsr._state_update(bsr)  -- completes the bootstrap (wraps steps 2-4)
+        local rec = {
+            sb = sb, clock = clock, logged = logged,
+            sg = sg, gsm = gsm, bsr = bsr, mgr = mgr,
+        }
+        -- Drive one contained update failure (the wrapped StateGame.update
+        -- pcalls Managers.mod:update; the raise must never escape).
+        function rec.drive_update()
+            local ok = pcall(function() sg.update(sg, 0.016) end)
+            runner.assert_eq(true, ok, "the update-wrap containment must hold")
+        end
+        -- Drive one contained state-transition failure (exit dispatch before
+        -- the original _change_state, enter dispatch after it; both pcalled).
+        function rec.drive_transition()
+            local inst = setmetatable({ _state = { name = "From" } },
+                { __index = gsm })
+            local ok = pcall(function() inst:_change_state("To") end)
+            runner.assert_eq(true, ok, "the change-state-wrap containment must hold")
+        end
+        return rec
+    end
+
+    -- The ERROR messages in order (stripped of the "ERROR [mod_loader] "
+    -- prefix the attached logger adds).
+    local function error_messages(logged)
+        local out = {}
+        for _, line in ipairs(logged) do
+            local msg = tostring(line):match("^ERROR %[mod_loader%] (.*)$")
+            if msg then out[#out + 1] = msg end
+        end
+        return out
+    end
+
+    runner.register("lifecycle: containment error — first occurrence logs immediately (exact line)", function()
+        local rec = setup_throttled()
+        rec.mgr.update_err = "boom"
+        rec.drive_update()
+        runner.assert_eq({ "Managers.mod:update failed: boom" }, error_messages(rec.logged),
+            "the first occurrence logs the plain, un-suffixed line")
+    end)
+
+    runner.register("lifecycle: containment error — identical recurrences within the window are counted, not logged", function()
+        local rec = setup_throttled()
+        rec.mgr.update_err = "boom"
+        rec.drive_update()
+        rec.drive_update()
+        rec.drive_update()
+        runner.assert_eq({ "Managers.mod:update failed: boom" }, error_messages(rec.logged),
+            "recurrences inside the 10s window log nothing (counted only)")
+    end)
+
+    runner.register("lifecycle: containment error — post-interval recurrence logs the suppressed count, then resets", function()
+        local rec = setup_throttled()
+        rec.mgr.update_err = "boom"
+        rec.drive_update()                  -- t0: first occurrence (plain line)
+        rec.drive_update()                  -- t0: suppressed (count 1)
+        rec.clock.now = rec.clock.now + 11
+        rec.drive_update()                  -- t0+11: logs the count, resets
+        rec.drive_update()                  -- t0+11: suppressed (count 1)
+        rec.clock.now = rec.clock.now + 11
+        rec.drive_update()                  -- t0+22: suffix reflects ONLY post-reset occurrences
+        runner.assert_eq({
+            "Managers.mod:update failed: boom",
+            "Managers.mod:update failed: boom [x2 in the last 10s]",
+            "Managers.mod:update failed: boom [x2 in the last 10s]",
+        }, error_messages(rec.logged),
+            "window-boundary lines carry the since-last-log count (suppressed + current); count resets each time")
+    end)
+
+    runner.register("lifecycle: containment error — a different error text at the same site logs immediately", function()
+        local rec = setup_throttled()
+        rec.mgr.update_err = "boom"
+        rec.drive_update()                  -- logs "boom"
+        rec.mgr.update_err = "other failure"
+        rec.drive_update()                  -- new key -> immediate, inside the window
+        runner.assert_eq({
+            "Managers.mod:update failed: boom",
+            "Managers.mod:update failed: other failure",
+        }, error_messages(rec.logged), "a different error text is a new key (logs immediately)")
+    end)
+
+    runner.register("lifecycle: containment error — the same error text at different sites logs immediately (per-site keys)", function()
+        local rec = setup_throttled()
+        rec.mgr.update_err = "boom"
+        rec.drive_update()                  -- update site logs "boom"
+        rec.mgr.gsc_exit_err = "boom"       -- SAME text, different site
+        rec.drive_transition()              -- exit dispatch logs immediately
+        rec.mgr.gsc_enter_err = "boom"      -- SAME text, third site
+        rec.drive_transition()              -- enter dispatch logs immediately
+        runner.assert_eq({
+            "Managers.mod:update failed: boom",
+            "state exit drive failed: boom",
+            "state enter drive failed: boom",
+        }, error_messages(rec.logged),
+            "keys are per-site: same error text at another containment site logs immediately")
+    end)
+
+    runner.register("lifecycle: containment error — no usable clock degrades to logging every occurrence", function()
+        local rec = setup_throttled({ no_clock = true })
+        rec.mgr.update_err = "boom"
+        rec.drive_update()
+        rec.drive_update()
+        rec.drive_update()
+        runner.assert_eq({
+            "Managers.mod:update failed: boom",
+            "Managers.mod:update failed: boom",
+            "Managers.mod:update failed: boom",
+        }, error_messages(rec.logged), "no os surface: every occurrence logs")
+
+        -- The helper reads the surface at call time, so each broken shape
+        -- degrades the same way: time present but not a function, a raising
+        -- time (pcall-protected), and Mods.lua absent entirely.
+        rec.sb.Mods.lua = { os = { time = "not a function" } }
+        rec.drive_update()
+        rec.sb.Mods.lua = { os = { time = function() error("clock boom") end } }
+        rec.drive_update()
+        rec.sb.Mods.lua = nil
+        rec.drive_update()
+        runner.assert_eq(6, #error_messages(rec.logged),
+            "every degraded occurrence logs; throttling never costs a log line")
+    end)
+
+    runner.register("lifecycle: containment error — the 33rd distinct key resets the throttle table", function()
+        local rec = setup_throttled()
+        local expected = {}
+        -- 33 distinct error texts: the first 32 fill the key table; the 33rd
+        -- exceeds the cap, dropping the whole table (one DEBUG line) and
+        -- starting fresh.
+        for i = 1, 33 do
+            rec.mgr.update_err = "boom " .. i
+            rec.drive_update()
+            expected[#expected + 1] = "Managers.mod:update failed: boom " .. i
+        end
+        -- A recurrence of the FIRST key at the same instant: had the table
+        -- survived, this would be suppressed; after the reset it is a fresh
+        -- key and logs immediately.
+        rec.mgr.update_err = "boom 1"
+        rec.drive_update()
+        expected[#expected + 1] = "Managers.mod:update failed: boom 1"
+        runner.assert_eq(expected, error_messages(rec.logged),
+            "all 34 occurrences logged (the reset un-suppressed the old key)")
+        local reset_logs = 0
+        for _, line in ipairs(rec.logged) do
+            if type(line) == "string" and line:find("^DEBUG %[mod_loader%].*throttle") then
+                reset_logs = reset_logs + 1
+            end
+        end
+        runner.assert_eq(1, reset_logs, "the table reset is named in exactly one DEBUG line")
     end)
 end

@@ -2,8 +2,9 @@
 -- (src/mod_loader/dmf_adapter.lua).
 --
 -- Asserts the adapter's public contract:
---   - establishes the DMF-visible manager shape (Managers.mod publication,
---     _settings.developer_mode=false, nil _state/_mod_load_index);
+--   - establishes the manager-agnostic chassis contract (Managers.mod
+--     publication, _settings restored-if-nil; manager-owned load fields
+--     (_state/_mod_load_index) are never touched);
 --   - explicit current-entry transitions + done transition (the manager never
 --     writes DMF contract fields directly);
 --   - DMF-required entry-shape validation (success + failure reasons);
@@ -120,6 +121,8 @@ return function(runner)
     end)
 
     runner.register("dmf_adapter: establish leaves _state and _mod_load_index nil", function()
+        -- On a manager that never set them (the built-in), establish must not
+        -- fabricate load fields either.
         local sb, M = setup()
         local manager = fake_manager()
         local adapter = M.new(manager)
@@ -128,17 +131,36 @@ return function(runner)
         runner.assert_nil(manager._mod_load_index, "_mod_load_index is nil initially")
     end)
 
-    runner.register("dmf_adapter: establish is idempotent (re-defaults fields)", function()
+    runner.register("dmf_adapter: establish does NOT nil manager-set _state/_mod_load_index", function()
+        -- Alternate-manager wedge guard: a manager whose own init set its load
+        -- fields (AML sets _state="scanning"/"not_loaded") must keep them across
+        -- chassis establish — nil-ing here would silently wedge its state
+        -- machine. establish owns publication + settings only.
+        local sb, M = setup()
+        local manager = fake_manager()
+        manager._state = "scanning"
+        manager._mod_load_index = 2
+        local adapter = M.new(manager)
+        adapter:establish()
+        runner.assert_eq("scanning", manager._state,
+            "establish must preserve a manager-set _state")
+        runner.assert_eq(2, manager._mod_load_index,
+            "establish must preserve a manager-set _mod_load_index")
+    end)
+
+    runner.register("dmf_adapter: establish is idempotent (manager fields preserved)", function()
         local sb, M = setup()
         local manager = fake_manager()
         local adapter = M.new(manager)
         adapter:establish()
-        -- Simulate the manager mid-load: state/index set to non-nil.
+        runner.assert_type("table", manager._settings)
+        -- Simulate the manager mid-load: state/index set to non-nil. A
+        -- defensive re-establish must NOT clobber them (manager-owned).
         manager._mod_load_index = 2
         manager._state = "intermediate"
         adapter:establish()
-        runner.assert_nil(manager._mod_load_index, "re-establish clears _mod_load_index")
-        runner.assert_nil(manager._state, "re-establish clears _state")
+        runner.assert_eq(2, manager._mod_load_index, "re-establish preserves _mod_load_index")
+        runner.assert_eq("intermediate", manager._state, "re-establish preserves _state")
         runner.assert_eq(false, manager._settings.developer_mode)
     end)
 
@@ -608,14 +630,18 @@ return function(runner)
     end)
 
     -- -----------------------------------------------------------------
-    -- Persisted developer-mode settings restoration (establish startup-only)
+    -- Persisted manager-settings restoration (establish startup-only)
     -- -----------------------------------------------------------------
     --
     -- establish() must restore Managers.mod._settings from
     -- Application.user_setting("mod_manager_settings"): defensively pcall'd,
-    -- identity + unrelated fields preserved, developer_mode required boolean
-    -- (corrected to false in place). Falls back to { developer_mode = false }
-    -- when Application is absent/throwing or the result is non-table. Re-call
+    -- identity + unrelated fields preserved. The persisted shape is
+    -- ecosystem-visible (DML-lineage managers consume a persisted table
+    -- as-is; a missing log_level crashes their print path), so Relay must
+    -- produce the full shape: developer_mode required boolean (corrected to
+    -- false in place) and log_level required number (corrected to 1 in
+    -- place). Falls back to { log_level = 1, developer_mode = false } when
+    -- Application is absent/throwing or the result is non-table. Re-call
     -- preserves the existing _settings identity (reload never re-restores).
 
     -- Build a fake Application whose user_setting(key) returns `value` (or
@@ -679,12 +705,60 @@ return function(runner)
             "non-boolean developer_mode corrected to false in place")
     end)
 
-    runner.register("dmf_adapter: establish falls back to {developer_mode=false} when Application absent", function()
+    runner.register("dmf_adapter: establish fills a missing persisted log_level with 1", function()
+        -- Regression (live issue #22): a persisted table without log_level
+        -- (Relay's old fallback shape) crashes DML-lineage managers'
+        -- unguarded `log_level <= self._settings.log_level` print comparison.
+        -- establish must normalize the restored table to the full shape.
+        local persisted = { developer_mode = true, custom = { x = 1 } }
+        local sb, M = setup()
+        sb.Application = fake_application(persisted)
+        local manager = fake_manager()
+        M.new(manager):establish()
+        runner.assert_eq(persisted, manager._settings,
+            "the same persisted table identity is kept")
+        runner.assert_eq(1, manager._settings.log_level,
+            "missing log_level corrected to 1 in place")
+        runner.assert_eq(true, manager._settings.developer_mode,
+            "developer_mode preserved")
+        runner.assert_eq(1, manager._settings.custom.x,
+            "unrelated field retained")
+    end)
+
+    runner.register("dmf_adapter: establish corrects non-number persisted log_level to 1", function()
+        local persisted = { developer_mode = true, log_level = "2" }
+        local sb, M = setup()
+        sb.Application = fake_application(persisted)
+        local manager = fake_manager()
+        M.new(manager):establish()
+        runner.assert_eq(persisted, manager._settings, "identity preserved")
+        runner.assert_eq(1, manager._settings.log_level,
+            "non-number log_level corrected to 1 in place")
+        runner.assert_eq(true, manager._settings.developer_mode)
+    end)
+
+    runner.register("dmf_adapter: establish preserves a valid persisted log_level exactly", function()
+        -- A number log_level passes through verbatim — Relay normalizes the
+        -- shape, never the value (no clamping).
+        local persisted = { log_level = 3, developer_mode = false }
+        local sb, M = setup()
+        sb.Application = fake_application(persisted)
+        local manager = fake_manager()
+        M.new(manager):establish()
+        runner.assert_eq(persisted, manager._settings, "identity preserved")
+        runner.assert_eq(3, manager._settings.log_level,
+            "valid log_level preserved exactly (no clamping)")
+        runner.assert_eq(false, manager._settings.developer_mode)
+    end)
+
+    runner.register("dmf_adapter: establish falls back to {log_level=1, developer_mode=false} when Application absent", function()
         local sb, M = setup()  -- no sb.Application
         local manager = fake_manager()
         M.new(manager):establish()
         runner.assert_type("table", manager._settings)
         runner.assert_eq(false, manager._settings.developer_mode)
+        runner.assert_eq(1, manager._settings.log_level,
+            "the fallback carries the full ecosystem shape")
     end)
 
     runner.register("dmf_adapter: establish falls back when Application.user_setting is not a function", function()
@@ -693,6 +767,7 @@ return function(runner)
         local manager = fake_manager()
         M.new(manager):establish()
         runner.assert_eq(false, manager._settings.developer_mode)
+        runner.assert_eq(1, manager._settings.log_level)
     end)
 
     runner.register("dmf_adapter: establish falls back when user_setting throws", function()
@@ -704,6 +779,7 @@ return function(runner)
         end)
         runner.assert_eq(true, ok, "establish must not propagate user_setting's error")
         runner.assert_eq(false, manager._settings.developer_mode)
+        runner.assert_eq(1, manager._settings.log_level)
     end)
 
     runner.register("dmf_adapter: establish falls back when the persisted result is non-table", function()
@@ -712,12 +788,13 @@ return function(runner)
         local manager = fake_manager()
         M.new(manager):establish()
         runner.assert_eq(false, manager._settings.developer_mode)
+        runner.assert_eq(1, manager._settings.log_level)
     end)
 
     runner.register("dmf_adapter: establish preserves the existing _settings identity on re-call (startup-only)", function()
         -- establish() is called once at startup in production. On a defensive
         -- re-call it must NOT replace _settings (reload preserves the same
-        -- table identity). It still resets _state/_mod_load_index to nil.
+        -- table identity), and must leave manager-owned load fields alone.
         local persisted = { developer_mode = true, extra = 7 }
         local sb, M = setup()
         sb.Application = fake_application(persisted)
@@ -734,8 +811,10 @@ return function(runner)
         runner.assert_eq(true, manager._settings.developer_mode,
             "developer_mode not re-defaulted on re-establish")
         runner.assert_eq(7, manager._settings.extra, "unrelated field still present")
-        runner.assert_nil(manager._state, "re-establish resets _state to nil")
-        runner.assert_nil(manager._mod_load_index, "re-establish resets _mod_load_index to nil")
+        runner.assert_eq("intermediate", manager._state,
+            "re-establish preserves a manager-set _state")
+        runner.assert_eq(3, manager._mod_load_index,
+            "re-establish preserves a manager-set _mod_load_index")
     end)
 
     runner.register("dmf_adapter: establish does not call Application.set_user_setting", function()

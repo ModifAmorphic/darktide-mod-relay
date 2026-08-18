@@ -26,11 +26,12 @@ plus the launcher that delivers it.
 | **`discovery/`** | Rust crate — the LuaJIT discovery engine. A pure library (no I/O, no global state): a PE image (`&[u8]`) → the 16 LuaJIT/engine function addresses. 100% safe Rust in core logic; offline-testable. Compiled to a C-ABI staticlib (`librelay_discovery.a`). |
 | **`shell/`** | The injected C DLL — **`relay_shell.dll`**. Installs two production MinHook detours (`lua_newstate` → capture the Lua VM; `lua_pcall` → run the staged mod loader one-shot at pcall#1), discovers the LuaJIT function addresses in-process, and loads the staged mod loader in engine context. Linked with the Rust discovery staticlib + MinHook. Carries `VS_VERSION_INFO` PE version resources compiled from `shell/src/relay_shell.rc`. |
 | **`launcher/`** | The C injector — **`mod_relay.exe`**. `CreateProcess(Darktide.exe, SUSPENDED)` → inject `relay_shell.dll` → wait for the hook-ready signal → `ResumeThread`. Resolves the flag/env config and publishes it into the child env. Carries `VS_VERSION_INFO` PE version resources compiled from `launcher/src/launcher.rc`. |
-| **`mod_loader/`** | The Lua mod loader. Runs in engine context, bridges pcall#1 to the engine's late boot (deferred bootstrap), and loads DMF + user mods. Entry `init.lua` + modules (`path`, `file`, `class_registry`, `lifecycle`, `require_bridge`, `mod_manager`, `dmf_adapter`). `init.lua` publishes the engine LuaJIT FFI module via the pre-wrap module loader (`Mods.original_require("ffi")` — `require("ffi")` creates no global in LuaJIT 2.1). `lifecycle.lua` is the bootstrap coordinator + the direct closure-wraps (`BootStateRequireGameScripts._state_update`, `StateGame.update`, `GameStateMachine._change_state` exit/enter dispatch, and `GameStateMachine.destroy` — a final-exit wrapper that dispatches one deduplicated `on_game_state_changed("exit",…)` for the active state before destruction). `path.lua` is a pure-string path utility (`normpath` extracted from Penlight `pl.path`) used by `file.lua`'s `Mods.lua.io.open`/`io.lines` wrapper to root DMF's `./../mods/<rest>` convention. `mod_manager.lua` is the generic scan/load/lifecycle driver **and the hot-reload state machine** (request seam, `_check_reload` trigger-detection seam for the community reload-control contract, keyboard trigger, two-frame teardown/replacement sequencing, reload-data association, failure isolation); `dmf_adapter.lua` is the stock-DMF compatibility boundary (persisted developer-mode restoration, DMF-visible contract fields + transitions, entry-shape validation, the eight `DMFMod:io_*` overrides + the file observer that drives them, **installation-aware** re-adaptation across reload (tracks `DMFMod` table identity + the exact Relay `io_dofile` wrapper so a reused class table whose methods `core/io.lua` overwrites is re-adapted, not left on stock `./../mods`), and stale-generation-global retirement). Relay-controlled (ships with the build) and independently implemented for Relay's injected runtime architecture. |
+| **`mod_loader/`** | The Lua mod loader. Runs in engine context, bridges pcall#1 to the engine's late boot (deferred bootstrap), and loads DMF + user mods. Entry `init.lua` + modules (`path`, `file`, `class_registry`, `lifecycle`, `require_bridge`, `mod_manager`, `dmf_adapter`). `init.lua` publishes the engine LuaJIT FFI module via the pre-wrap module loader (`Mods.original_require("ffi")` — `require("ffi")` creates no global in LuaJIT 2.1). `lifecycle.lua` is the bootstrap coordinator + the direct closure-wraps (`BootStateRequireGameScripts._state_update`, `StateGame.update`, `GameStateMachine._change_state` exit/enter dispatch, and `GameStateMachine.destroy` — a final-exit wrapper that dispatches one deduplicated `on_game_state_changed("exit",…)` for the active state before destruction); it also owns the manager slot (Step 1a loads the alternate manager from `RELAY_MOD_MANAGER` when configured — engine-ready-gated retry, hard exit on permanent failure, never managerless — and Step 1c runs the manager-agnostic chassis duties: one registering `dmf_adapter` instance, `establish()` publishing `Managers.mod` + restoring `_settings` when nil, the DMF io observer, and the chassis-owned `ModRelay:Version` Crashify publication). `path.lua` is a pure-string path utility (`normpath` extracted from Penlight `pl.path`) used by `file.lua`'s `Mods.lua.io.open`/`io.lines` wrapper to root DMF's `./../mods/<rest>` convention. `mod_manager.lua` is the generic scan/load/lifecycle driver **and the hot-reload state machine** (request seam, `_check_reload` trigger-detection seam for the community reload-control contract, keyboard trigger, two-frame teardown/replacement sequencing, reload-data association, failure isolation); `dmf_adapter.lua` is the stock-DMF compatibility boundary (persisted developer-mode restoration, DMF-visible contract fields + transitions, entry-shape validation, the eight `DMFMod:io_*` overrides + the file observer that drives them, **installation-aware** re-adaptation across reload (tracks `DMFMod` table identity + the exact Relay `io_dofile` wrapper so a reused class table whose methods `core/io.lua` overwrites is re-adapted, not left on stock `./../mods`), and stale-generation-global retirement). Relay-controlled (ships with the build) and independently implemented for Relay's injected runtime architecture. |
 | **`tests/`** | C unit tests (run via wine). |
 | **`bin/`** | Build outputs (gitignored). Where `make build` lands everything. |
 
-The mod manager also enforces the loader's failure-hardening contract: only nil
+The built-in mod manager also enforces the loader's failure-hardening
+contract: only nil
 or table may be returned by a successful `run()`; every initial/replacement pass
 finalizes; accepted descriptors publish guarded generation-aware Crashify
 metadata (`Mod:<name>` plus process-lifetime `ModRelay:Version`); and the first
@@ -161,6 +162,7 @@ shell DLL, log file, and mod loader root all default next to the launcher exe.
 | --- | --- | --- |
 | `--game-binary <path>` | `RELAY_GAME_BINARY` | — **(required)** |
 | `--mod-path <path>` | `RELAY_MOD_PATH` | unset (mods won't load) |
+| `--mod-manager <file>` | `RELAY_MOD_MANAGER` | unset (built-in manager; the launch is refused if the configured file is missing or a directory) |
 | `--log-file <path>` | `RELAY_LOG_FILE` | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | `RELAY_LOG_LEVEL` | `info` (`error`/`warn`/`info`/`debug`/`trace`) |
 | `--steam-app-id <id>` | `RELAY_STEAM_APP_ID` | `1361210` |
@@ -288,7 +290,16 @@ user-owned. Detail in
 
 > **Splash skip.** The trampoline also bakes `RELAY_SKIP_SPLASH` (from
 > `--skip-splash` / `RELAY_SKIP_SPLASH=1`) as an internal global alongside the
-> two roots; the loader snapshots it once into a private boolean that, when
+> root globals; the loader snapshots it once into a private boolean that, when
 > opted in, wraps `StateSplash.on_enter` so the intro splash state advances
 > directly to `StateTitle` without opening the splash view. Default off
 > (vanilla splash).
+
+> **Alternate mod manager.** The trampoline likewise bakes
+> `RELAY_MOD_MANAGER` (from `--mod-manager` / `RELAY_MOD_MANAGER`) — the
+> optional alternate-manager path. When configured, the loader's bootstrap
+> loads that manager instead of the built-in one (and hard-exits rather than
+> run managerless if it fails permanently). The manager-slot contract
+> (selection, failure policy, the environment provided to the occupant) is
+> normative in
+> [`docs/reference/relay/manager-slot.md`](../docs/reference/relay/manager-slot.md).

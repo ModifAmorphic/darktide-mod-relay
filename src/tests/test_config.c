@@ -1,11 +1,16 @@
 /*
  * test_config.c — Unit tests for the launcher's config model.
  *
- * Validates the two guarantees:
+ * Validates the three guarantees:
  *   1. relay_parse_args: --flag <value> pairs populate the right fields;
  *      unknown flag / missing value / -h / --help return the right codes.
  *   2. relay_resolve_config: every setting follows flag > env > default,
- *      and RELAY_MOD_PATH resolves to NULL when unset.
+ *      and RELAY_MOD_PATH / RELAY_MOD_MANAGER resolve to NULL when unset;
+ *      an env RELAY_MOD_MANAGER too long for the buffer REFUSES (return 1,
+ *      never a silent degrade to the built-in manager).
+ *   3. relay_check_mod_manager: the alternate-manager pre-flight passes an
+ *      unconfigured or existing regular file, and refuses a missing target
+ *      or a directory.
  *
  * resolve_config() writes env/default values into resolver-owned static
  * buffers that are reused on each call, so each test copies the value into a
@@ -21,6 +26,7 @@
  * only to clean up state between resolve tests). */
 #define ENV_GAME_BINARY  "RELAY_GAME_BINARY"
 #define ENV_MOD_PATH     "RELAY_MOD_PATH"
+#define ENV_MOD_MANAGER  "RELAY_MOD_MANAGER"
 #define ENV_LOG_FILE     "RELAY_LOG_FILE"
 #define ENV_LOG_LEVEL    "RELAY_LOG_LEVEL"
 #define ENV_STEAM_APP_ID "RELAY_STEAM_APP_ID"
@@ -31,6 +37,7 @@
 static void clear_env(void) {
     SetEnvironmentVariableA(ENV_GAME_BINARY, NULL);
     SetEnvironmentVariableA(ENV_MOD_PATH, NULL);
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, NULL);
     SetEnvironmentVariableA(ENV_LOG_FILE, NULL);
     SetEnvironmentVariableA(ENV_LOG_LEVEL, NULL);
     SetEnvironmentVariableA(ENV_STEAM_APP_ID, NULL);
@@ -43,12 +50,13 @@ static void clear_env(void) {
 
 void test_parse_all_flags(void) {
     char *argv[] = {"prog",
-        "--game-binary", "G", "--mod-path", "M", "--log-file", "L",
-        "--log-level", "trace", "--steam-app-id", "42"};
+        "--game-binary", "G", "--mod-path", "M", "--mod-manager", "MM",
+        "--log-file", "L", "--log-level", "trace", "--steam-app-id", "42"};
     relay_parsed_args a;
-    ASSERT_EQ(0, relay_parse_args(11, argv, &a));
+    ASSERT_EQ(0, relay_parse_args(13, argv, &a));
     ASSERT_STREQ("G", a.game_binary);
     ASSERT_STREQ("M", a.mod_path);
+    ASSERT_STREQ("MM", a.mod_manager);
     ASSERT_STREQ("L", a.log_file);
     ASSERT_STREQ("trace", a.log_level);
     ASSERT_STREQ("42", a.steam_app_id);
@@ -60,6 +68,7 @@ void test_parse_none(void) {
     ASSERT_EQ(0, relay_parse_args(1, argv, &a));
     ASSERT_TRUE(a.game_binary == NULL);
     ASSERT_TRUE(a.mod_path == NULL);
+    ASSERT_TRUE(a.mod_manager == NULL);
     ASSERT_TRUE(a.log_file == NULL);
     ASSERT_TRUE(a.log_level == NULL);
     ASSERT_TRUE(a.steam_app_id == NULL);
@@ -122,6 +131,18 @@ void test_parse_dash_dash_relay_mod_path_not_set_after_separator(void) {
     ASSERT_EQ(2, a.game_argument_count);
     ASSERT_STREQ("--mod-path", a.game_arguments[0]);
     ASSERT_STREQ("foo", a.game_arguments[1]);
+}
+
+void test_parse_dash_dash_relay_mod_manager_not_set_after_separator(void) {
+    /* Same rule for --mod-manager: after -- it is a game arg, NOT Relay's
+     * mod_manager. Relay's own mod_manager must stay NULL. */
+    char *argv[] = {"prog", "--", "--mod-manager", "mgr.exe"};
+    relay_parsed_args a;
+    ASSERT_EQ(0, relay_parse_args(4, argv, &a));
+    ASSERT_TRUE(a.mod_manager == NULL);  /* Relay's --mod-manager was NOT set */
+    ASSERT_EQ(2, a.game_argument_count);
+    ASSERT_STREQ("--mod-manager", a.game_arguments[0]);
+    ASSERT_STREQ("mgr.exe", a.game_arguments[1]);
 }
 
 void test_parse_dash_dash_version_not_set_after_separator(void) {
@@ -277,6 +298,7 @@ void test_resolve_env_when_no_flag(void) {
     clear_env();
     SetEnvironmentVariableA(ENV_GAME_BINARY, "ENV_GAME");
     SetEnvironmentVariableA(ENV_MOD_PATH, "ENV_MOD");
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, "ENV_MGR");
     SetEnvironmentVariableA(ENV_LOG_FILE, "ENV_LOG");
     SetEnvironmentVariableA(ENV_LOG_LEVEL, "debug");
     SetEnvironmentVariableA(ENV_STEAM_APP_ID, "222");
@@ -286,6 +308,7 @@ void test_resolve_env_when_no_flag(void) {
     relay_resolve_config(&a, &cfg);
     ASSERT_STREQ("ENV_GAME", cfg.game_binary);
     ASSERT_STREQ("ENV_MOD", cfg.mod_path);
+    ASSERT_STREQ("ENV_MGR", cfg.mod_manager);
     ASSERT_STREQ("ENV_LOG", cfg.log_file);
     ASSERT_STREQ("debug", cfg.log_level);
     ASSERT_STREQ("222", cfg.steam_app_id);
@@ -302,6 +325,8 @@ void test_resolve_defaults_when_nothing_set(void) {
     ASSERT_TRUE(cfg.game_binary == NULL);
     /* mod_path is optional: NULL when unset. */
     ASSERT_TRUE(cfg.mod_path == NULL);
+    /* mod_manager is optional: NULL when unset. */
+    ASSERT_TRUE(cfg.mod_manager == NULL);
     /* log_level + steam_app_id have literal defaults. */
     ASSERT_STREQ("info", cfg.log_level);
     ASSERT_STREQ("1361210", cfg.steam_app_id);
@@ -324,6 +349,134 @@ void test_resolve_mod_path_unset_is_null_with_flag_present(void) {
     relay_resolve_config(&a, &cfg);
     ASSERT_TRUE(cfg.mod_path == NULL);
     clear_env();
+}
+
+void test_resolve_mod_manager_flag_wins_over_env(void) {
+    /* mod_manager follows the same precedence as mod_path: flag > env. */
+    clear_env();
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, "ENV_MGR");
+    relay_parsed_args a = {0};
+    a.mod_manager = "FLAG_MGR";
+    relay_config cfg;
+    relay_resolve_config(&a, &cfg);
+    ASSERT_STREQ("FLAG_MGR", cfg.mod_manager);
+    clear_env();
+}
+
+void test_resolve_mod_manager_env_used_when_no_flag(void) {
+    clear_env();
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, "ENV_MGR");
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    ASSERT_EQ(0, relay_resolve_config(&a, &cfg));
+    ASSERT_STREQ("ENV_MGR", cfg.mod_manager);
+    clear_env();
+}
+
+void test_resolve_mod_manager_unset_is_null(void) {
+    /* No flag, no env => NULL (no alternate manager; the trampoline emits an
+     * empty RELAY_MOD_MANAGER). */
+    clear_env();
+    relay_parsed_args a = {0};
+    a.game_binary = "G";
+    relay_config cfg;
+    ASSERT_EQ(0, relay_resolve_config(&a, &cfg));
+    ASSERT_TRUE(cfg.mod_manager == NULL);
+    clear_env();
+}
+
+void test_resolve_mod_manager_env_empty_is_null(void) {
+    /* An empty env value is "not provided" (same as unset — the trampoline
+     * emits an empty RELAY_MOD_MANAGER; no alternate manager). */
+    clear_env();
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, "");
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    ASSERT_EQ(0, relay_resolve_config(&a, &cfg));
+    ASSERT_TRUE(cfg.mod_manager == NULL);
+    clear_env();
+}
+
+void test_resolve_mod_manager_env_oversized_refuses(void) {
+    /* A PRESENT but oversized env value must REFUSE (return 1), not degrade
+     * to the built-in manager: the operator configured an alternate, and a
+     * silent substitution would launch a managerless game (the
+     * never-silently-substitute policy). Contrast mod_path, where
+     * degrade-to-unset is correct for an optional value. */
+    clear_env();
+    char big[1200];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, big);
+    relay_parsed_args a = {0};
+    relay_config cfg;
+    ASSERT_EQ(1, relay_resolve_config(&a, &cfg));
+    ASSERT_TRUE(cfg.mod_manager == NULL);  /* never silently substituted */
+    clear_env();
+}
+
+void test_resolve_mod_manager_env_oversized_ignored_when_flag_present(void) {
+    /* Flag > env: a valid --mod-manager flag wins even when the env value is
+     * oversized (the env var is simply never read). */
+    clear_env();
+    char big[1200];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    SetEnvironmentVariableA(ENV_MOD_MANAGER, big);
+    relay_parsed_args a = {0};
+    a.mod_manager = "FLAG_MGR";
+    relay_config cfg;
+    ASSERT_EQ(0, relay_resolve_config(&a, &cfg));
+    ASSERT_STREQ("FLAG_MGR", cfg.mod_manager);
+    clear_env();
+}
+
+/* ---- alternate mod manager pre-flight (relay_check_mod_manager) ---- */
+
+/* Resolve this test executable's own path (an existing regular file) and its
+ * directory, so the pre-flight tests need no fixtures. */
+static int self_path(char *out, size_t outsz) {
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)outsz);
+    if (n == 0 || n >= outsz) return -1;
+    return 0;
+}
+
+void test_check_mod_manager_not_configured_passes(void) {
+    /* NULL (not configured) is an immediate pass: absent config behaves
+     * exactly as before the flag existed. */
+    ASSERT_EQ(0, relay_check_mod_manager(NULL, "--mod-manager"));
+}
+
+void test_check_mod_manager_existing_file_passes(void) {
+    /* This test exe is an existing regular file. */
+    char self[MAX_PATH];
+    if (self_path(self, sizeof(self)) != 0) {
+        ASSERT_FAIL("could not resolve the test exe path");
+    }
+    ASSERT_EQ(0, relay_check_mod_manager(self, "env RELAY_MOD_MANAGER"));
+}
+
+void test_check_mod_manager_missing_fails(void) {
+    char self[MAX_PATH];
+    if (self_path(self, sizeof(self)) != 0) {
+        ASSERT_FAIL("could not resolve the test exe path");
+    }
+    char missing[MAX_PATH];
+    snprintf(missing, sizeof(missing), "%s.no_such_manager", self);
+    ASSERT_EQ(1, relay_check_mod_manager(missing, "--mod-manager"));
+}
+
+void test_check_mod_manager_directory_fails(void) {
+    /* The test exe's own directory exists but is a directory, not a regular
+     * file — the manager slot points at a file, so this must refuse. */
+    char self[MAX_PATH];
+    if (self_path(self, sizeof(self)) != 0) {
+        ASSERT_FAIL("could not resolve the test exe path");
+    }
+    char *slash = strrchr(self, '\\');
+    ASSERT_NOTNULL(slash);
+    *slash = '\0';  /* self is now the exe's directory */
+    ASSERT_EQ(1, relay_check_mod_manager(self, "env RELAY_MOD_MANAGER"));
 }
 
 void test_resolve_game_arguments_threaded_unchanged(void) {
@@ -687,6 +840,8 @@ int main(void) {
                   test_parse_dash_dash_flag_looking_tokens_not_interpreted);
     test_register("parse_dash_dash_relay_mod_path_not_set_after_separator",
                   test_parse_dash_dash_relay_mod_path_not_set_after_separator);
+    test_register("parse_dash_dash_relay_mod_manager_not_set_after_separator",
+                  test_parse_dash_dash_relay_mod_manager_not_set_after_separator);
     test_register("parse_dash_dash_version_not_set_after_separator",
                   test_parse_dash_dash_version_not_set_after_separator);
     test_register("parse_dash_dash_help_not_triggered_after_separator",
@@ -716,6 +871,26 @@ int main(void) {
                   test_resolve_defaults_when_nothing_set);
     test_register("resolve_mod_path_unset_is_null_with_flag_present",
                   test_resolve_mod_path_unset_is_null_with_flag_present);
+    test_register("resolve_mod_manager_flag_wins_over_env",
+                  test_resolve_mod_manager_flag_wins_over_env);
+    test_register("resolve_mod_manager_env_used_when_no_flag",
+                  test_resolve_mod_manager_env_used_when_no_flag);
+    test_register("resolve_mod_manager_unset_is_null",
+                  test_resolve_mod_manager_unset_is_null);
+    test_register("resolve_mod_manager_env_empty_is_null",
+                  test_resolve_mod_manager_env_empty_is_null);
+    test_register("resolve_mod_manager_env_oversized_refuses",
+                  test_resolve_mod_manager_env_oversized_refuses);
+    test_register("resolve_mod_manager_env_oversized_ignored_when_flag_present",
+                  test_resolve_mod_manager_env_oversized_ignored_when_flag_present);
+    test_register("check_mod_manager_not_configured_passes",
+                  test_check_mod_manager_not_configured_passes);
+    test_register("check_mod_manager_existing_file_passes",
+                  test_check_mod_manager_existing_file_passes);
+    test_register("check_mod_manager_missing_fails",
+                  test_check_mod_manager_missing_fails);
+    test_register("check_mod_manager_directory_fails",
+                  test_check_mod_manager_directory_fails);
     test_register("resolve_game_arguments_threaded_unchanged",
                   test_resolve_game_arguments_threaded_unchanged);
     test_register("resolve_game_arguments_none_is_null",

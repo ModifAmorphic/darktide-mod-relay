@@ -84,8 +84,12 @@ return function(runner)
                 end,
             },
         }
-        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         mock.attach_logger(sb)
+        -- The chassis (lifecycle.lua module scope) loads dmf_adapter exactly
+        -- once and publishes it on Mods._relay.dmf_adapter; mod_manager's init
+        -- reads it from there. Simulate that chassis load (the real wiring is
+        -- covered by test_lifecycle).
+        sb.Mods._relay.dmf_adapter = mock.run_module("dmf_adapter", sb)
         sb.Mods.file.add_observer = function() end
         local retire_count = 0
         sb.Mods.retire_class = function(name)
@@ -119,6 +123,12 @@ return function(runner)
 
         local ModManager = mock.run_module("mod_manager", sb)
         local manager = ModManager:new()
+        -- Chassis Step-1c built-in path: the manager's own adapter establishes
+        -- (Managers.mod publication + settings restore-if-nil). The Crashify
+        -- version publication is chassis-owned too (lifecycle.lua) and is not
+        -- driven here — these tests assert the manager's own per-mod metadata
+        -- boundary. The real chassis wiring is covered by test_lifecycle.
+        manager._adapter:establish()
         return {
             sb = sb,
             manager = manager,
@@ -227,7 +237,12 @@ return function(runner)
         runner.assert_not_nil(contains(env.logs, "completed with errors"))
     end)
 
-    runner.register("hardening: Crashify version precedes accepted descriptors and run outcomes retain keys", function()
+    runner.register("hardening: accepted descriptors publish keys in load order; run outcomes retain keys", function()
+        -- The process-lifetime ModRelay:Version property is chassis-owned
+        -- (lifecycle Step 1c — covered in test_lifecycle, where it precedes any
+        -- per-mod key). Here: the manager publishes only per-mod keys, in load
+        -- order, and run outcomes (throw / nil-driven / scalar / outer) retain
+        -- their publication.
         local env = setup()
         local sequence = {}
         env.sb.Crashify.print_property = function(key, value)
@@ -245,16 +260,18 @@ return function(runner)
         env.manager:_scan_mods()
         env.manager:update(0.1)
 
-        runner.assert_eq("ModRelay:Version", env.crash_calls[1][2])
-        runner.assert_eq("0.3.0-beta.2", env.crash_calls[1][3])
-        runner.assert_eq("crash:Mod:throws", sequence[2])
-        runner.assert_eq("run:throws", sequence[3])
-        runner.assert_eq("crash:Mod:nilmod", sequence[4])
-        runner.assert_eq("run:nilmod", sequence[5])
-        runner.assert_eq("crash:Mod:scalar", sequence[6])
-        runner.assert_eq("run:scalar", sequence[7])
-        runner.assert_eq("crash:Mod:outer", sequence[8])
-        runner.assert_eq("run:outer", sequence[9])
+        for _, call in ipairs(env.crash_calls) do
+            runner.assert_truthy(call[2] ~= "ModRelay:Version",
+                "the manager must not publish the chassis-owned version key")
+        end
+        runner.assert_eq("crash:Mod:throws", sequence[1])
+        runner.assert_eq("run:throws", sequence[2])
+        runner.assert_eq("crash:Mod:nilmod", sequence[3])
+        runner.assert_eq("run:nilmod", sequence[4])
+        runner.assert_eq("crash:Mod:scalar", sequence[5])
+        runner.assert_eq("run:scalar", sequence[6])
+        runner.assert_eq("crash:Mod:outer", sequence[7])
+        runner.assert_eq("run:outer", sequence[8])
         runner.assert_nil(contains(sequence, "crash:Mod:missing"))
         runner.assert_nil(contains(sequence, "crash:Mod:invalid"))
     end)
@@ -283,7 +300,11 @@ return function(runner)
         end
     end)
 
-    runner.register("hardening: Crashify version is process-lifetime and stale mod keys rotate on reload", function()
+    runner.register("hardening: manager never publishes or removes the chassis version key; stale mod keys rotate on reload", function()
+        -- The ModRelay:Version property is chassis-owned and process-lifetime
+        -- (published once at manager creation — asserted in test_lifecycle).
+        -- Manager-scope boundary: across reload generations the manager never
+        -- prints or removes the version key, while tracked per-mod keys rotate.
         local env = setup()
         env.state.order = { "alpha", "beta" }
         env.state.mods = { alpha = descriptor({}), beta = descriptor({}) }
@@ -307,21 +328,23 @@ return function(runner)
                 if call[2] == "ModRelay:Version" then version_removes = version_removes + 1 end
             end
         end
-        runner.assert_eq(1, version_prints)
-        runner.assert_eq(0, version_removes)
+        runner.assert_eq(0, version_prints,
+            "the manager must never publish the chassis-owned version key")
+        runner.assert_eq(0, version_removes,
+            "the version key is process-lifetime and never removed")
         runner.assert_eq(true, removed["Mod:alpha"])
         runner.assert_eq(true, removed["Mod:beta"])
         runner.assert_eq(2, printed["Mod:beta"])
         runner.assert_eq(1, printed["Mod:gamma"])
     end)
 
-    runner.register("hardening: empty order publishes version once and removal failure retries next generation", function()
+    runner.register("hardening: empty order publishes no keys; removal failure retries next generation", function()
         local env = setup()
         env.state.order = {}
         env.manager:_scan_mods()
         env.manager:update(0.1)
-        runner.assert_eq(1, #env.crash_calls)
-        runner.assert_eq("ModRelay:Version", env.crash_calls[1][2])
+        runner.assert_eq(0, #env.crash_calls,
+            "an empty order publishes no per-mod keys (version is chassis-owned)")
 
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
@@ -354,12 +377,21 @@ return function(runner)
             "Crashify operations resume at a later generation boundary")
     end)
 
-    runner.register("hardening: unavailable Crashify recovers later and malformed private version skips only identity", function()
+    runner.register("hardening: unavailable Crashify skips per-mod keys once and recovers on a later generation", function()
+        -- Manager scope: with Crashify absent, per-mod metadata is skipped with
+        -- a single unavailable log; the load itself is unaffected, and a later
+        -- generation (Crashify now present) publishes normally. The chassis
+        -- version publication's own unavailable/late-appearance retry is
+        -- covered in test_lifecycle.
         local env = setup({ crashify = false })
-        env.state.order = {}
+        env.state.order = { "alpha" }
+        env.state.mods = { alpha = descriptor({}) }
         env.manager:_scan_mods()
         env.manager:update(0.1)
+        runner.assert_eq("running", env.manager._mods[1].state)
+        runner.assert_eq("done", env.manager._state)
         runner.assert_eq(1, count_contains(env.logs, "Crashify unavailable"))
+        runner.assert_eq(0, #env.crash_calls)
 
         env.sb.Crashify = {
             print_property = function(key, value)
@@ -372,15 +404,9 @@ return function(runner)
         env.manager:request_reload("test")
         env.manager:update(0.1)
         env.manager:update(0.1)
-        runner.assert_eq("ModRelay:Version", env.crash_calls[1][2])
-
-        local malformed = setup({ version = "bad\nversion" })
-        malformed.state.order = { "alpha" }
-        malformed.state.mods = { alpha = descriptor({}) }
-        malformed.manager:_scan_mods()
-        malformed.manager:update(0.1)
-        runner.assert_eq("Mod:alpha", malformed.crash_calls[1][2])
-        runner.assert_eq(1, count_contains(malformed.logs, "version crash metadata unavailable"))
+        runner.assert_eq(1, count_contains(env.logs, "Crashify unavailable"),
+            "the unavailable log stays once after recovery")
+        runner.assert_eq("Mod:alpha", env.crash_calls[1][2])
     end)
 
     runner.register("hardening: metadata rejects unsafe names without changing load behavior or leaking raw names", function()
@@ -412,7 +438,11 @@ return function(runner)
         end
     end)
 
-    runner.register("hardening: Crashify throws are generation-local and never alter load or reload finalization", function()
+    runner.register("hardening: Crashify mod-publication throws are generation-local and never alter load or reload finalization", function()
+        -- Manager scope: a throwing print_property during a per-mod publication
+        -- disables crash metadata for that generation only; the load completes
+        -- and a later generation retries. (The chassis version publication's
+        -- own throw containment is covered in test_lifecycle.)
         local env = setup({ throw_crashify_print = true })
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
@@ -420,7 +450,9 @@ return function(runner)
         env.manager:update(0.1)
         runner.assert_eq("running", env.manager._mods[1].state)
         runner.assert_eq("done", env.manager._state)
-        runner.assert_eq(1, count_contains(env.logs, "Crashify version publication failed"))
+        runner.assert_eq(0, #env.crash_calls, "generation 1 published nothing (throw contained)")
+        runner.assert_eq(1, count_contains(env.logs, "Crashify mod publication failed"))
+        runner.assert_eq(1, count_contains(env.logs, "crash metadata disabled for this generation"))
 
         env.sb.Crashify.print_property = function(key, value)
             env.crash_calls[#env.crash_calls + 1] = { "print", key, value }
@@ -430,7 +462,8 @@ return function(runner)
         env.manager:update(0.1)
         runner.assert_eq(2, env.manager._generation)
         runner.assert_eq("done", env.manager._state)
-        runner.assert_eq("ModRelay:Version", env.crash_calls[1][2])
+        runner.assert_eq("Mod:alpha", env.crash_calls[1][2],
+            "the next generation republishes per-mod keys (throw was generation-local)")
     end)
 
     runner.register("hardening: init update and state failures disable once, unload once, and preserve siblings", function()

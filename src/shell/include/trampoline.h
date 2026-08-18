@@ -3,7 +3,7 @@
  *
  * Pure string-op helpers (no Windows/Lua/hook dependencies) that compile
  * directly into both the shell DLL and the C test exes. The trampoline's
- * game-safety and two-roots contracts are normative in
+ * game-safety and roots contracts are normative in
  * docs/reference/relay/shell.md; the per-global build contract is documented
  * at trampoline_build_chunk below.
  */
@@ -41,18 +41,34 @@ int trampoline_escape_path(const char *path, size_t path_len,
                            char *out, size_t out_cap);
 
 /*
- * Build the trampoline Lua chunk from the two roots, the entry path, the
- * build-injected product version, and the splash-skip flag. The chunk sets
- * internal globals MOD_LOADER_DIR (from `mod_loader_dir`, escaped),
+ * Return 1 when s[0..len) contains a control byte (0x00-0x1F or 0x7F), else 0.
+ * trampoline_escape_path escapes only backslash and double-quote, so a control
+ * byte (e.g. a raw newline in a directly-injected env value) would corrupt the
+ * staged Lua chunk's string literal; callers gate such values out BEFORE
+ * staging. Plain byte-range comparison (the C-locale iscntrl), deliberately
+ * locale-independent; high bytes (>= 0x80, ANSI codepage path chars) are NOT
+ * control bytes. NULL s returns 0 (nothing to reject).
+ *
+ * Pure and side-effect-free.
+ */
+int trampoline_path_has_control(const char *s, size_t len);
+
+/*
+ * Build the trampoline Lua chunk from the roots — the mod-loader root, the
+ * mod path, and the optional alternate-manager path — plus the entry path,
+ * the build-injected product version, and the splash-skip flag. The chunk
+ * sets internal globals MOD_LOADER_DIR (from `mod_loader_dir`, escaped),
  * RELAY_MOD_PATH (from `mod_path`, escaped, or "" when NULL/empty — the loader
- * treats empty as "no mods"), MOD_RELAY_VERSION (from `relay_version` — nil
+ * treats empty as "no mods"), RELAY_MOD_MANAGER (from `mod_manager`, escaped,
+ * or "" when NULL/empty — the loader treats empty as "no alternate manager"),
+ * MOD_RELAY_VERSION (from `relay_version` — nil
  * when NULL/empty/overlong, so malformed build metadata disables only version
  * diagnostics, not the loader), and RELAY_SKIP_SPLASH ("1" when `skip_splash`
  * is nonzero, "" otherwise — the loader checks `== "1"`), then io.open + reads
  * + loadstrings + runs `entry_path` (escaped).
  *
  * `skip_splash` is an int (0 or 1): it maps to a fixed Lua string token, so
- * unlike `mod_path` it needs no escaping.
+ * unlike `mod_path`/`mod_manager` it needs no escaping.
  *
  * The chunk returns a status string: "OK" if every guarded step succeeded,
  * else "FAIL <step>: <err>" identifying which step broke. (The unguarded
@@ -62,10 +78,12 @@ int trampoline_escape_path(const char *path, size_t path_len,
  * Writes the NUL-terminated chunk to `out`. Returns the chunk length
  * (excluding NUL), or -1 on a NULL arg (`mod_loader_dir`, `entry_path`, or
  * `out`), zero cap, empty `mod_loader_dir`, empty `entry_path`, or overflow.
- * (`mod_path` NULL/empty is NOT an error — it yields the empty-string global.)
+ * (`mod_path`/`mod_manager` NULL/empty is NOT an error — it yields the
+ * empty-string global.)
  * Pure and side-effect-free.
  */
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
+                           const char *mod_manager,
                            const char *entry_path, const char *relay_version,
                            int skip_splash,
                            char *out, size_t out_cap);

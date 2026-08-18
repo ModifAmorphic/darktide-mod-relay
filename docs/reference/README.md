@@ -8,8 +8,11 @@ validated facts or contracts.
   destinations, the `relay.log` line/lifecycle contract, and the optional Lua
   print tee; [`relay/shell.md`](relay/shell.md) — the injected shell's
   contracts (the two required hooks, the pcall#1 trampoline game-safety
-  invariants, the two trampoline-baked roots, the deliberately-not-hooked
-  discovery anchor).
+  invariants, the trampoline-baked roots, the deliberately-not-hooked
+  discovery anchor);
+  [`relay/manager-slot.md`](relay/manager-slot.md) — the manager-slot
+  contract (selecting an alternate mod manager, the failure policy, and the
+  environment provided to the occupant).
 - [`darktide/`](darktide/) — validated facts about the Darktide engine binary
   (LuaJIT, `lua_State` offsets, sandboxed `_G`, discovery methodology).
   Properties of the game, independent of any implementation.

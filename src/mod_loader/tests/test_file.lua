@@ -3,6 +3,8 @@
 -- Asserts the external behavior of the mod-root-rooted file operations:
 --   - path validation: rejects absolute/UNC/drive/NUL/..; allows nested relative
 --   - safe/unsafe distinction: safe returns false on failure, unsafe raises
+--   - join form: the manager-slot (dir, name, ext) / (name, ext) argument
+--     shapes — resolution, component validation, args pass-through, observers
 --   - single-open: the handle is closed before compile/run and on read failure
 --   - reads: raw content + trimmed line list (blank/comment skipped)
 --   - observer isolation: observers fire only after successful exec, failures
@@ -56,6 +58,25 @@ return function(runner)
         end
         mock.run_module("file", sb)
         return sb, iot
+    end
+
+    -- Build a sandbox whose io.open records every path it receives (for
+    -- asserting the exact path an op hands to io). Returns the sandbox + the
+    -- record list.
+    local function setup_recording(files)
+        local sb = mock.new_sandbox()
+        sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        local base_io = mock.make_io(files or {})
+        local opened_with = {}
+        sb.Mods.lua.io = {
+            open = function(p, m) opened_with[#opened_with + 1] = p; return base_io.open(p, m) end,
+            lines = base_io.lines,
+        }
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function() end
+        mock.run_module("file", sb)
+        return sb, opened_with
     end
 
     -- ---------------------------------------------------------------------
@@ -185,10 +206,137 @@ return function(runner)
         runner.assert_eq(false, sb.Mods.file.exec_with_return("missing"))
     end)
 
-    runner.register("file: dofile forwards args to the chunk", function()
-        local files = { [mock.MOD_ROOT .. "/arg.lua"] = "local a = ... return a" }
+    runner.register("file: dofile forwards non-string args to the chunk (path form)", function()
+        -- Path-form args are any NON-string value: a string second argument
+        -- is the join-form discriminator (asserted in the join-form section
+        -- below).
+        local files = { [mock.MOD_ROOT .. "/arg.lua"] = "local a = ... return type(a) == 'table' and a.tag or a" }
         local sb = setup(files)
-        runner.assert_eq("hello", sb.Mods.file.dofile("arg", "hello"))
+        runner.assert_eq("hello", sb.Mods.file.dofile("arg", { tag = "hello" }),
+            "table args must reach the chunk")
+        runner.assert_eq(42, sb.Mods.file.dofile("arg", 42),
+            "number args must reach the chunk")
+        runner.assert_eq(nil, sb.Mods.file.dofile("arg", nil),
+            "nil args are indistinguishable from no args (path form)")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Join form (the manager-slot argument shapes)
+    -- ---------------------------------------------------------------------
+
+    runner.register("file: 3-arg join form resolves <dir>/<name>.<ext> under the mod root", function()
+        -- The AML manager-slot call: exec_with_return(folder, folder, "mod").
+        -- The io mock must receive exactly the resolve()-rooted joined path
+        -- (no .lua append — the joined basename already has an extension).
+        local files = { [mock.MOD_ROOT .. "/MyMod/MyMod.mod"] = "return 'mod-data'" }
+        local sb, opened_with = setup_recording(files)
+        local v = sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod")
+        runner.assert_eq("mod-data", v, "3-arg join must exec the joined file")
+        runner.assert_eq(1, #opened_with, "the joined file must be opened exactly once")
+        runner.assert_eq(mock.MOD_ROOT .. "/MyMod/MyMod.mod", opened_with[1],
+            "io.open must receive <mod_root>/<dir>/<name>.<ext>")
+    end)
+
+    runner.register("file: 2-arg join form (name, ext) works across the family", function()
+        local files = {
+            [mock.MOD_ROOT .. "/dmf.mod"] = "return 'dmf-data'",
+            [mock.MOD_ROOT .. "/order.lst"] = "alpha\nbeta\n",
+            [mock.MOD_ROOT .. "/raw.txt"] = "raw-content",
+        }
+        local sb = setup(files)
+        runner.assert_eq("dmf-data", sb.Mods.file.exec_with_return("dmf", "mod"))
+        runner.assert_eq("dmf-data", sb.Mods.file.dofile("dmf", "mod"))
+        runner.assert_eq("dmf-data", sb.Mods.file.exec_unsafe_with_return("dmf", "mod"))
+        runner.assert_eq(true, sb.Mods.file.exec("dmf", "mod"))
+        runner.assert_eq({ "alpha", "beta" }, sb.Mods.file.read_content_to_table("order", "lst"),
+            "read_content_to_table(name, ext) must read <name>.<ext>")
+        runner.assert_eq("raw-content", sb.Mods.file.read_content("raw", "txt"),
+            "read_content(name, ext) must read <name>.<ext>")
+    end)
+
+    runner.register("file: 4-arg join form passes args through to the chunk", function()
+        local files = {
+            [mock.MOD_ROOT .. "/cfg/data.lua"] = "local a = ... if a == nil then return 'nil-args' end return a.tag",
+        }
+        local sb = setup(files)
+        runner.assert_eq("hi", sb.Mods.file.exec_with_return("cfg", "data", "lua", { tag = "hi" }),
+            "the 4th join-form argument must be the chunk argument")
+        runner.assert_eq("nil-args", sb.Mods.file.exec_with_return("cfg", "data", "lua"),
+            "without a 4th argument the chunk receives nil args")
+    end)
+
+    runner.register("file: a string second argument selects the join form", function()
+        -- (path, "string") is the join form: name=path, ext=string — NOT the
+        -- path form with string args. Both candidate targets are staged; only
+        -- the join interpretation can produce this result.
+        local files = {
+            [mock.MOD_ROOT .. "/notes.txt"] = "return 'from-join'",
+            [mock.MOD_ROOT .. "/notes.lua"] = "return 'from-path'",
+        }
+        local sb = setup(files)
+        runner.assert_eq("from-join", sb.Mods.file.dofile("notes", "txt"),
+            "(path, string) must join to <path>.<string>, not pass the string as chunk args")
+    end)
+
+    runner.register("file: join-form miss returns false (safe) and raises (unsafe)", function()
+        local sb = setup({})
+        runner.assert_eq(false, sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod"),
+            "safe join-form exec must return false on a missing file")
+        local ok = pcall(sb.Mods.file.exec_unsafe_with_return, "MyMod", "MyMod", "mod")
+        runner.assert_eq(false, ok, "unsafe join-form exec must raise on a missing file")
+    end)
+
+    runner.register("file: join-form components must be single segments (validation matrix)", function()
+        -- Every bad component value, in each join position, must fail the
+        -- safe ops (false) and raise in the unsafe ops.
+        local sb = setup({})
+        local bad = { "", "..", "a/b", "a\\b", "a:b" }
+        for i = 1, #bad do
+            local v = bad[i]
+            local r, reason = sb.Mods.file.exec_with_return(v, "name", "mod")
+            runner.assert_eq(false, r, "bad dir component must fail safe: '" .. v .. "'")
+            runner.assert_type("string", reason, "safe failure must carry a reason: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec_with_return("dir", v, "mod"),
+                "bad name component must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec_with_return("name", v),
+                "bad ext component (2-arg join) must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec("dir", v, "mod"),
+                "boolean exec must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.read_content("dir", v),
+                "read_content must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, pcall(sb.Mods.file.exec_unsafe_with_return, "dir", v, "mod"),
+                "bad component must raise unsafe: '" .. v .. "'")
+        end
+        -- Non-string components fail too. (A non-string SECOND argument is
+        -- path form, not a bad component — so ext is only testable non-string
+        -- in the 3-arg shape.)
+        runner.assert_eq(false, sb.Mods.file.exec_with_return(42, "name", "mod"),
+            "non-string dir component must fail")
+        runner.assert_eq(false, sb.Mods.file.exec_with_return("dir", "name", 42),
+            "non-string ext component must fail")
+        runner.assert_eq(false, pcall(sb.Mods.file.exec_unsafe_with_return, 42, "name", "mod"),
+            "non-string dir component must raise unsafe")
+    end)
+
+    runner.register("file: observers fire exactly once after a successful join-form exec", function()
+        local files = { [mock.MOD_ROOT .. "/MyMod/MyMod.mod"] = "return 'mod-data'" }
+        local sb = setup(files)
+        local fired = 0
+        local seen = {}
+        sb.Mods.file.add_observer(function(rel, args, result)
+            fired = fired + 1
+            seen = { rel = rel, args = args, result = result }
+        end)
+        local v = sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod")
+        runner.assert_eq("mod-data", v)
+        runner.assert_eq(1, fired, "observer must fire exactly once after a successful join-form exec")
+        runner.assert_eq("MyMod/MyMod.mod", seen.rel,
+            "observer rel_path is the joined mod-relative path")
+        runner.assert_eq(nil, seen.args, "no chunk args -> observer args nil")
+        runner.assert_eq("mod-data", seen.result)
+        -- A failed join-form exec must not fire the observer again.
+        sb.Mods.file.exec_with_return("MyMod", "Missing", "mod")
+        runner.assert_eq(1, fired, "observer must not fire on a failed join-form exec")
     end)
 
     -- ---------------------------------------------------------------------

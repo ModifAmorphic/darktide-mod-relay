@@ -50,8 +50,11 @@ local function validate_entry_shape(entry)
     return true
 end
 
--- Restore persisted settings from Application.user_setting (startup-only);
--- defensive { developer_mode = false } fallback. See MOD_LOADER-DMF.md.
+-- Restore persisted settings from Application.user_setting (startup-only).
+-- The persisted mod_manager_settings shape is ecosystem-visible (DML-lineage
+-- managers + DMF read AND write it), so Relay must both consume and produce
+-- the full shape { log_level, developer_mode }; each field is normalized in
+-- place when missing/invalid. See MOD_LOADER-DMF.md.
 local function restore_persisted_settings()
     local app = _rawget(_G, "Application")
     if _type(app) == "table" and _type(app.user_setting) == "function" then
@@ -62,10 +65,13 @@ local function restore_persisted_settings()
             if _type(settings.developer_mode) ~= "boolean" then
                 settings.developer_mode = false
             end
+            if _type(settings.log_level) ~= "number" then
+                settings.log_level = 1
+            end
             return settings
         end
     end
-    return { developer_mode = false }
+    return { log_level = 1, developer_mode = false }
 end
 
 -- Factory: bind an adapter to one manager instance. Private state lives in
@@ -169,17 +175,17 @@ function M.new(manager)
     end
 
     return {
-        -- Establish the DMF-visible contract: publish Managers.mod and initialize
-        -- _settings (restored from persistence once at startup), _state, _mod_load_index.
+        -- Establish the manager-agnostic chassis contract: publish Managers.mod
+        -- and restore _settings from persistence (startup-only; identity
+        -- preserved on re-call). Never touches manager-owned load fields
+        -- (_state/_mod_load_index) — an alternate manager may have set them in
+        -- its own init, and nil-ing them here would wedge its state machine.
         establish = function(self)
             Managers = Managers or {}
             Managers.mod = manager
-            -- _settings restoration is startup-only; identity preserved on re-call.
             if manager._settings == nil then
                 manager._settings = restore_persisted_settings()
             end
-            manager._state = nil
-            manager._mod_load_index = nil
         end,
 
         -- Register the DMF IO observer on Mods.file exactly once; safely re-fires per exec.
