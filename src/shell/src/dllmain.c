@@ -295,11 +295,8 @@ static void open_log(void) {
  * the chunk len stays 0 and trampoline_run will log SKIPPED. The mod dir
  * (RELAY_MOD_PATH) is OPTIONAL: unset/too long is logged and treated as
  * unset (mod_path = NULL -> the chunk emits an empty RELAY_MOD_PATH). The
- * alternate mod manager (RELAY_MOD_MANAGER) is optional when UNSET but fatal
- * when set-but-unreadable/too-long/control-bearing: the operator explicitly configured one,
- * and silently resuming would launch a managerless game — so the worker
- * ExitProcess(1)s here, while the launcher still holds the main thread
- * suspended, before the game can resume. Idempotent: called once from the
+ * alternate manager (RELAY_MOD_MANAGER) is optional when unset, FATAL when
+ * set-but-bad (see the read site below). Idempotent: called once from the
  * worker.
  */
 static void trampoline_stage_chunk(void) {
@@ -354,19 +351,12 @@ static void trampoline_stage_chunk(void) {
         mod_path = mod_dir;
     }
 
-    /* Alternate mod manager (optional when unset, fatal when set-but-bad).
-     * Unlike RELAY_MOD_PATH there is no degrade-to-unset: a configured
-     * manager that cannot be read intact must not be silently dropped, or the
-      * game would resume managerless. ExitProcess here kills the process while
-      * the launcher still holds the main thread suspended (hook-ready not yet
-      * signaled), so the game never runs half-configured; the launcher's
-      * hook-ready wait then fails/times out and it exits non-zero. "Bad" is
-      * unreadable, too long, or containing a control character: the escape
-      * only handles backslash and double-quote, so a raw control byte (e.g. a
-      * newline — practically unreachable via the launcher's flag path, but a
-      * control char can reach the env by other means) would corrupt the staged
-      * chunk's string literal, fail its loadstring, and silently skip the
-      * whole loader. */
+    /* Alternate mod manager: optional when unset, FATAL when set-but-bad —
+     * unreadable, too long, or control-bearing. No degrade-to-unset: a
+     * configured manager that cannot be read intact must not be silently
+     * dropped, or the game would resume managerless. ExitProcess fires while
+     * the launcher still holds the main thread suspended, so the game never
+     * runs half-configured. Contract: docs/reference/relay/shell.md. */
     char manager_path[1024];
     const char *mod_manager = NULL;
     DWORD mm = GetEnvironmentVariableA(MOD_MANAGER_ENV, manager_path,

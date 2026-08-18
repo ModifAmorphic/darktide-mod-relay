@@ -3,20 +3,16 @@
 -- Mods.coordinate_bootstrap runs after every require (via require_bridge) and
 -- advances two idempotent steps: install the class registry once `class` is a
 -- function, and wrap BootStateRequireGameScripts._state_update once it exists.
--- That boot wrapper calls the original first (returns preserved incl. trailing
--- nils; errors not swallowed), then a protected advance_bootstrap retrying only
--- the missing steps — load mod_manager + Managers.mod, the manager-agnostic
--- chassis duties (dmf_adapter establish, io observer, Crashify version
--- publication), wrap StateGame.update + GameStateMachine._change_state/.destroy
--- (and, opt-in --skip-splash, the StateSplash skip) — until a `completed` flag
--- short-circuits. When an alternate mod manager is configured
--- (RELAY_MOD_MANAGER), the manager slot loads from that configured path
--- instead, and a permanent alternate failure terminates the process (the game
--- must not continue managerless).
+-- That boot wrapper calls the original first, then a protected
+-- advance_bootstrap retrying only the missing steps — load the manager
+-- (built-in or the configured RELAY_MOD_MANAGER alternate), the chassis
+-- duties, the engine wraps (StateGame.update, GameStateMachine
+-- _change_state/.destroy, opt-in StateSplash skip) — until a `completed`
+-- flag short-circuits.
 --
 -- Full contract (deferred bootstrap, the exact-once state-exit dedup, the
--- GameStateMachine read-only rule): docs/architecture/MOD_LOADER-DMF.md
--- (Deferred bootstrap + Intentional shutdown).
+-- GameStateMachine read-only rule, the alternate-manager failure policy):
+-- docs/architecture/MOD_LOADER-DMF.md + docs/reference/relay/manager-slot.md.
 
 local _pcall = pcall
 local _tostring = tostring
@@ -34,26 +30,13 @@ local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
 
 -- ---------------------------------------------------------------------------
--- Throttled containment-error logging (the five chassis containment sites:
--- the Step-2 update wrap, the Step-3 exit/enter dispatches, the Step-4 final
--- exit, and the boot wrapper's advance_bootstrap containment).
---
--- Policy: NEVER log-once-and-swallow. The first occurrence of a (site, error)
--- key logs immediately — byte-identical to a plain log_error line — and
--- recurrences within _THROTTLE_INTERVAL_S are counted silently; the first
--- recurrence after the interval logs again with a suffix naming the
--- occurrences since the previous logged line for that key, then the count
--- resets. The key is the site's message prefix + tostring(err): a different
--- error at the same site, or the same error at a different site, is a new
--- key and logs immediately.
---
--- The clock is Mods.lua.os.time, read at CALL time (the _hard_exit idiom) and
--- pcall-protected; when it is unavailable (absent, not a function, raising,
--- or non-numeric) the helper DEGRADES to logging every occurrence —
--- throttling must never cost a log line. Distinct keys are capped at
--- _THROTTLE_MAX_KEYS: the key that would exceed the cap drops the whole
--- table and starts fresh (bounded memory; recurrences of dropped keys log
--- immediately again).
+-- Throttled containment-error logging for the five chassis containment sites
+-- (Step-2 update, Step-3 exit/enter dispatches, Step-4 final exit, and the
+-- boot wrapper's advance_bootstrap containment). NEVER log-once-and-swallow:
+-- the first occurrence per (site, error) key logs immediately; without a
+-- usable clock the helper degrades to logging every occurrence. Full policy
+-- (keying, recurrence window + count suffix, key cap):
+-- docs/architecture/MOD_LOADER-DMF.md → "Deferred bootstrap".
 -- ---------------------------------------------------------------------------
 local _THROTTLE_INTERVAL_S = 10
 local _THROTTLE_MAX_KEYS = 32
@@ -170,14 +153,11 @@ end
 local _skip_splash_enabled = Mods and Mods._relay and Mods._relay.skip_splash == true
 
 -- Snapshot the alternate mod manager path ONCE at module-eval time (init.lua
--- stored it in Mods._relay.mod_manager_path from the trampoline-baked
--- RELAY_MOD_MANAGER global). A non-empty string means an alternate is
--- configured: Step 1a loads the manager class from that EXACT path (verbatim —
--- the engine's raw io resolves a relative path against the game CWD; it is
--- neither loader-rooted nor mod-root rooted), and a permanent failure
--- terminates the process (the game must not continue managerless under a
--- configured alternate). Anything else (nil / "" / non-string) is the built-in
--- path, byte-identical to before.
+-- published it as Mods._relay.mod_manager_path from the trampoline-baked
+-- RELAY_MOD_MANAGER global). A non-empty string means Step 1a loads the class
+-- from that EXACT path (verbatim, never rooted); anything else (nil / "" /
+-- non-string) is the built-in path, byte-identical to before. Selection +
+-- failure policy: docs/architecture/MOD_LOADER-DMF.md → "The manager slot".
 local _alternate_manager_path = nil
 do
     local relay = Mods and Mods._relay
@@ -270,14 +250,10 @@ local bs = {
 
 -- ---------------------------------------------------------------------------
 -- Alternate mod manager (RELAY_MOD_MANAGER) — permanent-failure handling.
---
--- A configured alternate is a hard operator commitment: if it cannot be
--- loaded, the process terminates instead of continuing managerless ("don't
--- load the game and let them think it's working"). Retry semantics while the
--- engine is NOT yet ready are the SAME decision as the built-in manager —
--- the existing bootstrap retry machinery simply retries; there is no new
--- retry taxonomy. Once the engine is ready, an alternate failure is
--- permanent.
+-- A configured alternate is a hard operator commitment: failures retry
+-- through the normal bootstrap machinery only while the engine is not yet
+-- ready; once ready, a failure is permanent (never a managerless game).
+-- Normative failure policy: docs/reference/relay/manager-slot.md.
 -- ---------------------------------------------------------------------------
 
 -- Engine-ready: every manager-independent bootstrap step (2-4) is wrapped.
@@ -288,20 +264,14 @@ local function _engine_ready()
     return bs.state_game_wrapped and bs.change_state_wrapped and bs.destroy_wrapped
 end
 
--- Terminate the process. Logs the final ERROR first (naming the configured
--- path, the failure, and the policy), then exits via the first workable
--- surface, reading ffi/os from Mods.lua at CALL time so the environment (or
--- a test sandbox) can mock them:
---   1. Mods.lua.ffi — cdef the ExitProcess declaration ONCE per process
---      (attempted once to skip re-parsing the declaration on later calls;
---      re-declaring the same prototype is legal in LuaJIT, so the guard is
---      efficiency, not correctness), then call ffi.C.ExitProcess(1)
---      protected. x64 has a single calling convention (no __stdcall needed).
---   2. Mods.lua.os.exit(1), protected.
---   3. Neither works: raise with the reason so the boot wrapper's containment
---      logs it.
--- The whole helper is double-invocation guarded — the first call wins; later
--- calls are silent no-ops (they re-invoke no exit surface and log nothing).
+-- Terminate the process: log the final ERROR first (naming the configured
+-- path, the failure, and the policy), then exit via the first workable
+-- surface — ffi.C.ExitProcess(1) (cdef'd once; re-cdef is legal in LuaJIT so
+-- the guard is efficiency-only; x64 has a single calling convention),
+-- os.exit(1), or a contained raise if neither works. ffi/os are read from
+-- Mods.lua at CALL time (so a test sandbox can mock them). The helper is
+-- double-invocation guarded — the first call wins; later calls are silent
+-- no-ops (no exit surface re-invoked, nothing logged).
 local _hard_exit_attempted = false
 local _exit_cdef_attempted = false
 
@@ -444,15 +414,13 @@ local function advance_bootstrap()
         end
     end
 
-    -- Step 1c: manager-agnostic chassis duties, once after creation. Resolve
-    --    the ONE registering dmf_adapter instance: the manager's own _adapter
-    --    when it built a compatible one (the built-in path — init constructs it
-    --    for its per-mod driving), else a single chassis-constructed instance
-    --    retained for the process (the alternate path — establish/register
-    --    only, never stored on the manager). Either way exactly one instance
-    --    registers per process, and a retried pass reuses the same instance.
-    --    A failure raises out of advance_bootstrap (caught + logged by the boot
-    --    wrapper) and retries on the next tick.
+    -- Step 1c: manager-agnostic chassis duties, once after creation: resolve
+    --    the ONE registering dmf_adapter instance (the manager's own
+    --    _adapter when compatible — the built-in path; else a chassis-
+    --    constructed instance retained for the process), establish(), the io
+    --    observer, and the Crashify version attempt. A failure raises to the
+    --    boot wrapper's containment and retries next tick. Detail:
+    --    MOD_LOADER-DMF.md → "Chassis duties (Step 1c)".
     if bs.manager_created and not bs.chassis_duties_done then
         local m = Managers and Managers.mod
         local adapter = nil
@@ -650,14 +618,11 @@ local function advance_bootstrap()
     end
 
     -- All steps complete -> short-circuit. The chassis-duties step must also
-    -- be resolved (a manager exists but its establish/observer duties keep
-    -- failing = degraded install; keep retrying, never complete silently).
-    -- The splash step is gated on the opt-in: opted OUT, it is never attempted
-    -- and must not block completion. Opted IN, completion needs the splash step
-    -- RESOLVED — wrapped or logged-missing. The missing-logged term is
-    -- load-bearing: without it, an absent (optional) StateSplash would block
-    -- completion forever, re-checking every tick (StateSplash's absence is
-    -- benign, unlike a missing StateGame).
+    --    be resolved (a manager whose establish/observer duties keep failing
+    --    is a degraded install; keep retrying, never complete silently).
+    --    Opted in, the splash step must be RESOLVED — wrapped or
+    --    logged-missing (an absent optional StateSplash must not block
+    --    completion forever, unlike a missing StateGame).
     if bs.manager_created and bs.chassis_duties_done
        and bs.state_game_wrapped
        and bs.change_state_wrapped and bs.destroy_wrapped

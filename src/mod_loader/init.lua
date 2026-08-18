@@ -249,17 +249,14 @@ local _pcall = pcall
 local _setfenv = setfenv
 local _getfenv = getfenv
 
--- Dofile-style chunk loader for an EXACT path (no rooting). Uses the RAW
--- io.open captured above (BEFORE file.lua's wrapper installs) so a caller
--- like the alternate mod manager gets its configured path opened VERBATIM —
--- absolute passes through, relative resolves against the game CWD via the
--- engine's raw io; the path is neither loader-rooted nor mod-root rooted.
--- Runs the chunk in the entry's env (setfenv so modules share _G), logs an
--- ERROR per open/parse/run failure, and returns (ok, result, failure_mode) —
--- failure_mode is "open"/"parse"/"run" on failure and nil on success so
--- callers can track distinct failure modes (the first two returns alone keep
--- the pre-existing contract). Published on Mods._relay as the loader-internal
--- seam for lifecycle.lua; NOT part of the public Mods surface.
+-- Dofile-style chunk loader for an EXACT path: raw io.open (captured above,
+-- BEFORE file.lua's wrapper installs) + loadstring + protected run in the
+-- entry's env — the path is opened VERBATIM (absolute passes through,
+-- relative resolves against the game CWD), never loader/mod-root rooted.
+-- Returns (ok, result, failure_mode) — failure_mode is "open"/"parse"/"run"
+-- on failure, nil on success; each failure logs one ERROR. Loader-internal
+-- seam for lifecycle.lua's manager slot, NOT part of the public Mods
+-- surface. Contract: docs/architecture/MOD_LOADER-DMF.md → "The manager slot".
 Mods._relay.load_chunk = function(path)
     local f, err = _io_open(path, "r")
     if not f then

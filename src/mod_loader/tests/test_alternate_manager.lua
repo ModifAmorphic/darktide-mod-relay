@@ -151,22 +151,15 @@ return function(runner)
     -- -----------------------------------------------------------------
     -- lifecycle Step 1a/1b: selection + failure gating (mocked chunk seam)
     -- -----------------------------------------------------------------
-    --
-    -- setup_lifecycle loads class_registry + lifecycle directly (the
-    -- test_lifecycle.lua pattern) with the alternate configured and a FAKE
-    -- Mods._relay.load_chunk (published by init.lua in production). A shared
-    -- timeline records log lines + exit-surface invocations in order.
-    --
-    -- opts:
-    --   manager         configured path (default mock.MOD_MANAGER_PATH)
-    --   builtin         true = no alternate configured (built-in fork)
-    --   chunk           "ok" (default) | "missing" | "parse" | "run" |
-    --                   "notable" | "new_error" | function(path) -> (ok, r, mode)
-    --   exit_surfaces   "ffi" (default) | "os" | "both" | "none"
-    --   ffi_surface     explicit Mods.lua.ffi (overrides the built-in mock;
-    --                   used by the production-shape test)
-    --   no_engine_classes  withhold StateGame/GSM (steps 2-4 cannot wrap ->
-    --                   engine-ready never satisfied)
+    -- Loads class_registry + lifecycle with the alternate configured and a
+    -- FAKE Mods._relay.load_chunk (init.lua publishes the real one); a shared
+    -- timeline records log lines + exit-surface invocations. opts: manager
+    -- (path; default mock.MOD_MANAGER_PATH), builtin (no alternate), chunk
+    -- ("ok" | "missing" | "parse" | "run" | "notable" | "new_error" |
+    -- function(path) -> (ok, r, mode); default "ok"), exit_surfaces ("ffi" |
+    -- "os" | "both" | "none"; default "ffi"), ffi_surface (explicit
+    -- Mods.lua.ffi), no_engine_classes (steps 2-4 cannot wrap; engine-ready
+    -- never satisfied).
     local function setup_lifecycle(opts)
         opts = opts or {}
         local manager_path = (opts.manager ~= nil) and opts.manager or mock.MOD_MANAGER_PATH

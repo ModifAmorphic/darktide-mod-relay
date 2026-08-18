@@ -140,14 +140,12 @@ end
 
 -- Normalize a public op's arguments to (relative_path, args), or
 -- (nil, nil, reason) on a join-form component violation. A STRING second
--- argument selects the join form: (name, ext) -> "<name>.<ext>"; with a
--- third argument, (dir, name, ext[, args]) -> "<dir>/<name>.<ext>" and the
--- fourth is the chunk argument. Any other second argument is the path form
--- (path, args), returned verbatim. The join form is the manager-slot
--- convention (AML calls exec_with_return(folder, folder, "mod")); ext is
--- BARE ("mod", not ".mod") — the join supplies the dot, so the joined
--- basename always carries an extension and resolve()'s .lua append never
--- fires on it.
+-- argument selects the join form — (name, ext) -> "<name>.<ext>" or
+-- (dir, name, ext[, args]) -> "<dir>/<name>.<ext>", ext BARE ("mod", not
+-- ".mod"; components validated per check_component) — so the joined basename
+-- always carries an extension (resolve()'s .lua append never fires on it).
+-- Any other second argument is the path form, returned verbatim. Full
+-- surface contract: docs/reference/relay/manager-slot.md.
 local function normalize_args(first, second, third, fourth)
     if type(second) ~= "string" then
         return first, second
@@ -245,13 +243,11 @@ end
 -- failures. Observers fire only after a successful execution.
 --
 -- Every op takes two argument shapes, selected by the second argument (the
--- discriminator + component rules live in normalize_args):
---   (path, args?)             path form — args (any non-string type) is the
---                             chunk argument.
---   (name, ext)               join form — resolves "<name>.<ext>".
---   (dir, name, ext[, args])  join form — resolves "<dir>/<name>.<ext>".
--- The join form is the manager-slot convention (AML: exec_with_return(folder,
--- folder, "mod")). Reads take no chunk argument; their args slot is ignored.
+-- discriminator + component rules live in normalize_args): the path form
+-- (path, args?) — args any non-string type, ignored by reads — or the join
+-- form (name, ext) / (dir, name, ext[, args]) — the manager-slot convention
+-- (AML: exec_with_return(folder, folder, "mod")). Full surface contract:
+-- docs/reference/relay/manager-slot.md.
 -- ---------------------------------------------------------------------------
 
 -- Safe dofile (with return). Returns the chunk value, or false on failure.

@@ -72,8 +72,12 @@ For example:
 - **Trampoline diagnostics.** The one-shot trampoline normally logs `OK`,
   `FAIL`, or `SKIPPED` as a single `@ pcall#1:` line. If loading or running the
   staged chunk fails before it can return a status, Relay emits explicit
-  `CHUNK LOAD FAILED` or `CHUNK PCALL FAILED` error lines instead. These
-  diagnostics are the reliable bootstrap validation.
+  `CHUNK LOAD FAILED` or `CHUNK PCALL FAILED` error lines instead — in
+  practice the latter means the entry-file read raised: the chunk guards
+  every step except the `init.lua` read, so a read error is the one failure
+  that escapes the chunk as an error rather than returning a
+  `FAIL <step>: <err>` status. These diagnostics are the reliable bootstrap
+  validation.
 
 `relay.log` is diagnostic data, not a privacy-filtered report. It can contain
 the full game command line and, with the Lua print tee enabled, arbitrary game,

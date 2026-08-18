@@ -978,11 +978,16 @@ with an `[xN in the last 10s]` suffix naming the occurrences since the
 previous logged line for that key. A different error text, or the same text
 at a different site, is a new key and logs immediately; without a usable
 `Mods.lua.os.time` clock the sites degrade to logging every occurrence.
+Distinct keys are capped (32): the key that would exceed the cap drops the
+whole throttle table and starts fresh — memory stays bounded, and
+recurrences of dropped keys log immediately again.
 
 Once every step resolves — the manager instantiated, the chassis duties done
 (a manager whose establish/observer duties keep failing is a degraded install
 and keeps retrying), and the three engine wraps installed (plus, when
-`--skip-splash` is on, the splash step resolved) — a `completed` flag
+`--skip-splash` is on, the splash step resolved — wrapped or logged-missing,
+so an absent optional `StateSplash` never blocks completion, unlike a
+missing `StateGame`) — a `completed` flag
 short-circuits later calls of the coordinator. Wrapping uses direct
 `(owner_table, method_key)` references —
 no dotted strings, no global hook registries, no chains, no enable/disable, no
