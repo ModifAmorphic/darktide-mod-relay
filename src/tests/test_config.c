@@ -53,6 +53,17 @@ static void clear_env(void) {
     SetEnvironmentVariableA(ENV_MODS_IN_GAME_TREE, NULL);
 }
 
+/* Wine detection: ntdll exports wine_get_version only in wine — the export
+ * does not exist on native Windows. Used to skip tests whose reparse-point
+ * semantics wine does not implement faithfully across versions. */
+static int running_under_wine(void) {
+    HMODULE h = GetModuleHandleA("ntdll.dll");
+    if (h == NULL) {
+        return 0;
+    }
+    return GetProcAddress(h, "wine_get_version") != NULL;
+}
+
 /* ---- parse_args ---- */
 
 void test_parse_all_flags(void) {
@@ -693,9 +704,21 @@ void test_in_game_tree_mod_path_is_a_file_is_zero(void) {
 void test_in_game_tree_symlink_to_game_dir_matches(void) {
     /* Same dir via a directory symlink: opening the link (no
      * FILE_FLAG_OPEN_REPARSE_POINT) resolves to the target, so the handle
-     * identity matches. Symlink creation needs privileges/developer mode on
-     * native Windows and can be unavailable under wine — when it fails the
-     * test self-skips rather than fail intermittently. */
+     * identity matches. Two environment guards, both skip (not fail):
+     *   - wine: CreateSymbolicLinkA succeeds but GetFileInformationByHandle
+     *     does not faithfully resolve symlink->target identity across wine
+     *     versions (passed on one dev box, failed on the GH runner), so the
+     *     identity assertion is unreliable there.
+     *   - native Windows without symlink privileges/developer mode: link
+     *     creation itself fails.
+     * The full assertion runs only where symlink/junction identity is
+     * contractually meaningful (native Windows, e.g. the Curator junction
+     * scenario — covered by the msvc CI job). */
+    if (running_under_wine()) {
+        printf("  (skip: wine GetFileInformationByHandle symlink identity is"
+               " unreliable across versions)\n");
+        return;
+    }
     char root[MAX_PATH], gd[MAX_PATH], gb[MAX_PATH], link[MAX_PATH];
     if (make_game_tree(root, sizeof(root), gd, sizeof(gd), gb, sizeof(gb)) != 0) {
         ASSERT_FAIL("could not create the scratch game tree");
