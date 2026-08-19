@@ -899,4 +899,20 @@ return function(runner)
         runner.assert_eq(raw.popen, sb.Mods.lua.io.popen,
             "empty _mod_root: io.popen never wraps")
     end)
+
+    runner.register("io gate: game-tree mods + gate ON — Mods.file.* still resolves at _mod_root", function()
+        -- The gate disables only the io wrappers (Mods.lua.io.open/io.lines/io.popen).
+        -- Mods.file.* (used by the manager and the manager-slot convention) still
+        -- roots at _mod_root — which is GAME_DIR\mods in game-tree mode.
+        -- This is the not-gated scope decision: the wrappers are off, but the
+        -- internal rooting is unchanged.
+        local files = { [mock.MOD_ROOT .. "/test.lua"] = "return 'game-tree-mods'" }
+        local sb = setup(files)
+        -- Add the gate (mods_in_game_tree = true) to the already-loaded sandbox.
+        sb.Mods._relay = { mods_in_game_tree = true }
+        -- Verify Mods.file.dofile still resolves from _mod_root under the gate.
+        local v = sb.Mods.file.dofile("test")
+        runner.assert_eq("game-tree-mods", v,
+            "Mods.file.dofile must still resolve from _mod_root under the gate")
+    end)
 end
