@@ -838,10 +838,12 @@ return function(runner)
 
     -- Build a sandbox with explicit gate control. gate is true/false, or
     -- "absent" (no Mods._relay at all). mod_root defaults to a set root;
-    -- pass "" to exercise the empty-root + gate-on combination. Captures the
-    -- raw io functions the sandbox provided so identity comparison proves no
-    -- wrap. Returns (sb, raw) where raw = { open, lines, popen }.
-    local function setup_gated(gate, mod_root)
+    -- pass "" to exercise the empty-root + gate-on combination. files
+    -- optionally backs the io mock (path -> content) so rooted opens resolve.
+    -- Captures the raw io functions the sandbox provided so identity
+    -- comparison proves no wrap. Returns (sb, raw) where raw =
+    -- { open, lines, popen }.
+    local function setup_gated(gate, mod_root, files)
         local sb = mock.new_sandbox()
         local mods = {
             lua = {},
@@ -852,7 +854,7 @@ return function(runner)
             mods._relay = { mods_in_game_tree = gate }
         end
         sb.Mods = mods
-        local iot = mock.make_io({})
+        local iot = mock.make_io(files or {})
         iot.popen = function() return "FAKE_HANDLE" end
         local raw = { open = iot.open, lines = iot.lines, popen = iot.popen }
         sb.Mods.lua.io = iot
@@ -905,11 +907,12 @@ return function(runner)
         -- Mods.file.* (used by the manager and the manager-slot convention) still
         -- roots at _mod_root — which is GAME_DIR\mods in game-tree mode.
         -- This is the not-gated scope decision: the wrappers are off, but the
-        -- internal rooting is unchanged.
-        local files = { [mock.MOD_ROOT .. "/test.lua"] = "return 'game-tree-mods'" }
-        local sb = setup(files)
-        -- Add the gate (mods_in_game_tree = true) to the already-loaded sandbox.
-        sb.Mods._relay = { mods_in_game_tree = true }
+        -- internal rooting is unchanged. The gate is present BEFORE file.lua
+        -- evaluates (the setup_gated shape, with real file backing), so gating
+        -- Mods.file.* at module load would break the rooted open and fail this.
+        local mod_root = "C:/staged/mods"
+        local files = { [mod_root .. "/test.lua"] = "return 'game-tree-mods'" }
+        local sb = setup_gated(true, mod_root, files)
         -- Verify Mods.file.dofile still resolves from _mod_root under the gate.
         local v = sb.Mods.file.dofile("test")
         runner.assert_eq("game-tree-mods", v,
