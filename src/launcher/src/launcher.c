@@ -691,8 +691,9 @@ RELAY_INTERNAL int relay_mods_in_game_tree(const char *game_binary,
      * Handle identity — not path-text comparison — so case, separator style,
      * 8.3 short names, trailing slashes, subst drives, and symlink spellings
      * of the same directory all compare equal. On ReFS the 128-bit file ID
-     * truncates into this struct; a false mismatch merely degrades to the
-     * default (undetected) behavior, and game installs are NTFS. */
+     * truncates into this struct and is not guaranteed unique — a false
+     * match wrongly engages the gate (stock io conventions, benign for
+     * game-tree hosting); NTFS game installs are unaffected. */
     BY_HANDLE_FILE_INFORMATION gi, mi;
     int same = 0;
     if (GetFileInformationByHandle(hg, &gi) && GetFileInformationByHandle(hm, &mi)) {
