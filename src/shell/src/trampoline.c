@@ -12,11 +12,12 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The trampoline chunk template. The six `%s` receive, in order: the escaped
+/* The trampoline chunk template. The seven `%s` receive, in order: the escaped
  * mod loader root, the escaped mod root (empty string when unset), the escaped
  * alternate-manager path (empty string when unset), the version assignment
  * value (a quoted escaped string or nil), the splash-skip token (literal "1"
- * or "", not escaped), and the escaped entry-file path — each becomes an
+ * or "", not escaped), the mods-in-game-tree token (literal "1" or "", not
+ * escaped), and the escaped entry-file path — each becomes an
  * internal bootstrap global (see trampoline.h). Step order is
  * io.open -> read -> loadstring -> run, guarded at each step except f:read, so
  * a read error is the one unguarded failure and surfaces as CHUNK PCALL FAILED
@@ -27,6 +28,7 @@ static const char TRAMPOLINE_CHUNK_FMT[] =
     "RELAY_MOD_MANAGER = \"%s\"\n"
     "MOD_RELAY_VERSION = %s\n"
     "RELAY_SKIP_SPLASH = \"%s\"\n"
+    "RELAY_MODS_IN_GAME_TREE = \"%s\"\n"
     "local f, err = io.open(\"%s\", \"r\")\n"
     "if not f then return \"FAIL io.open: \" .. tostring(err) end\n"
     "local data = f:read(\"*all\"); f:close()\n"
@@ -63,7 +65,7 @@ int trampoline_path_has_control(const char *s, size_t len) {
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
                            const char *mod_manager,
                            const char *entry_path, const char *relay_version,
-                           int skip_splash,
+                           int skip_splash, int mods_in_game_tree,
                            char *out, size_t out_cap) {
     if (!mod_loader_dir || !entry_path || !out || out_cap == 0) return -1;
     size_t loader_len = strlen(mod_loader_dir);
@@ -144,6 +146,7 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
     int n = snprintf(out, out_cap, TRAMPOLINE_CHUNK_FMT,
                      esc_loader, esc_mod, esc_mgr, version_value,
                      skip_splash ? "1" : "",
+                     mods_in_game_tree ? "1" : "",
                      esc_entry);
     if (n < 0 || (size_t)n >= out_cap) return -1;  /* encoding error or overflow */
     return n;

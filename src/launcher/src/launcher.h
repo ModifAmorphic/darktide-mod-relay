@@ -133,6 +133,25 @@ int relay_resolve_config(const relay_parsed_args *args, relay_config *cfg);
  * source) when the target is missing or a directory. */
 int relay_check_mod_manager(const char *mod_manager, const char *source);
 
+/* Derive the game dir (the parent of the exe's parent) from the game-binary
+ * path: strip trailing separators, then strip the last two path segments
+ * (<GAME_DIR>\binaries\Darktide.exe => <GAME_DIR>; '\' and '/' both count as
+ * separators; the caller's separator bytes are preserved). Returns 0 and
+ * writes the derived dir (NUL-terminated) into out, or -1 on a NULL arg,
+ * zero cap, empty input, overflow, or a path with fewer than two separators
+ * (an empty prefix, e.g. "\binaries\x.exe", also fails). Pure string math —
+ * no filesystem access. */
+int relay_derive_game_dir(const char *game_binary, char *out, size_t outsz);
+
+/* 1 iff mod_path and the game dir derived from game_binary are the SAME
+ * directory by handle identity (each opened via CreateFileA with
+ * FILE_FLAG_BACKUP_SEMANTICS, compared by GetFileInformationByHandle: volume
+ * serial + file index high/low all match — immune to case, separator,
+ * 8.3-name, trailing-slash, subst, and symlink spelling differences).
+ * 0 on any failure or no match — never fatal, never refuses the launch.
+ * NULL mod_path => 0; a mod_path that is not a directory => 0. */
+int relay_mods_in_game_tree(const char *game_binary, const char *mod_path);
+
 /* Build the child command line for CreateProcessA: the exe as argv[0]
  * (always wrapped in double quotes, byte-for-byte the legacy form), followed
  * by each game argument rendered with the MSVC CRT quoting algorithm.

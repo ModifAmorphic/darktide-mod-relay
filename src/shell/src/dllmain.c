@@ -107,6 +107,7 @@ static volatile int  g_in_trampoline = 0;     /* re-entrancy guard for the tramp
 #define MOD_PATH_ENV         "RELAY_MOD_PATH"   /* mod root dir (user/mod-manager-controlled; optional) */
 #define MOD_MANAGER_ENV      "RELAY_MOD_MANAGER" /* alternate mod manager file (user-controlled; optional when unset, fatal when set-but-unreadable/too-long/control-bearing) */
 #define SKIP_SPLASH_ENV      "RELAY_SKIP_SPLASH" /* StateSplash skip (user-controlled; optional; exact "1") */
+#define MODS_IN_GAME_TREE_ENV "RELAY_MODS_IN_GAME_TREE" /* mods-in-game-tree hint (launcher-derived; optional; exact "1"; never operator-set) */
 #define MOD_LOADER_DIRNAME   "mod_loader"            /* the loader dir, self-located next to the DLL */
 #define MOD_LOADER_ENTRY     "init.lua"              /* the loader bootstrap entry */
 static char            g_trampoline_chunk[4096];   /* NUL-terminated chunk; len 0 => not staged */
@@ -388,6 +389,12 @@ static void trampoline_stage_chunk(void) {
      * boolean into the RELAY_SKIP_SPLASH global ("1" or "") for init.lua. */
     int skip_splash = env_is_exact_one(SKIP_SPLASH_ENV);
 
+    /* Mods-in-game-tree hint (optional, launcher-derived). Same exact-"1"
+     * snapshot policy; the chunk bakes "1"/"" for init.lua. A hint, not an
+     * operator commitment: unset/non-"1" is the normal default, so there is
+     * deliberately no FATAL path here (unlike RELAY_MOD_MANAGER). */
+    int mods_in_game_tree = env_is_exact_one(MODS_IN_GAME_TREE_ENV);
+
     /* Join <mod_loader_dir> + init.lua into the production entry path
      * (Windows-canonical: exactly one backslash separator, idempotent on a
      * trailing separator). */
@@ -401,6 +408,7 @@ static void trampoline_stage_chunk(void) {
     int n = trampoline_build_chunk(mod_loader_dir, mod_path, mod_manager,
                                     path, RELAY_VERSION,
                                     skip_splash,
+                                    mods_in_game_tree,
                                     g_trampoline_chunk, sizeof(g_trampoline_chunk));
     if (n < 0) {
         relay_log(RELAY_LOG_INFO, "trampoline", "chunk build failed (escape/overflow); trampoline will be SKIPPED\n");
@@ -419,6 +427,7 @@ static void trampoline_stage_chunk(void) {
         relay_log(RELAY_LOG_INFO, "trampoline", "%s unset (no alternate mod manager)\n", MOD_MANAGER_ENV);
     }
     relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", SKIP_SPLASH_ENV, skip_splash ? "1" : "0");
+    relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", MODS_IN_GAME_TREE_ENV, mods_in_game_tree ? "1" : "0");
     relay_log(RELAY_LOG_INFO, "trampoline", "entry path=%s\n", path);
     relay_log(RELAY_LOG_INFO, "trampoline", "chunk staged (%zu bytes); will run one-shot at pcall#1 (before orig pcall)\n",
               g_trampoline_chunk_len);
