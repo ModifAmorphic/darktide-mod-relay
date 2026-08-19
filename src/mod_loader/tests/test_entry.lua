@@ -7,6 +7,8 @@
 --   - exposes Mods.coordinate_bootstrap + Mods.load_module
 --   - wraps global require (so the bridge is active after entry runs)
 --   - MOD_LOADER_DIR / RELAY_MOD_PATH stay distinct (loader root vs mod root)
+--   - RELAY_MODS_IN_GAME_TREE snapshot (nil-safe; retired global; one
+--     io-retargeting-disabled diagnostic when gated)
 --   - no Mods.hook / no loadstring-driven hook surface
 
 local mock = require("mock")
@@ -148,6 +150,64 @@ return function(runner)
             "_mod_path is the config (RELAY_MOD_PATH verbatim, normalized)")
         runner.assert_eq("/staged/mods", sb.Mods._mod_root,
             "_mod_root is derived as _mod_path .. '/mods'")
+    end)
+
+    -- -----------------------------------------------------------------
+    -- RELAY_MODS_IN_GAME_TREE snapshot (the launcher-derived io-retargeting
+    -- gate; snapshotted beside skip_splash, BEFORE the module bootstrap loop
+    -- so file.lua reads the field at module-load time)
+    -- -----------------------------------------------------------------
+
+    -- Run the REAL entry with a (possibly absent) baked
+    -- RELAY_MODS_IN_GAME_TREE; returns (sb, logged) when a print spy is used.
+    local function setup_game_tree(global_value)
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        sb.MOD_RELAY_VERSION = "0.3.0-beta.2"
+        if global_value ~= "absent" then
+            sb.RELAY_MODS_IN_GAME_TREE = global_value
+        end
+        sb.require = function() return {} end
+        sb.print = function(m) table.insert(logged, m) end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        return sb, logged
+    end
+
+    runner.register("entry: snapshots RELAY_MODS_IN_GAME_TREE \"1\" as true + retires the global", function()
+        local sb = setup_game_tree("1")
+        runner.assert_eq(true, sb.Mods._relay.mods_in_game_tree,
+            "the \"1\" hint means the mod path IS the game dir (gate on)")
+        runner.assert_nil(sb.RELAY_MODS_IN_GAME_TREE,
+            "temporary trampoline global must be retired")
+    end)
+
+    runner.register("entry: snapshots RELAY_MODS_IN_GAME_TREE \"\" as false + retires the global", function()
+        local sb = setup_game_tree("")
+        runner.assert_eq(false, sb.Mods._relay.mods_in_game_tree,
+            "the empty string means not in the game tree (gate off)")
+        runner.assert_nil(sb.RELAY_MODS_IN_GAME_TREE)
+    end)
+
+    runner.register("entry: nil-safe when RELAY_MODS_IN_GAME_TREE is absent (older shell)", function()
+        local sb = setup_game_tree("absent")
+        runner.assert_eq(false, sb.Mods._relay.mods_in_game_tree,
+            "an absent global must degrade to gate off")
+        runner.assert_nil(sb.RELAY_MODS_IN_GAME_TREE)
+        runner.assert_eq(true, sb.Mods._loaded,
+            "the entry completes unchanged when the global is absent")
+    end)
+
+    runner.register("entry: game-tree gate logs exactly one io-retargeting-disabled diagnostic", function()
+        local sb, logged = setup_game_tree("1")
+        runner.assert_eq(1, count_log(logged, "mod path is the game dir; io retargeting disabled"),
+            "gated + non-empty mod path emits the single INFO diagnostic")
+        -- Gate off: no diagnostic.
+        local sb2, logged2 = setup_game_tree("")
+        runner.assert_eq(0, count_log(logged2, "io retargeting disabled"),
+            "gate off must not log the diagnostic")
     end)
 
     runner.register("entry: bootstrap-loads modules in dependency order", function()

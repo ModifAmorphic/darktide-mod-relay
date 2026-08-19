@@ -361,10 +361,17 @@ end
 -- The raw io captured above (_io) is preserved for internal Mods.file.* ops,
 -- which already root via resolve() and must not be double-wrapped.
 --
+-- Skipped when mods are hosted in the game tree (the launcher-derived
+-- Mods._relay.mods_in_game_tree gate, snapshotted by init.lua before this
+-- module loads): the mod path IS the game directory, so the stock DMF
+-- convention already resolves naturally from binaries/ — no wrapper installs.
+-- Nil-safe (no Mods._relay = not gated).
+--
 -- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection" for
 -- the raw-io semantics.
 -- ---------------------------------------------------------------------------
-if Mods._mod_root and Mods._mod_root ~= "" then
+if Mods._mod_root and Mods._mod_root ~= ""
+   and not (Mods._relay and Mods._relay.mods_in_game_tree == true) then
     local _mod_root = Mods._mod_root
     local _normpath = path.normpath
 
@@ -404,11 +411,15 @@ end
 -- The cd runs in the spawned cmd.exe child only — the parent Lua CWD is never
 -- touched (no SetCurrentDirectory, no FFI, no race). The opaque shell string
 -- rules out the path-rewrite that open/lines applies.
+-- Skipped when mods are hosted in the game tree (the same
+-- Mods._relay.mods_in_game_tree gate as the open/lines wrapper — stock
+-- conventions resolve naturally from binaries/). Nil-safe.
 -- See docs/architecture/MOD_LOADER-DMF.md → "Raw Mods.lua.io redirection".
 -- ---------------------------------------------------------------------------
 do
     local mod_root = Mods._mod_root
     if type(mod_root) == "string" and mod_root ~= ""
+       and not (Mods._relay and Mods._relay.mods_in_game_tree == true)
        and type(Mods.lua.io) == "table"
        and type(Mods.lua.io.popen) == "function" then
         -- _mod_root carries a forward slash (init.lua: _mod_path.."/mods");

@@ -11,6 +11,8 @@
 --   - registers the Mods.file observer exactly once per adapter;
 --   - installation-aware IO adaptation (table-identity + io_dofile-wrapper
 --     tracking; retire retains the markers; no fabrication when DMF absent);
+--   - the mods-in-game-tree gate (stock io_* stays when the mod path IS the
+--     game dir; markers stay nil, observer fires harmlessly);
 --   - the eight DMFMod:io_* overrides (safe/unsafe routing, path construction,
 --     DMF debug/error logging).
 --
@@ -366,6 +368,49 @@ return function(runner)
         sb.DMFMod.io_dofile = function() end
         sb.Mods.file.notify()
         runner.assert_eq(sb.DMFMod, adapter:adapted_dmfmod())
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Mods-in-game-tree gate (Mods._relay.mods_in_game_tree): when the mod
+    -- path IS the game directory, stock DMF io_* methods already resolve
+    -- correctly from binaries/ — the adapter keeps them stock, installs no
+    -- overrides, and the adapted markers stay nil. The observer still
+    -- registers and fires harmlessly.
+    -- ---------------------------------------------------------------------
+
+    runner.register("dmf_adapter: game-tree gate keeps DMFMod io_* stock (no adaptation)", function()
+        local sb, M, observers = setup({ with_observer_list = true })
+        sb.Mods._relay = { mods_in_game_tree = true }
+        local adapter = M.new(fake_manager())
+        adapter:register_io_observer()
+        local stock = full_dmfmod_surface()
+        sb.DMFMod = stock
+        local stock_io_dofile = stock.io_dofile
+        sb.Mods.file.notify()
+        runner.assert_eq(stock_io_dofile, sb.DMFMod.io_dofile,
+            "stock io_dofile must stay UNCHANGED under the gate")
+        runner.assert_nil(adapter:adapted_dmfmod(),
+            "no adapted-table marker under the gate")
+        runner.assert_nil(adapter:adapted_io_dofile(),
+            "no installed-wrapper marker under the gate")
+        -- Re-fires stay unadapted (the observer registered + fires harmlessly).
+        sb.Mods.file.notify()
+        runner.assert_eq(stock_io_dofile, sb.DMFMod.io_dofile,
+            "re-fires must never adapt under the gate")
+        runner.assert_nil(adapter:adapted_dmfmod())
+    end)
+
+    runner.register("dmf_adapter: gate explicitly false adapts as today", function()
+        local sb, M, observers = setup({ with_observer_list = true })
+        sb.Mods._relay = { mods_in_game_tree = false }
+        local adapter = M.new(fake_manager())
+        adapter:register_io_observer()
+        sb.DMFMod = full_dmfmod_surface()
+        sb.Mods.file.notify()
+        runner.assert_eq(sb.DMFMod, adapter:adapted_dmfmod(),
+            "gate false: adaptation proceeds")
+        runner.assert_eq(sb.DMFMod.io_dofile, adapter:adapted_io_dofile(),
+            "gate false: the Relay wrapper is installed + tracked")
     end)
 
     -- ---------------------------------------------------------------------

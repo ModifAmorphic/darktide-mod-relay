@@ -85,6 +85,12 @@ function M.new(manager)
     -- Adapt DMF's mod-facing io_* methods to Mods.file.*. Installation-aware
     -- idempotent — see MOD_LOADER-DMF.md.
     local function adapt_dmf_io()
+        -- Mods hosted in the game tree: stock DMF io_* methods already resolve
+        -- correctly from binaries/ (their "./../mods" base lands in GAME_DIR\mods);
+        -- keep them stock, install no Relay overrides.
+        if Mods._relay and Mods._relay.mods_in_game_tree == true then
+            return
+        end
         local DMFMod = _rawget(_G, "DMFMod")
         if _type(DMFMod) ~= "table" then
             return

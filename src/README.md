@@ -301,7 +301,11 @@ user-owned. Detail in
 > handle identity — volume serial + file index — so any spelling of the same
 > directory matches), `""` otherwise. There is no flag or env input for it;
 > the launcher computes it at launch and canonicalizes the child env (a stale
-> parent value never leaks in).
+> parent value never leaks in). The loader snapshots it into
+> `Mods._relay.mods_in_game_tree` and, when on, disables all its io
+> retargeting (the `Mods.lua.io` wrappers, the `popen` cd-prepend, and the
+> `DMFMod:io_*` overrides) — stock DMF conventions then resolve naturally
+> from the game's `binaries\` CWD.
 
 > **Alternate mod manager.** The trampoline likewise bakes
 > `RELAY_MOD_MANAGER` (from `--mod-manager` / `RELAY_MOD_MANAGER`) — the

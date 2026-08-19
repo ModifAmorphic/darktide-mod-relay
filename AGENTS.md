@@ -55,7 +55,9 @@ src/                Mod Relay — the injected modding runtime + injector
   shell/            C shell — the injected DLL (DllMain, MinHook, lua_newstate +
                       lua_pcall hooks, production trampoline @ pcall#1; the
                       trampoline bakes MOD_LOADER_DIR + RELAY_MOD_PATH +
-                      RELAY_MOD_MANAGER + MOD_RELAY_VERSION + RELAY_SKIP_SPLASH
+                      RELAY_MOD_MANAGER + MOD_RELAY_VERSION + RELAY_SKIP_SPLASH +
+                      RELAY_MODS_IN_GAME_TREE (the launcher-derived
+                      mods-in-game-tree hint — see `--mod-path`)
                       into the pcall#1
                       chunk globals; log_sink.c
                       is the pure, I/O-free lua-print line-sanitization helper for
@@ -77,7 +79,17 @@ src/                Mod Relay — the injected modding runtime + injector
                       trampoline's private __mod_relay_lua_log_sink temp global
                       before its idempotency guard; originals stay authoritative;
                       covered by tests/test_log_lua.lua + the
-                      tests/probes/observational/log_lua_probe/ live probe); lifecycle.lua is the
+                      tests/probes/observational/log_lua_probe/ live probe);
+                      init.lua also snapshots the launcher-derived
+                      mods-in-game-tree gate (RELAY_MODS_IN_GAME_TREE →
+                      Mods._relay.mods_in_game_tree, beside skip_splash and
+                      before the bootstrap loop) — when the mod path IS the
+                      game dir, ALL THREE io-retargeting layers stay off
+                      (the Mods.lua.io.open/io.lines wrapper + the
+                      io.popen cd-prepend in file.lua, and the eight
+                      DMFMod:io_* overrides in dmf_adapter.lua) so stock DMF
+                      relative-path conventions resolve naturally from
+                      binaries/; lifecycle.lua is the
                       bootstrap coordinator + the direct closure-wraps
                       (BootStateRequireGameScripts._state_update,
                       StateGame.update, GameStateMachine._change_state exit/enter
@@ -200,7 +212,16 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   a `mods/` subdirectory (DMF + user mods live at `<mod_path>/mods/`); the
   loader derives `Mods._mod_root` as `<mod_path>/mods` and the
   `Mods.lua.io` wrapper roots relative paths there (absolute paths pass
-   through verbatim). `--mod-manager` (env `RELAY_MOD_MANAGER`) selects the
+   through verbatim). When the resolved mod path IS the game directory
+   itself (automatic, launcher-side handle-identity compare — volume serial +
+   file index, no path-text matching), the launcher derives
+   `RELAY_MODS_IN_GAME_TREE=1` (baked by the trampoline; snapshotted by
+   init.lua as `Mods._relay.mods_in_game_tree`) and the loader disables ALL
+   its io retargeting — the `Mods.lua.io.open`/`io.lines` wrapper, the
+   `io.popen` cd-prepend (file.lua), and the eight `DMFMod:io_*` overrides
+   (dmf_adapter.lua) — so stock DMF relative-path conventions resolve
+   naturally from the game's `binaries/` CWD. `--mod-manager` (env
+   `RELAY_MOD_MANAGER`) selects the
    alternate mod manager — a file path used verbatim like `--mod-path`; the
    launcher pre-flights it (must exist as a regular file, or the launch is
    refused; an env value too long for the launcher's buffer is refused the
