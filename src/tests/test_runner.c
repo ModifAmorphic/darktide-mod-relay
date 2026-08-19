@@ -1,17 +1,19 @@
 /*
  * test_runner.c — Minimal C unit-test harness implementation.
  *
- * Supports up to 64 registered tests. Tests are registered via
- * test_register() and executed in order. On MSVC, unhandled exceptions
- * during a test are caught via SEH; on MinGW the process will abort
- * (still reported as a failure by the exit code).
+ * Supports up to MAX_TESTS registered tests. Tests are registered via
+ * test_register() and executed in order. Registering beyond the cap REFUSES
+ * the entry and fails the whole run (summary + non-zero exit) — a dropped
+ * test must never read as green. On MSVC, unhandled exceptions during a test
+ * are caught via SEH; on MinGW the process will abort (still reported as a
+ * failure by the exit code).
  */
 #include "test_runner.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
-#define MAX_TESTS 64
+#define MAX_TESTS 128
 
 typedef struct {
     const char *name;
@@ -22,10 +24,12 @@ typedef struct {
 
 static test_entry_t tests[MAX_TESTS];
 static int ntests = 0;
+static int refused = 0;       /* registrations dropped for exceeding the cap */
 static int current_failed = 0;  /* set by ASSERT_* macros */
 
 void test_register(const char *name, void (*fn)(void)) {
     if (ntests >= MAX_TESTS) {
+        refused++;
         fprintf(stderr, "test_runner: too many tests (max %d)\n", MAX_TESTS);
         return;
     }
@@ -76,5 +80,10 @@ int test_summary(void) {
     }
 
     printf("\n--- %d/%d tests passed ---\n", passed, total);
+    if (refused > 0) {
+        printf("REFUSED: %d tests exceeded the max (%d) — suite FAILS\n",
+               refused, MAX_TESTS);
+        return 1;
+    }
     return (failed > 0) ? 1 : 0;
 }

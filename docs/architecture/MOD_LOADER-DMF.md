@@ -46,7 +46,11 @@ DMF then drives *its* registered user mods through its inner update loop (see
 The mod loader and the mods live in **separate** directories, set as globals
 by the C trampoline before the entry opens (the trampoline also bakes the
 optional alternate-manager path `RELAY_MOD_MANAGER` — see
-[The manager slot](#the-manager-slot-alternate-mod-manager) below):
+[The manager slot](#the-manager-slot-alternate-mod-manager) below — and the
+launcher-derived mods-in-game-tree hint `RELAY_MODS_IN_GAME_TREE`, which
+`init.lua` snapshots into `Mods._relay.mods_in_game_tree` to gate the
+io-retargeting layers; see
+[Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)):
 
 - **Loader root** (`MOD_LOADER_DIR`; self-located by the shell from its own DLL
   path as `<dll-dir>\mod_loader\`, set as an **internal** global — not an env
@@ -59,7 +63,9 @@ optional alternate-manager path `RELAY_MOD_MANAGER` — see
   subdirectory. DMF + user mods + `mods.lst` live at `<mod_path>/mods/`.
   `Mods._mod_path` is that config value; `Mods._mod_root` (= `_mod_path/mods`)
   is what `Mods.file.*` roots at. The `Mods.lua.io.open`/`io.lines` wrapper
-  roots relative paths at `_mod_root` and passes absolute paths through verbatim (see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
+  roots relative paths at `_mod_root` and passes absolute paths through verbatim
+  (skipped when mods are hosted in the game tree — see
+  [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)).
 
 So the loader's own code is Relay-owned (ships with the build), while the
 mods it loads are user-owned — the split keeps a DMF/mod update from requiring a
@@ -605,6 +611,15 @@ updates. If DMFMod never surfaces (no DMF / DMF load failed), the observer
 callback stays registered and fires harmlessly on every execution without ever
 adapting anything — it never fabricates `DMFMod`.
 
+**Mods-in-game-tree gate.** The adaptation is skipped entirely when the mod
+path IS the game directory: the launcher detects it at launch
+(`RELAY_MODS_IN_GAME_TREE`, handle-identity compare) and `init.lua` snapshots
+the hint into `Mods._relay.mods_in_game_tree`. When gated, `adapt_dmf_io()`
+early-returns — stock DMF `io_*` methods stay stock, the adapted markers stay
+nil, and the observer still registers and fires harmlessly on every execution.
+The gate is manager-agnostic: it applies under the built-in manager and any
+alternate (chassis Step 1c registers the observer either way).
+
 The runtime override keeps stock DMF unmodified and applies the external mod
 root at the stable mod-facing IO boundary.
 
@@ -621,8 +636,12 @@ engine CWD (the game's `binaries/` dir) and silently misses (the open returns
 `nil`, the data is absent, features break).
 
 The redirection lives in `file.lua` (at the bottom, after the `Mods.file.*`
-operations) and installs **only when `_mod_root` is set and non-empty**. It
-wraps `Mods.lua.io.open` and `Mods.lua.io.lines`:
+operations) and installs **only when `_mod_root` is set and non-empty AND the
+mods-in-game-tree gate is OFF** (see the `_mod_path` + `_mod_root` note below:
+when the launcher detects the mod path IS the game directory, all retargeting
+stays off — stock DMF relative-path conventions then resolve naturally from
+`binaries/`, so the wrapper would be redundant). It wraps
+`Mods.lua.io.open` and `Mods.lua.io.lines`:
 
 - **Resolve:** for a RELATIVE path, prepend `_mod_root` (the mods dir,
   `<mod_path>/mods`) and normalize via `path.normpath` (extracted from Penlight
@@ -671,6 +690,8 @@ apply. The only lever is the shell's own CWD, so the wrapper prepends
 - **Guard:** installs only when `_mod_root` is a non-empty string and
   `Mods.lua.io.popen` is a function; otherwise `popen` is left untouched. A
   non-string command (e.g. `nil`) is forwarded to the original unmodified.
+  The same mods-in-game-tree gate as the open/lines wrapper also skips this
+  wrapper (stock conventions resolve naturally from `binaries/`).
 
 This makes the common stock-DMF relative-path convention resolve correctly.
 
@@ -683,6 +704,22 @@ This makes the common stock-DMF relative-path convention resolve correctly.
   what the io.open/lines wrapper roots relative paths at).
 
 `_mod_path` is the mod-path config from which `_mod_root` is derived.
+
+**The mods-in-game-tree gate (`Mods._relay.mods_in_game_tree`).** When the
+resolved mod path IS the game directory itself, the launcher derives
+`RELAY_MODS_IN_GAME_TREE=1` (handle-identity compare of the two directories —
+never path-text comparison) and the trampoline bakes the global. `init.lua`
+snapshots it into the always-set boolean `Mods._relay.mods_in_game_tree`
+(absent global = older shell = `false`) **before the module bootstrap loop**
+— `file.lua` reads the field at module-load time. When the gate is on, every
+io-retargeting layer stays OFF: the `Mods.lua.io.open`/`io.lines` wrapper, the
+`io.popen` cd-prepend, and the eight `DMFMod:io_*` overrides. Rationale: the
+wrappers exist precisely because mods live *outside* the game dir; hosted in
+`GAME_DIR\mods`, stock DMF's `./../mods/...` convention already resolves
+correctly from the game's `binaries/` CWD, so Relay keeps every surface byte-
+stock. `Mods.file.*` (used by the built-in manager and the manager-slot
+convention) still roots at `_mod_root` — which is `GAME_DIR\mods`, the same
+place.
 
 The wrapper is a routing shim, not a sandbox. A mod runs Lua in-process and can
 read or write any path via `io.open`/`io.lines`/`io.popen`, `os.execute`, and

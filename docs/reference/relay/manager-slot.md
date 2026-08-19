@@ -223,6 +223,16 @@ a routing shim, not a sandbox: in-process Lua can reach any path.
 the mods directory. The `cd` runs only in the spawned `cmd.exe` child — the
 parent Lua CWD is never touched. Non-string commands pass through.
 
+**Mods in the game tree — io retargeting off.** The io-retargeting gate is
+manager-agnostic: when the launcher detects that the resolved `--mod-path` IS
+the game directory (derived at launch, not operator-set —
+`Mods._relay.mods_in_game_tree`), none of the retargeting above installs
+under ANY manager, built-in or alternate: no `Mods.lua.io` rooting wrappers,
+no `popen` CWD anchoring, no `DMFMod:io_*` adaptations. Stock io conventions
+apply — relative paths (and DMF's `./../mods/...` convention) resolve from
+the game's `binaries\` CWD, which lands in `GAME_DIR\mods`. `Mods.file.*`
+still roots at `<mod_path>/mods` (the same directory in that mode).
+
 ## Not provided
 
 Everything below is built-in-manager policy. Under an alternate, Relay does

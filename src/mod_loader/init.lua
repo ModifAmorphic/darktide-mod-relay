@@ -41,6 +41,14 @@ MOD_RELAY_VERSION = nil
 -- lifecycle.lua reads this once at module-eval time. Internal/private.
 Mods._relay.skip_splash = (RELAY_SKIP_SPLASH == "1")
 RELAY_SKIP_SPLASH = nil
+-- Snapshot the launcher-derived mods-in-game-tree gate (trampoline-set global;
+-- "" = not in the game tree). When true, the mod path IS the game directory and
+-- the loader's io retargeting layers stay OFF (stock DMF relative-path
+-- conventions resolve naturally from binaries/). Nil-safe when the global is
+-- absent (older shell / tests). file.lua reads this at module-load time;
+-- dmf_adapter.lua at adaptation time. Internal/private.
+Mods._relay.mods_in_game_tree = (RELAY_MODS_IN_GAME_TREE == "1")
+RELAY_MODS_IN_GAME_TREE = nil
 -- Snapshot the optional alternate mod manager path (trampoline-set global; ""
 -- = not configured — the launcher/shell refuse or fatal on a bad value BEFORE
 -- the game, so an empty-or-absent global here simply means built-in). Nil-safe
@@ -236,6 +244,9 @@ if _mp ~= "" then
     Mods._mod_root = _mp .. "/mods"
 else
     Mods._mod_root = ""
+end
+if Mods._relay.mods_in_game_tree and Mods._mod_path ~= "" then
+    Mods._relay.log_info("mod path is the game dir; io retargeting disabled")
 end
 
 local _io = Mods.lua.io

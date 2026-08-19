@@ -9,6 +9,8 @@
 --   - reads: raw content + trimmed line list (blank/comment skipped)
 --   - observer isolation: observers fire only after successful exec, failures
 --     are logged without replacing the chunk result
+--   - the mods-in-game-tree gate: the io.open/lines + popen wrappers install
+--     only when NOT gated (absent gate = today's behavior)
 
 local mock = require("mock")
 
@@ -821,5 +823,99 @@ return function(runner)
             "popen must forward trailing args (mode) to the original")
         runner.assert_truthy(received.cmd:find('^cd /d "'),
             "the forwarded command must still carry the cd prepend")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Mods-in-game-tree gate (Mods._relay.mods_in_game_tree)
+    -- ---------------------------------------------------------------------
+    --
+    -- When the mod path IS the game directory (launcher-derived; init.lua
+    -- snapshots the trampoline global before file.lua loads), ALL raw-io
+    -- retargeting stays off: the open/lines wrapper AND the popen
+    -- cd-prepend must NOT install — stock DMF conventions resolve naturally
+    -- from binaries/. An absent gate (no Mods._relay, or the field nil)
+    -- means NOT gated = today's behavior (wrappers install).
+
+    -- Build a sandbox with explicit gate control. gate is true/false, or
+    -- "absent" (no Mods._relay at all). mod_root defaults to a set root;
+    -- pass "" to exercise the empty-root + gate-on combination. files
+    -- optionally backs the io mock (path -> content) so rooted opens resolve.
+    -- Captures the raw io functions the sandbox provided so identity
+    -- comparison proves no wrap. Returns (sb, raw) where raw =
+    -- { open, lines, popen }.
+    local function setup_gated(gate, mod_root, files)
+        local sb = mock.new_sandbox()
+        local mods = {
+            lua = {},
+            _mod_path = "C:/staged",
+            _mod_root = mod_root or "C:/staged/mods",
+        }
+        if gate ~= "absent" then
+            mods._relay = { mods_in_game_tree = gate }
+        end
+        sb.Mods = mods
+        local iot = mock.make_io(files or {})
+        iot.popen = function() return "FAKE_HANDLE" end
+        local raw = { open = iot.open, lines = iot.lines, popen = iot.popen }
+        sb.Mods.lua.io = iot
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.__print = function() end
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        mock.run_module("file", sb)
+        return sb, raw
+    end
+
+    runner.register("io gate: game-tree mods skip open/lines + popen wrapping (raw identities)", function()
+        local sb, raw = setup_gated(true)
+        runner.assert_eq(raw.open, sb.Mods.lua.io.open,
+            "io.open must stay the raw original under the gate")
+        runner.assert_eq(raw.lines, sb.Mods.lua.io.lines,
+            "io.lines must stay the raw original under the gate")
+        runner.assert_eq(raw.popen, sb.Mods.lua.io.popen,
+            "io.popen must stay the raw original under the gate")
+    end)
+
+    runner.register("io gate: gate explicitly false installs the wrappers (today's behavior)", function()
+        local sb, raw = setup_gated(false)
+        runner.assert_truthy(raw.open ~= sb.Mods.lua.io.open, "io.open must be wrapped")
+        runner.assert_truthy(raw.lines ~= sb.Mods.lua.io.lines, "io.lines must be wrapped")
+        runner.assert_truthy(raw.popen ~= sb.Mods.lua.io.popen, "io.popen must be wrapped")
+    end)
+
+    runner.register("io gate: no Mods._relay at all installs the wrappers (nil-safe)", function()
+        local sb, raw = setup_gated("absent")
+        runner.assert_truthy(raw.open ~= sb.Mods.lua.io.open,
+            "an absent Mods._relay means not gated (io.open wraps)")
+        runner.assert_truthy(raw.lines ~= sb.Mods.lua.io.lines,
+            "an absent Mods._relay means not gated (io.lines wraps)")
+        runner.assert_truthy(raw.popen ~= sb.Mods.lua.io.popen,
+            "an absent Mods._relay means not gated (io.popen wraps)")
+    end)
+
+    runner.register("io gate: game-tree mods + empty _mod_root installs nothing (both conditions required)", function()
+        local sb, raw = setup_gated(true, "")
+        runner.assert_eq(raw.open, sb.Mods.lua.io.open,
+            "empty _mod_root: io.open never wraps (gate or not)")
+        runner.assert_eq(raw.lines, sb.Mods.lua.io.lines,
+            "empty _mod_root: io.lines never wraps")
+        runner.assert_eq(raw.popen, sb.Mods.lua.io.popen,
+            "empty _mod_root: io.popen never wraps")
+    end)
+
+    runner.register("io gate: game-tree mods + gate ON — Mods.file.* still resolves at _mod_root", function()
+        -- The gate disables only the io wrappers (Mods.lua.io.open/io.lines/io.popen).
+        -- Mods.file.* (used by the manager and the manager-slot convention) still
+        -- roots at _mod_root — which is GAME_DIR\mods in game-tree mode.
+        -- This is the not-gated scope decision: the wrappers are off, but the
+        -- internal rooting is unchanged. The gate is present BEFORE file.lua
+        -- evaluates (the setup_gated shape, with real file backing), so gating
+        -- Mods.file.* at module load would break the rooted open and fail this.
+        local mod_root = "C:/staged/mods"
+        local files = { [mod_root .. "/test.lua"] = "return 'game-tree-mods'" }
+        local sb = setup_gated(true, mod_root, files)
+        -- Verify Mods.file.dofile still resolves from _mod_root under the gate.
+        local v = sb.Mods.file.dofile("test")
+        runner.assert_eq("game-tree-mods", v,
+            "Mods.file.dofile must still resolve from _mod_root under the gate")
     end)
 end

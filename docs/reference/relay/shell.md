@@ -62,8 +62,8 @@ must hold or the engine corrupts:
 
 ## Trampoline-baked globals (the roots)
 
-The chunk sets five globals before `io.open`. Three are roots — the mod-loader
-root, the mod path, and the optional alternate-manager path; two are one-shot
+The chunk sets six globals before `io.open`. Three are roots — the mod-loader
+root, the mod path, and the optional alternate-manager path; three are one-shot
 internal handoffs.
 
 - **`MOD_LOADER_DIR`** — the runtime-controlled loader root. Self-located by the
@@ -96,11 +96,18 @@ internal handoffs.
   with a configured path after staging (selection, retry, the post-resume
   in-engine hard exit) is the manager-slot contract — normative in
   [`manager-slot.md`](manager-slot.md), not a native-shell concern.
-- **`MOD_RELAY_VERSION`** and **`RELAY_SKIP_SPLASH`** — one-shot internal
-  handoffs. `MOD_RELAY_VERSION` carries the build-injected product version (nil
+- **`MOD_RELAY_VERSION`**, **`RELAY_SKIP_SPLASH`**, and
+  **`RELAY_MODS_IN_GAME_TREE`** — one-shot internal handoffs.
+  `MOD_RELAY_VERSION` carries the build-injected product version (nil
   when absent/overlong, so malformed metadata disables only version diagnostics);
   `RELAY_SKIP_SPLASH` carries the splash-skip opt-in (`"1"` only when
-  `--skip-splash`/`RELAY_SKIP_SPLASH=1`, else `""`). Both are snapshotted into
+  `--skip-splash`/`RELAY_SKIP_SPLASH=1`, else `""`);
+  `RELAY_MODS_IN_GAME_TREE` carries the launcher-derived mods-in-game-tree
+  hint (`"1"` only when the launcher detected that the mod path IS the game
+  directory — by handle identity, volume serial + file index, not path-text
+  comparison — else `""`). A hint, not an operator commitment: non-`1`/unset
+  is the normal default, so there is deliberately no FATAL path for it (unlike
+  `RELAY_MOD_MANAGER`). All three are snapshotted into
   the chunk and retired by the loader before community code runs; they are
   **not** community APIs and must not gain a stable consumer.
 

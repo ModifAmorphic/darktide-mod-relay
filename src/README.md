@@ -295,6 +295,18 @@ user-owned. Detail in
 > directly to `StateTitle` without opening the splash view. Default off
 > (vanilla splash).
 
+> **Mods in the game tree.** The trampoline likewise bakes
+> `RELAY_MODS_IN_GAME_TREE` — a launcher-derived hint, not a setting: `"1"`
+> when the resolved `--mod-path` IS the game directory itself (decided by
+> handle identity — volume serial + file index — so any spelling of the same
+> directory matches), `""` otherwise. There is no flag or env input for it;
+> the launcher computes it at launch and canonicalizes the child env (a stale
+> parent value never leaks in). The loader snapshots it into
+> `Mods._relay.mods_in_game_tree` and, when on, disables all its io
+> retargeting (the `Mods.lua.io` wrappers, the `popen` cd-prepend, and the
+> `DMFMod:io_*` overrides) — stock DMF conventions then resolve naturally
+> from the game's `binaries\` CWD.
+
 > **Alternate mod manager.** The trampoline likewise bakes
 > `RELAY_MOD_MANAGER` (from `--mod-manager` / `RELAY_MOD_MANAGER`) — the
 > optional alternate-manager path. When configured, the loader's bootstrap

@@ -52,7 +52,10 @@ signals hook-ready.
    (`MOD_LOADER_DIR` + `RELAY_MOD_PATH` + the optional
    `RELAY_MOD_MANAGER` alternate-manager path), the internal `RELAY_SKIP_SPLASH`
    switch (`"1"`/`""` from `--skip-splash`/`RELAY_SKIP_SPLASH=1`; the loader
-   snapshots it to wrap `StateSplash.on_enter` when opted in), plus a temporary
+   snapshots it to wrap `StateSplash.on_enter` when opted in), the internal
+   `RELAY_MODS_IN_GAME_TREE` hint (`"1"`/`""`, launcher-derived — set iff the
+   mod path IS the game dir by handle identity; see the env-var contract),
+   plus a temporary
    private handoff of the same manifest-derived full product version used by
    launcher `--version`,
    `io.open` the staged entry
@@ -219,7 +222,11 @@ exit. Sets `SteamAppId`/`SteamGameId`.
   `RELAY_SKIP_SPLASH` are canonicalized: the launcher sets each to exactly `1`
   when the resolved config enables the feature (`--log-lua`/`--skip-splash` or
   the env `1` itself), and **removes** it (not set to `0`) when disabled, so a
-  stale parent value cannot leak into the child as a non-`1`. Game arguments are NOT published to the env — they go on the child
+  stale parent value cannot leak into the child as a non-`1`. The launcher
+  also derives and publishes `RELAY_MODS_IN_GAME_TREE=1` (after the
+  manager pre-flight) when the resolved `--mod-path` IS the game directory —
+  decided by handle identity, not path-text comparison — and removes it
+  otherwise (see the env-var contract below). Game arguments are NOT published to the env — they go on the child
   command line: the quoted exe as argv[0] (byte-for-byte the legacy form),
   followed by every token after the end-of-options `--` separator, each
   rendered with the MSVC CRT quoting algorithm. A bare `--` ends option
@@ -301,6 +308,7 @@ global, so no loader-path env var exists.
 | `RELAY_LOG_LUA` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_LUA=1` when the resolved config enables it (`--log-lua` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LOG_LUA=1` themselves — that is the external non-launcher contract. |
 | `RELAY_LOG_APPEND` | launcher (canonicalized) | shell worker | the **log-append** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_APPEND=1` when the resolved config enables it (`--log-append` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and opens `relay.log` in append mode (`'a'`) when set; otherwise it truncates on open (`'w'`, a fresh file per launch). Direct shell injectors may set `RELAY_LOG_APPEND=1` themselves — that is the external non-launcher contract. |
 | `RELAY_SKIP_SPLASH` | launcher (canonicalized) | shell trampoline + mod loader | the **StateSplash skip** switch: only the exact value `1` enables. The launcher sets `RELAY_SKIP_SPLASH=1` when the resolved config enables it (`--skip-splash` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and bakes it into the trampoline chunk as the internal `RELAY_SKIP_SPLASH` global (`"1"` or `""`); init.lua snapshots it into `Mods._relay.skip_splash` and the loader's lifecycle step wraps `CLASS.StateSplash.on_enter` so the splash state advances directly to `StateTitle` without opening the splash view. Default off = vanilla splash. |
+| `RELAY_MODS_IN_GAME_TREE` | launcher (derived; canonicalized) | shell trampoline + mod loader | the **mods-in-game-tree** hint: set to exactly `1` iff the resolved `--mod-path` is the game directory — decided by **handle identity** (each dir opened via `CreateFileA` with `FILE_FLAG_BACKUP_SEMANTICS` and compared by `GetFileInformationByHandle` volume serial + file index), never by path-text comparison, so any spelling of the same directory (case, separators, trailing slash, 8.3 names, subst, symlinks) matches. **Not user-configurable** — purely derived at launch (no flag/env input; a set parent value is overwritten-or-removed, never honored as input). The launcher **removes** it when not detected (same canonical-child policy as `RELAY_LOG_LUA`, so a stale parent value cannot leak in); every failure (unset mod path, underivable game dir, open failure) degrades to unset = today's behavior. The shell snapshots it once at staging (`env_is_exact_one` — a hint, not an operator commitment, so there is no FATAL path) and bakes it into the trampoline chunk as the internal `RELAY_MODS_IN_GAME_TREE` global (`"1"` or `""`). |
 | `SteamAppId` / `SteamGameId` | launcher | Steam | the real Darktide app id (`1361210`); without it `SteamAPI_Init` is denied under a non-Steam shortcut |
 
 ### Logging
