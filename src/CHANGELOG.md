@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v1.0.0...v1.1.0) (2026-08-21)
+
+
+### Features
+
+* **mod-loader:** alternate mod manager slot ([#23](https://github.com/ModifAmorphic/darktide-mod-relay/issues/23)) ([4895e00](https://github.com/ModifAmorphic/darktide-mod-relay/commit/4895e005f61814c3540b9ce6dc8758a7d0957890))
+* **relay:** auto-detect game-tree mod hosting and disable io retargeting ([#24](https://github.com/ModifAmorphic/darktide-mod-relay/issues/24)) ([eeaeed3](https://github.com/ModifAmorphic/darktide-mod-relay/commit/eeaeed323560b6e0fd0d3210dc5e69ffb85a56fb))
+
+
+### Bug Fixes
+
+* **mod-loader:** publish .mod descriptor as entry.data and log chunk failures ([#25](https://github.com/ModifAmorphic/darktide-mod-relay/issues/25)) ([e4d67b6](https://github.com/ModifAmorphic/darktide-mod-relay/commit/e4d67b697fe0748ac30144cb181df81c56c10154))
+
 ## [1.0.0](https://github.com/ModifAmorphic/darktide-mod-relay/compare/v0.6.1...v1.0.0) (2026-08-02)
 
 
