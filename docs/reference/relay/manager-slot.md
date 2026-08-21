@@ -166,8 +166,13 @@ manager loaded it); and it publishes the process-lifetime
 it succeeds).
 
 **If the manager loads DMF.** DMF is just a mod, but it reads three fields
-off `Managers.mod` (`_mods[_mod_load_index].{id,name,handle}`,
-`_state == "done"`, and `_settings.developer_mode`). A manager that drives
+off `Managers.mod` (`_mods[_mod_load_index].{id,name,handle,data}`,
+`_state == "done"`, and `_settings.developer_mode`). `.data` is the executed
+`.mod` descriptor table — the manager must publish it on the entry before
+invoking the descriptor's `run()` (DMF's `DMFMod:init` reads `.data.packages`
+during mod construction — inside `run()` for user mods, inside `init` for DMF
+itself; `packages` validation is DMF-owned,
+with `nil` a supported no-op). A manager that drives
 DMF must provide them; the exact read sites are pinned in
 `docs/architecture/MOD_LOADER-DMF.md` → "The `Managers.mod` shape contract
 DMF requires".
@@ -209,8 +214,12 @@ extension). Safe variants (`dofile`, `exec`, `exec_with_return`,
 `read_content`, `read_content_to_table`) return the chunk value / content /
 `true`, or `false` on failure (the dofile-shaped ones also return a reason);
 unsafe variants (`*_unsafe`) propagate compile/runtime failures.
-`read_content_to_table` returns a trimmed line list (blank and `--` comment
-lines skipped).
+A safe exec variant whose chunk exists but fails to compile or raises at
+runtime additionally logs one ERROR diagnostic naming the path and the error
+— missing/unreadable files and path-resolution rejections stay silent, so
+probing for optional files via a safe op returning `false` produces no log
+noise. `read_content_to_table` returns a trimmed line list (blank and `--`
+comment lines skipped).
 
 **`Mods.lua.io.open` / `io.lines` — mod-root rooting with absolute
 passthrough.** A relative path resolves against the mod root; an absolute

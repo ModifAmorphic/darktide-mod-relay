@@ -722,7 +722,9 @@ function ModManager:_load_one(entry, reload_data)
     local shown = display_name(name)
     local mod_data = Mods.file.exec_with_return(name .. "/" .. name .. ".mod")
     if mod_data == false then
-        log_error("mod '" .. shown .. "' .mod missing or unreadable")
+        -- Safe exec already logged the accurate cause for an existing chunk
+        -- that failed to compile/raise; this line covers the rest.
+        log_error("mod '" .. shown .. "' .mod missing, unreadable, or failed to execute")
         return self:_fail_load_entry(entry, ".mod missing/unreadable")
     end
     local descriptor_ok, run_function = _pcall(function()
@@ -739,6 +741,11 @@ function ModManager:_load_one(entry, reload_data)
         log_warn("mod '" .. shown .. "' .mod invalid (no run function)")
         return self:_fail_load_entry(entry, ".mod invalid")
     end
+
+    -- DMF's DMFMod:init reads _mods[_mod_load_index].data (then .packages) during
+    -- construction — inside run() for user mods, during init for DMF itself — so
+    -- publish BEFORE run(); verbatim table, .packages validation is DMF-owned.
+    entry.data = mod_data
 
     self:_publish_mod_property(entry)
     local ok_run, object = _pcall(run_function)

@@ -22,6 +22,10 @@ local _pcall = pcall
 local _error = error
 local _tostring = tostring
 
+-- Leveled diagnostics (init.lua publishes the helper on Mods._relay before
+-- this module loads — the same capture pattern as mod_manager/lifecycle).
+local log_error = Mods._relay.log_error
+
 -- Load path utilities. Must load before the Mods.lua.io wrapper below, which
 -- uses path.normpath.
 local path = Mods.load_module("path")
@@ -213,9 +217,22 @@ local function read_lines(full_path)
     return true, list
 end
 
+-- Render an error value for a diagnostics line (pcall'd tostring: a raising
+-- __tostring must not turn a log line into a second failure).
+local function safe_text(value)
+    local ok, text = _pcall(_tostring, value)
+    if ok and type(text) == "string" then
+        return text
+    end
+    return "<unprintable error>"
+end
+
 -- Compile + run a chunk in the shared global env (loadstring governs the env).
 -- Receives `args` as its first parameter (DMF's func(args) convention).
--- unsafe=false: returns (true, chunk_value) | (false, err).
+-- unsafe=false: returns (true, chunk_value) | (false, err); a chunk that fails
+--   to compile or raises at runtime logs ONE error line naming the path —
+--   missing/unreadable files never reach here (safe ops probe for optional
+--   files, so read/resolve failures upstream stay silent).
 -- unsafe=true: propagates compile/runtime errors (raises); returns chunk_value.
 local function execute(full_path, source, args, unsafe)
     local fn, lerr = _loadstring(source, full_path)
@@ -223,6 +240,7 @@ local function execute(full_path, source, args, unsafe)
         if unsafe then
             _error(lerr, 2)
         end
+        log_error("chunk failed: " .. full_path .. ": " .. safe_text(lerr))
         return false, lerr
     end
     if unsafe then
@@ -230,6 +248,7 @@ local function execute(full_path, source, args, unsafe)
     end
     local ok, rerr = _pcall(fn, args)
     if not ok then
+        log_error("chunk failed: " .. full_path .. ": " .. safe_text(rerr))
         return false, rerr
     end
     return true, rerr

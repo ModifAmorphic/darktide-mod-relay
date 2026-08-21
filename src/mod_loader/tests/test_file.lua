@@ -3,6 +3,10 @@
 -- Asserts the external behavior of the mod-root-rooted file operations:
 --   - path validation: rejects absolute/UNC/drive/NUL/..; allows nested relative
 --   - safe/unsafe distinction: safe returns false on failure, unsafe raises
+--   - safe-op failure logging: a chunk that exists but fails to compile or
+--     raises logs ONE ERROR diagnostic; missing-file/resolve/read failures
+--     stay silent (mods probe for optional files via safe dofile returning
+--     false)
 --   - join form: the manager-slot (dir, name, ext) / (name, ext) argument
 --     shapes — resolution, component validation, args pass-through, observers
 --   - single-open: the handle is closed before compile/run and on read failure
@@ -77,6 +81,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         return sb, opened_with
     end
@@ -168,6 +173,71 @@ return function(runner)
         local files = { [mock.MOD_ROOT .. "/boom.lua"] = "error('boom')" }
         local sb = setup(files)
         runner.assert_eq(false, sb.Mods.file.dofile("boom"))
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Safe-op failure logging (execution failures log; probe misses stay silent)
+    -- ---------------------------------------------------------------------
+
+    -- Build a sandbox whose __print captures diagnostics (the leveled loggers
+    -- route there via mock.attach_logger). file.lua must be loaded AFTER the
+    -- logger attach (it captures log_error at module scope).
+    local function setup_logging(files)
+        local sb = mock.new_sandbox()
+        sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        local logged = {}
+        sb.Mods.lua.io = mock.make_io(files or {})
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function(m) table.insert(logged, m) end
+        mock.attach_logger(sb)
+        mock.run_module("file", sb)
+        return sb, logged
+    end
+
+    runner.register("file: safe dofile of a raising chunk returns false AND logs one ERROR line", function()
+        local files = { [mock.MOD_ROOT .. "/boom.lua"] = "error('kaboom')" }
+        local sb, logged = setup_logging(files)
+        local v = sb.Mods.file.dofile("boom")
+        runner.assert_eq(false, v, "safe dofile must still return false on a runtime raise")
+        runner.assert_eq(1, #logged, "exactly one diagnostics line for the failure")
+        runner.assert_truthy(logged[1]:find("^ERROR %[mod_loader%] chunk failed: ") ~= nil,
+            "the line must be a leveled chunk-failure diagnostic")
+        runner.assert_truthy(logged[1]:find(mock.MOD_ROOT .. "/boom%.lua") ~= nil,
+            "the line must name the full path")
+        runner.assert_truthy(logged[1]:find("kaboom") ~= nil,
+            "the line must carry the error text")
+        -- The boolean exec op routes through the same execute() seam.
+        runner.assert_eq(false, sb.Mods.file.exec("boom"), "exec must fail safe too")
+        runner.assert_eq(2, #logged, "exec logs the same single line for its own failure")
+    end)
+
+    runner.register("file: safe dofile of a missing file returns false and logs NOTHING", function()
+        -- Probe semantics: a miss is not a failure to diagnose — mods probe for
+        -- optional files via safe ops. resolve/read failures stay silent; only
+        -- execution failures (an existing chunk that compiles/runs badly) log.
+        local sb, logged = setup_logging({})
+        runner.assert_eq(false, sb.Mods.file.dofile("nope/missing"))
+        runner.assert_eq(false, sb.Mods.file.exec("nope/missing"))
+        runner.assert_eq(false, sb.Mods.file.read_content("nope/missing"))
+        runner.assert_eq(0, #logged, "a missing file must emit no diagnostics")
+    end)
+
+    runner.register("file: safe dofile of a syntax-broken chunk returns false AND logs", function()
+        local files = { [mock.MOD_ROOT .. "/broken.lua"] = "this is not lua" }
+        local sb, logged = setup_logging(files)
+        local v, err = sb.Mods.file.dofile("broken")
+        runner.assert_eq(false, v, "safe dofile must return false on a compile error")
+        runner.assert_type("string", err, "the failure reason is still returned")
+        runner.assert_eq(1, #logged, "exactly one diagnostics line for the compile failure")
+        runner.assert_truthy(logged[1]:find("chunk failed: " .. mock.MOD_ROOT .. "/broken%.lua") ~= nil,
+            "the line names the failing chunk")
+        -- The unsafe variant raises BEFORE any logging (errors propagate, they
+        -- are not tee'd through the safe-path diagnostic).
+        local n = #logged
+        local ok = pcall(sb.Mods.file.dofile_unsafe, "broken")
+        runner.assert_eq(false, ok, "unsafe dofile must still raise on a compile error")
+        runner.assert_eq(n, #logged, "the unsafe path must not add a diagnostics line")
     end)
 
     runner.register("file: unsafe dofile propagates a compile error", function()
@@ -392,6 +462,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         runner.assert_eq(1, sb.Mods.file.dofile("once"))
         runner.assert_eq(1, opens, "dofile must open the file exactly once")
@@ -425,6 +496,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.dofile("boom")
         runner.assert_eq(false, v, "safe dofile must return false on a read error, not propagate")
@@ -455,6 +527,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.read_content_to_table("list.lst")
         runner.assert_eq(false, v, "safe read_content_to_table must return false on an iterator error")
@@ -483,6 +556,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local ok, err = pcall(sb.Mods.file.dofile_unsafe, "boom")
         runner.assert_eq(false, ok, "unsafe dofile must raise on a read failure")
@@ -608,6 +682,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local f, err = sb.Mods.lua.io.open(rel)
         runner.assert_eq(expected, opened_with,
@@ -667,6 +742,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local ok = pcall(sb.Mods.lua.io.lines, rel)
         runner.assert_eq(false, ok,
@@ -698,6 +774,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         -- Forward-slash absolute path (the Scores APPDATA write):
         local fwd = "C:/Users/example/AppData/Roaming/Fatshark/Darktide/scores_history/v1/123.lua"
@@ -735,6 +812,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.dofile("inner")
         runner.assert_eq("ok", v)
@@ -772,6 +850,7 @@ return function(runner)
         sb.Mods.lua.io = iot
         sb.Mods.lua.loadstring = sb.loadstring
         sb.__print = function() end
+        mock.attach_logger(sb)
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         mock.run_module("file", sb)
         return sb, received
@@ -860,6 +939,7 @@ return function(runner)
         sb.Mods.lua.io = iot
         sb.Mods.lua.loadstring = sb.loadstring
         sb.__print = function() end
+        mock.attach_logger(sb)
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         mock.run_module("file", sb)
         return sb, raw
