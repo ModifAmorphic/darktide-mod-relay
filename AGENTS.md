@@ -55,7 +55,10 @@ src/                Mod Relay — the injected modding runtime + injector
   shell/            C shell — the injected DLL (DllMain, MinHook, lua_newstate +
                       lua_pcall hooks, production trampoline @ pcall#1; the
                       trampoline bakes MOD_LOADER_DIR + RELAY_MOD_PATH +
-                      MOD_RELAY_VERSION + RELAY_SKIP_SPLASH into the pcall#1
+                      RELAY_MOD_MANAGER + MOD_RELAY_VERSION + RELAY_SKIP_SPLASH +
+                      RELAY_MODS_IN_GAME_TREE (the launcher-derived
+                      mods-in-game-tree hint — see `--mod-path`)
+                      into the pcall#1
                       chunk globals; log_sink.c
                       is the pure, I/O-free lua-print line-sanitization helper for
                       the optional print tee, compiled into both the DLL and the
@@ -76,7 +79,17 @@ src/                Mod Relay — the injected modding runtime + injector
                       trampoline's private __mod_relay_lua_log_sink temp global
                       before its idempotency guard; originals stay authoritative;
                       covered by tests/test_log_lua.lua + the
-                      tests/probes/observational/log_lua_probe/ live probe); lifecycle.lua is the
+                      tests/probes/observational/log_lua_probe/ live probe);
+                      init.lua also snapshots the launcher-derived
+                      mods-in-game-tree gate (RELAY_MODS_IN_GAME_TREE →
+                      Mods._relay.mods_in_game_tree, beside skip_splash and
+                      before the bootstrap loop) — when the mod path IS the
+                      game dir, ALL THREE io-retargeting layers stay off
+                      (the Mods.lua.io.open/io.lines wrapper + the
+                      io.popen cd-prepend in file.lua, and the eight
+                      DMFMod:io_* overrides in dmf_adapter.lua) so stock DMF
+                      relative-path conventions resolve naturally from
+                      binaries/; lifecycle.lua is the
                       bootstrap coordinator + the direct closure-wraps
                       (BootStateRequireGameScripts._state_update,
                       StateGame.update, GameStateMachine._change_state exit/enter
@@ -93,18 +106,44 @@ src/                Mod Relay — the injected modding runtime + injector
                       cleanly (sets the same init fields + skip flags, does NOT
                       call the original on_enter, so the splash view is never
                       opened — no flash, no orphan), resolving StateTitle via
-                      Mods.original_require and degrading to vanilla splash if
-                      StateTitle is unresolvable); mod_manager.lua is the generic
-                      scan/load/lifecycle driver + the hot-reload state machine
+                       Mods.original_require and degrading to vanilla splash if
+                       StateTitle is unresolvable); lifecycle.lua also owns the
+                       MANAGER SLOT: when RELAY_MOD_MANAGER is configured
+                       (snapshotted by init.lua into
+                       Mods._relay.mod_manager_path), Step 1a loads the
+                       ALTERNATE manager class from that exact path via the
+                       loader-internal Mods._relay.load_chunk seam (verbatim,
+                       unrooted; the chunk must return a class table), Step 1b
+                       pcall-wraps :new() (raise/nil = tracked failure), and a
+                       permanent failure once the engine-ready gate passes
+                       (Steps 2-4 wrapped) hard-exits (ffi ExitProcess(1) +
+                       os.exit fallback — never a managerless game under a
+                       configured alternate; unset = the built-in branch,
+                       byte-identical); lifecycle.lua Step 1c also runs the
+                       manager-agnostic chassis duties under ANY manager
+                       (dmf_adapter loaded once + published on
+                       Mods._relay.dmf_adapter; ONE registering adapter
+                       instance — the manager's own _adapter when
+                       shape-compatible, else a chassis-retained one;
+                       establish() publishing Managers.mod + restoring
+                       _settings only when nil; the DMF io observer; and the
+                       chassis-owned process-lifetime ModRelay:Version
+                       Crashify property, retried on the update wrap until
+                       success) — the manager-facing contract is normative in
+                       docs/reference/relay/manager-slot.md;
+                       mod_manager.lua is the generic
+                       scan/load/lifecycle driver (the built-in manager) + the
+                       hot-reload state machine
                       (request_reload seam, _check_reload trigger-detection seam
                       for the community reload-control contract (detection only,
                       dynamic dispatch so a community replacement can suppress or
                       redirect the built-in gesture), LEFT Ctrl+Shift+R keyboard
                       trigger, two-frame teardown/replacement sequencing,
-                      reload-data association keyed by name, nil/table-only
-                      run-result validation, unconditional load finalization,
-                      generation-aware Crashify metadata (`Mod:<name>` plus
-                      process-lifetime `ModRelay:Version`), one-strike outer
+                       reload-data association keyed by name, nil/table-only
+                       run-result validation, unconditional load finalization,
+                       generation-aware per-mod Crashify metadata (`Mod:<name>`;
+                       the process-lifetime `ModRelay:Version` is chassis-owned —
+                       lifecycle Step 1c), one-strike outer
                       lifecycle containment (standalone disable vs framework-
                       boundary generation stop), guarded engine-event alerts,
                       exactly-once cleanup, failure isolation, no stacking);
@@ -173,7 +212,23 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   a `mods/` subdirectory (DMF + user mods live at `<mod_path>/mods/`); the
   loader derives `Mods._mod_root` as `<mod_path>/mods` and the
   `Mods.lua.io` wrapper roots relative paths there (absolute paths pass
-  through verbatim). The loader root is self-located by the
+   through verbatim). When the resolved mod path IS the game directory
+   itself (automatic, launcher-side handle-identity compare — volume serial +
+   file index, no path-text matching), the launcher derives
+   `RELAY_MODS_IN_GAME_TREE=1` (baked by the trampoline; snapshotted by
+   init.lua as `Mods._relay.mods_in_game_tree`) and the loader disables ALL
+   its io retargeting — the `Mods.lua.io.open`/`io.lines` wrapper, the
+   `io.popen` cd-prepend (file.lua), and the eight `DMFMod:io_*` overrides
+   (dmf_adapter.lua) — so stock DMF relative-path conventions resolve
+   naturally from the game's `binaries/` CWD. `--mod-manager` (env
+   `RELAY_MOD_MANAGER`) selects the
+   alternate mod manager — a file path used verbatim like `--mod-path`; the
+   launcher pre-flights it (must exist as a regular file, or the launch is
+   refused; an env value too long for the launcher's buffer is refused the
+   same way, never silently degraded to the built-in), and on the shell side
+   a set-but-unreadable/too-long/control-bearing value is
+   fatal (`ExitProcess(1)` during trampoline staging, before the game
+   resumes). The loader root is self-located by the
   shell
   from its own DLL path (`<dll-dir>/mod_loader/`, set as the internal
   `MOD_LOADER_DIR` — not an env var/flag). A bare `--` (end-of-options
@@ -226,7 +281,7 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   inner culprit. Guarded in-game alerts repeat at a controlled cadence until a
   completed developer-mode hot reload or process exit. Cleanup is best effort;
   restart remains the safe recovery when side effects may survive.
-- **CI** runs on PRs to `main` (`.github/workflows/pr.yml`: mingw Linux
+- **CI** runs on PRs to any branch (`.github/workflows/pr.yml`: mingw Linux
   cross-compile + wine tests, and msvc Windows native). Pushes to `main` run
   the release pipeline (`.github/workflows/release.yml`: release-please
   versions + tags, then builds + attaches the Windows x64 runtime bundle to the
@@ -270,8 +325,11 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   (destinations, the `relay.log` line/lifecycle, and the optional Lua print
   tee).
 - `docs/reference/relay/shell.md` — the normative injected-shell contracts (the
-  two required hooks, the pcall#1 trampoline game-safety invariants, the two
+  two required hooks, the pcall#1 trampoline game-safety invariants, the
   trampoline-baked roots, the deliberately-not-hooked discovery anchor).
+- `docs/reference/relay/manager-slot.md` — the normative manager-slot contract
+  (selecting an alternate mod manager, the failure policy, the environment
+  provided to the occupant).
 - `docs/reference/darktide/darktide-binary.md` — validated game-binary constraints.
 - `docs/reference/community-tools/darktide-framework-analysis.md` — the existing
   modding ecosystem the runtime patch replaces.

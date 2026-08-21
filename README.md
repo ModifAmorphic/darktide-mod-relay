@@ -126,6 +126,7 @@ the launcher exe.
 | --- | --- | --- |
 | `--game-binary <path>` | Path to `Darktide.exe`. | — **(required)** |
 | `--mod-path <path>` | Directory that *contains* your `mods/` folder (see [Prepare mods](#2-prepare-mods)). | unset (mods won't load) |
+| `--mod-manager <file>` | Point Relay at an alternate mod manager file (e.g. AML's `base/mod_manager.lua` inside your mods folder) instead of the built-in one. Relay refuses to launch if it's configured but missing. | unset (built-in manager) |
 | `--log-file <path>` | Where the C-side shell/trampoline log is written. | `<launcher-dir>\relay.log` |
 | `--log-level <level>` | Log level for `relay.log`: `error` / `warn` / `info` / `debug` / `trace`. | `info` |
 | `--steam-app-id <id>` | Steam app id the launcher publishes. | `1361210` |

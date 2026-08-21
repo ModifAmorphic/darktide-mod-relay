@@ -19,7 +19,6 @@ local mock = require("mock")
 return function(runner)
     -- Build a sandbox with the fakes mod_manager needs: `class` (so it can call
     -- class("ModManager")), Mods.file (read_content_to_table + exec_with_return),
-    -- Mods.load_module (so mod_manager.lua can load the dmf_adapter from disk),
     -- Managers, __print. Returns the sandbox + the class registry.
     local function setup(opts)
         opts = opts or {}
@@ -57,13 +56,11 @@ return function(runner)
             remove_print_property = function() end,
         }
 
-        -- mod_manager.lua loads dmf_adapter.lua via Mods.load_module at module
-        -- top. Wire it to the mock's source loader so the real adapter source
-        -- runs in the sandbox (the adapter is the DMF boundary; the manager
-        -- delegates DMF contract writes/reads to it).
-        sb.Mods.load_module = function(name)
-            return mock.run_module(name, sb)
-        end
+        -- The chassis (lifecycle.lua module scope) loads dmf_adapter exactly
+        -- once per process and publishes it on Mods._relay.dmf_adapter;
+        -- mod_manager's init reads it from there. Simulate that chassis load
+        -- here (the real wiring is covered by test_lifecycle).
+        sb.Mods._relay.dmf_adapter = mock.run_module("dmf_adapter", sb)
 
         -- A no-op Keyboard so the manager's reload-shortcut poll is silent in
         -- tests that don't exercise keyboard behavior (nothing pressed). The
@@ -104,9 +101,20 @@ return function(runner)
         return mock.run_module("mod_manager", sb)
     end
 
+    -- Create the manager the way production does: :new() (init constructs the
+    -- built-in's own adapter instance) followed by the chassis Step-1c built-in
+    -- path — the manager's own adapter establishes (Managers.mod publication +
+    -- settings restore-if-nil) and registers the io observer (a no-op stub in
+    -- this isolated setup). The real chassis wiring is covered by test_lifecycle.
+    local function new_manager(sb)
+        local mm = load_driver(sb):new()
+        mm._adapter:establish()
+        mm._adapter:register_io_observer()
+        return mm
+    end
+
     local function new_loaded(sb)
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()
+        local mm = new_manager(sb)
         mm:update(0.016)
         return mm
     end
@@ -167,8 +175,7 @@ return function(runner)
         local sb = setup({ order = { "usermod" } })
         local load_calls = {}
         sb.Mods.file.exec_with_return = function(p) table.insert(load_calls, p); return nil end
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()
+        local mm = new_manager(sb)
 
         runner.assert_eq({}, load_calls, "init must NOT exec .mod files (scan only)")
         runner.assert_nil(mm._state, "_state must NOT be set by init")
@@ -179,20 +186,27 @@ return function(runner)
         runner.assert_eq("usermod", mm._mods[1].handle)
         runner.assert_eq("not_loaded", mm._mods[1].state)
         runner.assert_nil(mm._mods[1].object)
-        runner.assert_eq(false, mm._settings.developer_mode, "developer_mode defaults false")
+        runner.assert_eq(false, mm._settings.developer_mode,
+            "developer_mode defaults false via chassis establish")
     end)
 
-    runner.register("mod_manager: init() assigns Managers.mod = self", function()
+    runner.register("mod_manager: init does NOT publish; the chassis establish publishes Managers.mod", function()
+        -- New structure: init constructs the built-in's own adapter but never
+        -- publishes (establish/observer are chassis Step-1c duties). Managers.mod
+        -- publication + settings restore happen through the adapter's establish,
+        -- which the chassis calls right after creation.
         local sb = setup({ order = {} })
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()
-        runner.assert_eq(mm, sb.Managers.mod, "init must set Managers.mod")
+        local mm = load_driver(sb):new()
+        runner.assert_nil(sb.Managers.mod,
+            "init alone must not publish Managers.mod (chassis owns publication)")
+        mm._adapter:establish()
+        runner.assert_eq(mm, sb.Managers.mod,
+            "the chassis establish publishes the manager at Managers.mod")
     end)
 
     runner.register("mod_manager: missing mods.lst -> empty _mods, no crash", function()
         local sb = setup({ missing_order = true })
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()
+        local mm = new_manager(sb)
         runner.assert_eq(0, #mm._mods)
         mm:update(0.016)
         runner.assert_eq("done", mm._state, "still reaches done with empty list")
@@ -202,7 +216,7 @@ return function(runner)
         local logged = {}
         local sb = setup({ missing_order = true })
         sb.__print = function(m) table.insert(logged, m) end
-        load_driver(sb):new()
+        new_manager(sb)
         local found = false
         for _, line in ipairs(logged) do
             if line:find("mods%.lst") and line:find("missing") then
@@ -221,7 +235,7 @@ return function(runner)
         local logged = {}
         local sb = setup({ missing_order = true })
         sb.__print = function(m) table.insert(logged, m) end
-        load_driver(sb):new()
+        new_manager(sb)
         local leveled = nil
         for _, line in ipairs(logged) do
             if line:find("^WARN %[mod_loader%] ", 1) then
@@ -236,8 +250,7 @@ return function(runner)
 
     runner.register("mod_manager: empty mods.lst -> empty _mods, no crash", function()
         local sb = setup({ order = {} })
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()
+        local mm = new_manager(sb)
         runner.assert_eq(0, #mm._mods)
         mm:update(0.016)
         runner.assert_eq("done", mm._state)
@@ -255,7 +268,7 @@ return function(runner)
                 init = function() state_done_during_load = (sb.Managers.mod._state == "done") end,
             })
         end
-        local mm = load_driver(sb):new()
+        local mm = new_manager(sb)
         runner.assert_nil(mm._state)
         mm:update(0.016)
         runner.assert_eq(false, state_done_during_load,
@@ -411,8 +424,7 @@ return function(runner)
             table.insert(exec_paths, p)
             return ({ [mod_path("good")] = mod_file("good", { init = function() end }) })[p]
         end
-        local ModManager = load_driver(sb)
-        local mm = ModManager:new()  -- SCAN: both entries well-formed
+        local mm = new_manager(sb)  -- SCAN: both entries well-formed
         -- Mutate the first entry into a shape the adapter rejects (no handle).
         -- The "good" entry is left intact so it should still load.
         mm._mods[1].handle = nil
@@ -465,7 +477,7 @@ return function(runner)
             return ({ [mod_path("dmf")] = mod_file("dmf",
                 { update = function(self, dt) table.insert(calls, dt) end }) })[p]
         end
-        local mm = load_driver(sb):new()
+        local mm = new_manager(sb)
         mm:update(0.016)
         runner.assert_eq({ 0.016 }, calls)
         mm:update(0.033)
@@ -499,7 +511,7 @@ return function(runner)
         sb.Mods.file.exec_with_return = function(p)
             return ({ [mod_path("dmf")] = mod_file("dmf", { init = function() end }) })[p]
         end
-        local mm = load_driver(sb):new()
+        local mm = new_manager(sb)
         local ok, err = pcall(function() mm:update(0.016) end)
         runner.assert_eq(true, ok, tostring(err))
         runner.assert_eq(0, #logged)
@@ -585,12 +597,14 @@ return function(runner)
     -- ---------------------------------------------------------------------
 
     runner.register("mod_manager: real file+manager+adapter observer integration — adapts on DMFMod surface", function()
-        -- Load the REAL file.lua + REAL mod_manager.lua (which itself loads the
-        -- REAL dmf_adapter.lua via Mods.load_module) in one sandbox. The
-        -- observer the adapter registers is the real file.lua observer.
-        -- Execute a real staged chunk through Mods.file.dofile that surfaces a
-        -- DMFMod io surface; verify the real observer adapts before any
-        -- Phase-2 call uses the method, and that the adapter diagnostic
+        -- Load the REAL file.lua + REAL dmf_adapter.lua + REAL mod_manager.lua
+        -- in one sandbox, wiring the adapter the way the chassis does (loaded
+        -- once, published on Mods._relay.dmf_adapter; the manager's init reads
+        -- it from there, and the chassis Step-1c built-in path uses the
+        -- manager's own adapter to establish + register the real file.lua
+        -- observer). Execute a real staged chunk through Mods.file.dofile that
+        -- surfaces a DMFMod io surface; verify the real observer adapts before
+        -- any Phase-2 call uses the method, and that the adapter diagnostic
         -- reflects the new generation.
         local sb = mock.new_sandbox()
         -- fake class so mod_manager.lua can call class("ModManager")
@@ -610,12 +624,6 @@ return function(runner)
         sb.Managers = {}
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
         mock.attach_logger(sb)
-        -- mod_manager.lua loads dmf_adapter.lua via Mods.load_module; wire it
-        -- to the mock's source loader so the real adapter source runs in the
-        -- sandbox.
-        sb.Mods.load_module = function(name)
-            return mock.run_module(name, sb)
-        end
 
         local files = {}
         -- A synthetic chunk that, when executed, surfaces DMFMod with its io_*
@@ -631,15 +639,25 @@ return function(runner)
 
         sb.Mods.lua.io = mock.make_io(files)
         sb.Mods.lua.loadstring = sb.loadstring
+        -- file.lua loads path.lua via Mods.load_module at its module top; wire
+        -- the generic source loader (dmf_adapter is NOT served through here —
+        -- the chassis loads it exactly once, simulated below).
+        sb.Mods.load_module = function(name)
+            return mock.run_module(name, sb)
+        end
 
-        -- Load real file.lua, then real mod_manager.lua (shares the sandbox).
-        -- mod_manager.lua's module top loads dmf_adapter.lua via the wired
-        -- Mods.load_module, so the real adapter factory is in scope when the
-        -- manager instance constructs.
+        -- Load real file.lua, then simulate the chassis module-scope load of
+        -- dmf_adapter (published on Mods._relay before mod_manager loads), then
+        -- load real mod_manager.lua (shares the sandbox).
         mock.run_module("file", sb)
+        sb.Mods._relay.dmf_adapter = mock.run_module("dmf_adapter", sb)
         mock.run_module("mod_manager", sb)
 
-        local mm = registry.ModManager:new()  -- init: registers the real observer
+        local mm = registry.ModManager:new()
+        -- Chassis Step-1c built-in path: the manager's own adapter establishes
+        -- and registers the real observer (exactly one registering instance).
+        mm._adapter:establish()
+        mm._adapter:register_io_observer()
         runner.assert_nil(mm._adapter:adapted_dmfmod(), "not yet adapted")
 
         -- Execute the chunk that surfaces DMFMod.io_* through real Mods.file.
@@ -707,5 +725,63 @@ return function(runner)
         runner.assert_eq(2, mm._mods[2].id)
         runner.assert_eq("beta", mm._mods[2].name)
         runner.assert_eq("beta", mm._mods[2].handle)
+    end)
+
+    runner.register("mod_manager: _mods[_mod_load_index].data is the descriptor table during run() (DMF expectation)", function()
+        -- DMF's DMFMod:init reads _mods[_mod_load_index].data (then .packages)
+        -- during mod construction, which happens synchronously inside run()
+        -- (new_mod) — so the manager must publish the executed descriptor on
+        -- the entry BEFORE invoking run().
+        local sb = setup({ order = { "usermod" } })
+        local seen = {}
+        local descriptor = {
+            packages = { "some/package" },
+            run = function()
+                local m = sb.Managers.mod
+                local entry = m._mods[m._mod_load_index]
+                seen.data = entry and entry.data
+                seen.packages = seen.data and seen.data.packages
+                -- DMF convention: side-effect registration, no return.
+            end,
+        }
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("usermod")] = descriptor })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq(descriptor, seen.data,
+            "entry.data must be the descriptor table itself, published before run()")
+        runner.assert_eq({ "some/package" }, seen.packages,
+            "a .packages field on the descriptor is visible via entry.data during run()")
+        runner.assert_eq("dmf_driven", mm._mods[1].state)
+    end)
+
+    runner.register("mod_manager: entry.data stays unpublished when the descriptor is invalid (no run)", function()
+        local sb = setup({ order = { "bad", "good" } })
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("bad")] = { packages = { "p" } },  -- table, but no run
+                [mod_path("good")] = mod_file("good", { init = function() end }),
+            })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq("failed", mm._mods[1].state)
+        runner.assert_nil(mm._mods[1].data,
+            "an entry whose descriptor never passed validation carries no .data")
+        runner.assert_truthy(mm._mods[2].data ~= nil,
+            "the valid sibling still publishes its descriptor")
+    end)
+
+    runner.register("mod_manager: a failed run leaves stale entry.data (deliberately not cleared)", function()
+        -- Nothing reads .data of a failed entry (_mod_load_index only points
+        -- at an entry during its own _load_one), so no clearing logic exists.
+        local sb = setup({ order = { "boom" } })
+        local descriptor = mod_file("boom", nil, nil, true)  -- run raises
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("boom")] = descriptor })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq("failed", mm._mods[1].state)
+        runner.assert_eq(descriptor, mm._mods[1].data,
+            "publication precedes run(); a failed run does not unwind it")
     end)
 end

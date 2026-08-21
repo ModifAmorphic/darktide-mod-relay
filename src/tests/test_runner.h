@@ -16,7 +16,9 @@
 #ifndef RELAY_TEST_RUNNER_H
 #define RELAY_TEST_RUNNER_H
 
-/* Register a named test function. Call once per test, before main() runs. */
+/* Register a named test function. Call once per test, before main() runs.
+ * Registrations beyond MAX_TESTS are refused and fail the run via
+ * test_summary() (a dropped test never reads as green). */
 void test_register(const char *name, void (*fn)(void));
 
 /* Called by ASSERT_* macros to mark the current test as failed. */

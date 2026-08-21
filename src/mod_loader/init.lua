@@ -41,6 +41,21 @@ MOD_RELAY_VERSION = nil
 -- lifecycle.lua reads this once at module-eval time. Internal/private.
 Mods._relay.skip_splash = (RELAY_SKIP_SPLASH == "1")
 RELAY_SKIP_SPLASH = nil
+-- Snapshot the launcher-derived mods-in-game-tree gate (trampoline-set global;
+-- "" = not in the game tree). When true, the mod path IS the game directory and
+-- the loader's io retargeting layers stay OFF (stock DMF relative-path
+-- conventions resolve naturally from binaries/). Nil-safe when the global is
+-- absent (older shell / tests). file.lua reads this at module-load time;
+-- dmf_adapter.lua at adaptation time. Internal/private.
+Mods._relay.mods_in_game_tree = (RELAY_MODS_IN_GAME_TREE == "1")
+RELAY_MODS_IN_GAME_TREE = nil
+-- Snapshot the optional alternate mod manager path (trampoline-set global; ""
+-- = not configured — the launcher/shell refuse or fatal on a bad value BEFORE
+-- the game, so an empty-or-absent global here simply means built-in). Nil-safe
+-- when the global is absent (older shell / tests). lifecycle.lua reads this
+-- once at module-eval time. Internal/private.
+Mods._relay.mod_manager_path = RELAY_MOD_MANAGER ~= "" and RELAY_MOD_MANAGER or nil
+RELAY_MOD_MANAGER = nil
 do
     local ok, traceback_fn = pcall(function()
         if type(debug) == "table" and type(debug.traceback) == "function" then
@@ -230,6 +245,9 @@ if _mp ~= "" then
 else
     Mods._mod_root = ""
 end
+if Mods._relay.mods_in_game_tree and Mods._mod_path ~= "" then
+    Mods._relay.log_info("mod path is the game dir; io retargeting disabled")
+end
 
 local _io = Mods.lua.io
 -- Capture the raw io.open for _load_module. file.lua's wrapper replaces
@@ -242,17 +260,19 @@ local _pcall = pcall
 local _setfenv = setfenv
 local _getfenv = getfenv
 
--- Shared dofile-style loader for Relay modules, rooted at MOD_LOADER_DIR.
--- Runs the chunk in the entry's env (setfenv so modules share _G) and returns
--- (ok, result); logs an ERROR on open/parse/run failure.
-local function _load_module(name)
-    local base = MOD_LOADER_DIR or ""
-    local path = base .. "/" .. name .. ".lua"
-
+-- Dofile-style chunk loader for an EXACT path: raw io.open (captured above,
+-- BEFORE file.lua's wrapper installs) + loadstring + protected run in the
+-- entry's env — the path is opened VERBATIM (absolute passes through,
+-- relative resolves against the game CWD), never loader/mod-root rooted.
+-- Returns (ok, result, failure_mode) — failure_mode is "open"/"parse"/"run"
+-- on failure, nil on success; each failure logs one ERROR. Loader-internal
+-- seam for lifecycle.lua's manager slot, NOT part of the public Mods
+-- surface. Contract: docs/architecture/MOD_LOADER-DMF.md → "The manager slot".
+Mods._relay.load_chunk = function(path)
     local f, err = _io_open(path, "r")
     if not f then
         Mods._relay.log_error("cannot open " .. path .. ": " .. tostring(err))
-        return false, nil
+        return false, nil, "open"
     end
     local data = f:read("*all")
     f:close()
@@ -260,16 +280,24 @@ local function _load_module(name)
     local fn, lerr = _loadstring(data, path)
     if not fn then
         Mods._relay.log_error("cannot parse " .. path .. ": " .. tostring(lerr))
-        return false, nil
+        return false, nil, "parse"
     end
     _setfenv(fn, _getfenv(1))
 
     local ok, rerr = _pcall(fn)
     if not ok then
         Mods._relay.log_error("error running " .. path .. ": " .. tostring(rerr))
-        return false, nil
+        return false, nil, "run"
     end
-    return true, rerr
+    return true, rerr, nil
+end
+
+-- Loader-root module loader: joins MOD_LOADER_DIR and delegates to the chunk
+-- helper. Returns (ok, result, failure_mode).
+local function _load_module(name)
+    local base = MOD_LOADER_DIR or ""
+    local path = base .. "/" .. name .. ".lua"
+    return Mods._relay.load_chunk(path)
 end
 
 -- Install-only contract for the entry's bootstrap loop.

@@ -3,10 +3,18 @@
 -- Asserts the external behavior of the mod-root-rooted file operations:
 --   - path validation: rejects absolute/UNC/drive/NUL/..; allows nested relative
 --   - safe/unsafe distinction: safe returns false on failure, unsafe raises
+--   - safe-op failure logging: a chunk that exists but fails to compile or
+--     raises logs ONE ERROR diagnostic; missing-file/resolve/read failures
+--     stay silent (mods probe for optional files via safe dofile returning
+--     false)
+--   - join form: the manager-slot (dir, name, ext) / (name, ext) argument
+--     shapes — resolution, component validation, args pass-through, observers
 --   - single-open: the handle is closed before compile/run and on read failure
 --   - reads: raw content + trimmed line list (blank/comment skipped)
 --   - observer isolation: observers fire only after successful exec, failures
 --     are logged without replacing the chunk result
+--   - the mods-in-game-tree gate: the io.open/lines + popen wrappers install
+--     only when NOT gated (absent gate = today's behavior)
 
 local mock = require("mock")
 
@@ -56,6 +64,26 @@ return function(runner)
         end
         mock.run_module("file", sb)
         return sb, iot
+    end
+
+    -- Build a sandbox whose io.open records every path it receives (for
+    -- asserting the exact path an op hands to io). Returns the sandbox + the
+    -- record list.
+    local function setup_recording(files)
+        local sb = mock.new_sandbox()
+        sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        local base_io = mock.make_io(files or {})
+        local opened_with = {}
+        sb.Mods.lua.io = {
+            open = function(p, m) opened_with[#opened_with + 1] = p; return base_io.open(p, m) end,
+            lines = base_io.lines,
+        }
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function() end
+        mock.attach_logger(sb)
+        mock.run_module("file", sb)
+        return sb, opened_with
     end
 
     -- ---------------------------------------------------------------------
@@ -147,6 +175,71 @@ return function(runner)
         runner.assert_eq(false, sb.Mods.file.dofile("boom"))
     end)
 
+    -- ---------------------------------------------------------------------
+    -- Safe-op failure logging (execution failures log; probe misses stay silent)
+    -- ---------------------------------------------------------------------
+
+    -- Build a sandbox whose __print captures diagnostics (the leveled loggers
+    -- route there via mock.attach_logger). file.lua must be loaded AFTER the
+    -- logger attach (it captures log_error at module scope).
+    local function setup_logging(files)
+        local sb = mock.new_sandbox()
+        sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        local logged = {}
+        sb.Mods.lua.io = mock.make_io(files or {})
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        sb.__print = function(m) table.insert(logged, m) end
+        mock.attach_logger(sb)
+        mock.run_module("file", sb)
+        return sb, logged
+    end
+
+    runner.register("file: safe dofile of a raising chunk returns false AND logs one ERROR line", function()
+        local files = { [mock.MOD_ROOT .. "/boom.lua"] = "error('kaboom')" }
+        local sb, logged = setup_logging(files)
+        local v = sb.Mods.file.dofile("boom")
+        runner.assert_eq(false, v, "safe dofile must still return false on a runtime raise")
+        runner.assert_eq(1, #logged, "exactly one diagnostics line for the failure")
+        runner.assert_truthy(logged[1]:find("^ERROR %[mod_loader%] chunk failed: ") ~= nil,
+            "the line must be a leveled chunk-failure diagnostic")
+        runner.assert_truthy(logged[1]:find(mock.MOD_ROOT .. "/boom%.lua") ~= nil,
+            "the line must name the full path")
+        runner.assert_truthy(logged[1]:find("kaboom") ~= nil,
+            "the line must carry the error text")
+        -- The boolean exec op routes through the same execute() seam.
+        runner.assert_eq(false, sb.Mods.file.exec("boom"), "exec must fail safe too")
+        runner.assert_eq(2, #logged, "exec logs the same single line for its own failure")
+    end)
+
+    runner.register("file: safe dofile of a missing file returns false and logs NOTHING", function()
+        -- Probe semantics: a miss is not a failure to diagnose — mods probe for
+        -- optional files via safe ops. resolve/read failures stay silent; only
+        -- execution failures (an existing chunk that compiles/runs badly) log.
+        local sb, logged = setup_logging({})
+        runner.assert_eq(false, sb.Mods.file.dofile("nope/missing"))
+        runner.assert_eq(false, sb.Mods.file.exec("nope/missing"))
+        runner.assert_eq(false, sb.Mods.file.read_content("nope/missing"))
+        runner.assert_eq(0, #logged, "a missing file must emit no diagnostics")
+    end)
+
+    runner.register("file: safe dofile of a syntax-broken chunk returns false AND logs", function()
+        local files = { [mock.MOD_ROOT .. "/broken.lua"] = "this is not lua" }
+        local sb, logged = setup_logging(files)
+        local v, err = sb.Mods.file.dofile("broken")
+        runner.assert_eq(false, v, "safe dofile must return false on a compile error")
+        runner.assert_type("string", err, "the failure reason is still returned")
+        runner.assert_eq(1, #logged, "exactly one diagnostics line for the compile failure")
+        runner.assert_truthy(logged[1]:find("chunk failed: " .. mock.MOD_ROOT .. "/broken%.lua") ~= nil,
+            "the line names the failing chunk")
+        -- The unsafe variant raises BEFORE any logging (errors propagate, they
+        -- are not tee'd through the safe-path diagnostic).
+        local n = #logged
+        local ok = pcall(sb.Mods.file.dofile_unsafe, "broken")
+        runner.assert_eq(false, ok, "unsafe dofile must still raise on a compile error")
+        runner.assert_eq(n, #logged, "the unsafe path must not add a diagnostics line")
+    end)
+
     runner.register("file: unsafe dofile propagates a compile error", function()
         local files = { [mock.MOD_ROOT .. "/broken.lua"] = "this is not lua" }
         local sb = setup(files)
@@ -185,10 +278,137 @@ return function(runner)
         runner.assert_eq(false, sb.Mods.file.exec_with_return("missing"))
     end)
 
-    runner.register("file: dofile forwards args to the chunk", function()
-        local files = { [mock.MOD_ROOT .. "/arg.lua"] = "local a = ... return a" }
+    runner.register("file: dofile forwards non-string args to the chunk (path form)", function()
+        -- Path-form args are any NON-string value: a string second argument
+        -- is the join-form discriminator (asserted in the join-form section
+        -- below).
+        local files = { [mock.MOD_ROOT .. "/arg.lua"] = "local a = ... return type(a) == 'table' and a.tag or a" }
         local sb = setup(files)
-        runner.assert_eq("hello", sb.Mods.file.dofile("arg", "hello"))
+        runner.assert_eq("hello", sb.Mods.file.dofile("arg", { tag = "hello" }),
+            "table args must reach the chunk")
+        runner.assert_eq(42, sb.Mods.file.dofile("arg", 42),
+            "number args must reach the chunk")
+        runner.assert_eq(nil, sb.Mods.file.dofile("arg", nil),
+            "nil args are indistinguishable from no args (path form)")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Join form (the manager-slot argument shapes)
+    -- ---------------------------------------------------------------------
+
+    runner.register("file: 3-arg join form resolves <dir>/<name>.<ext> under the mod root", function()
+        -- The AML manager-slot call: exec_with_return(folder, folder, "mod").
+        -- The io mock must receive exactly the resolve()-rooted joined path
+        -- (no .lua append — the joined basename already has an extension).
+        local files = { [mock.MOD_ROOT .. "/MyMod/MyMod.mod"] = "return 'mod-data'" }
+        local sb, opened_with = setup_recording(files)
+        local v = sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod")
+        runner.assert_eq("mod-data", v, "3-arg join must exec the joined file")
+        runner.assert_eq(1, #opened_with, "the joined file must be opened exactly once")
+        runner.assert_eq(mock.MOD_ROOT .. "/MyMod/MyMod.mod", opened_with[1],
+            "io.open must receive <mod_root>/<dir>/<name>.<ext>")
+    end)
+
+    runner.register("file: 2-arg join form (name, ext) works across the family", function()
+        local files = {
+            [mock.MOD_ROOT .. "/dmf.mod"] = "return 'dmf-data'",
+            [mock.MOD_ROOT .. "/order.lst"] = "alpha\nbeta\n",
+            [mock.MOD_ROOT .. "/raw.txt"] = "raw-content",
+        }
+        local sb = setup(files)
+        runner.assert_eq("dmf-data", sb.Mods.file.exec_with_return("dmf", "mod"))
+        runner.assert_eq("dmf-data", sb.Mods.file.dofile("dmf", "mod"))
+        runner.assert_eq("dmf-data", sb.Mods.file.exec_unsafe_with_return("dmf", "mod"))
+        runner.assert_eq(true, sb.Mods.file.exec("dmf", "mod"))
+        runner.assert_eq({ "alpha", "beta" }, sb.Mods.file.read_content_to_table("order", "lst"),
+            "read_content_to_table(name, ext) must read <name>.<ext>")
+        runner.assert_eq("raw-content", sb.Mods.file.read_content("raw", "txt"),
+            "read_content(name, ext) must read <name>.<ext>")
+    end)
+
+    runner.register("file: 4-arg join form passes args through to the chunk", function()
+        local files = {
+            [mock.MOD_ROOT .. "/cfg/data.lua"] = "local a = ... if a == nil then return 'nil-args' end return a.tag",
+        }
+        local sb = setup(files)
+        runner.assert_eq("hi", sb.Mods.file.exec_with_return("cfg", "data", "lua", { tag = "hi" }),
+            "the 4th join-form argument must be the chunk argument")
+        runner.assert_eq("nil-args", sb.Mods.file.exec_with_return("cfg", "data", "lua"),
+            "without a 4th argument the chunk receives nil args")
+    end)
+
+    runner.register("file: a string second argument selects the join form", function()
+        -- (path, "string") is the join form: name=path, ext=string — NOT the
+        -- path form with string args. Both candidate targets are staged; only
+        -- the join interpretation can produce this result.
+        local files = {
+            [mock.MOD_ROOT .. "/notes.txt"] = "return 'from-join'",
+            [mock.MOD_ROOT .. "/notes.lua"] = "return 'from-path'",
+        }
+        local sb = setup(files)
+        runner.assert_eq("from-join", sb.Mods.file.dofile("notes", "txt"),
+            "(path, string) must join to <path>.<string>, not pass the string as chunk args")
+    end)
+
+    runner.register("file: join-form miss returns false (safe) and raises (unsafe)", function()
+        local sb = setup({})
+        runner.assert_eq(false, sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod"),
+            "safe join-form exec must return false on a missing file")
+        local ok = pcall(sb.Mods.file.exec_unsafe_with_return, "MyMod", "MyMod", "mod")
+        runner.assert_eq(false, ok, "unsafe join-form exec must raise on a missing file")
+    end)
+
+    runner.register("file: join-form components must be single segments (validation matrix)", function()
+        -- Every bad component value, in each join position, must fail the
+        -- safe ops (false) and raise in the unsafe ops.
+        local sb = setup({})
+        local bad = { "", "..", "a/b", "a\\b", "a:b" }
+        for i = 1, #bad do
+            local v = bad[i]
+            local r, reason = sb.Mods.file.exec_with_return(v, "name", "mod")
+            runner.assert_eq(false, r, "bad dir component must fail safe: '" .. v .. "'")
+            runner.assert_type("string", reason, "safe failure must carry a reason: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec_with_return("dir", v, "mod"),
+                "bad name component must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec_with_return("name", v),
+                "bad ext component (2-arg join) must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.exec("dir", v, "mod"),
+                "boolean exec must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, sb.Mods.file.read_content("dir", v),
+                "read_content must fail safe: '" .. v .. "'")
+            runner.assert_eq(false, pcall(sb.Mods.file.exec_unsafe_with_return, "dir", v, "mod"),
+                "bad component must raise unsafe: '" .. v .. "'")
+        end
+        -- Non-string components fail too. (A non-string SECOND argument is
+        -- path form, not a bad component — so ext is only testable non-string
+        -- in the 3-arg shape.)
+        runner.assert_eq(false, sb.Mods.file.exec_with_return(42, "name", "mod"),
+            "non-string dir component must fail")
+        runner.assert_eq(false, sb.Mods.file.exec_with_return("dir", "name", 42),
+            "non-string ext component must fail")
+        runner.assert_eq(false, pcall(sb.Mods.file.exec_unsafe_with_return, 42, "name", "mod"),
+            "non-string dir component must raise unsafe")
+    end)
+
+    runner.register("file: observers fire exactly once after a successful join-form exec", function()
+        local files = { [mock.MOD_ROOT .. "/MyMod/MyMod.mod"] = "return 'mod-data'" }
+        local sb = setup(files)
+        local fired = 0
+        local seen = {}
+        sb.Mods.file.add_observer(function(rel, args, result)
+            fired = fired + 1
+            seen = { rel = rel, args = args, result = result }
+        end)
+        local v = sb.Mods.file.exec_with_return("MyMod", "MyMod", "mod")
+        runner.assert_eq("mod-data", v)
+        runner.assert_eq(1, fired, "observer must fire exactly once after a successful join-form exec")
+        runner.assert_eq("MyMod/MyMod.mod", seen.rel,
+            "observer rel_path is the joined mod-relative path")
+        runner.assert_eq(nil, seen.args, "no chunk args -> observer args nil")
+        runner.assert_eq("mod-data", seen.result)
+        -- A failed join-form exec must not fire the observer again.
+        sb.Mods.file.exec_with_return("MyMod", "Missing", "mod")
+        runner.assert_eq(1, fired, "observer must not fire on a failed join-form exec")
     end)
 
     -- ---------------------------------------------------------------------
@@ -242,6 +462,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         runner.assert_eq(1, sb.Mods.file.dofile("once"))
         runner.assert_eq(1, opens, "dofile must open the file exactly once")
@@ -275,6 +496,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.dofile("boom")
         runner.assert_eq(false, v, "safe dofile must return false on a read error, not propagate")
@@ -305,6 +527,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.read_content_to_table("list.lst")
         runner.assert_eq(false, v, "safe read_content_to_table must return false on an iterator error")
@@ -333,6 +556,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local ok, err = pcall(sb.Mods.file.dofile_unsafe, "boom")
         runner.assert_eq(false, ok, "unsafe dofile must raise on a read failure")
@@ -458,6 +682,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local f, err = sb.Mods.lua.io.open(rel)
         runner.assert_eq(expected, opened_with,
@@ -517,6 +742,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local ok = pcall(sb.Mods.lua.io.lines, rel)
         runner.assert_eq(false, ok,
@@ -548,6 +774,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         -- Forward-slash absolute path (the Scores APPDATA write):
         local fwd = "C:/Users/example/AppData/Roaming/Fatshark/Darktide/scores_history/v1/123.lua"
@@ -585,6 +812,7 @@ return function(runner)
         sb.Mods.lua.loadstring = sb.loadstring
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         sb.__print = function() end
+        mock.attach_logger(sb)
         mock.run_module("file", sb)
         local v = sb.Mods.file.dofile("inner")
         runner.assert_eq("ok", v)
@@ -622,6 +850,7 @@ return function(runner)
         sb.Mods.lua.io = iot
         sb.Mods.lua.loadstring = sb.loadstring
         sb.__print = function() end
+        mock.attach_logger(sb)
         sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
         mock.run_module("file", sb)
         return sb, received
@@ -673,5 +902,100 @@ return function(runner)
             "popen must forward trailing args (mode) to the original")
         runner.assert_truthy(received.cmd:find('^cd /d "'),
             "the forwarded command must still carry the cd prepend")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Mods-in-game-tree gate (Mods._relay.mods_in_game_tree)
+    -- ---------------------------------------------------------------------
+    --
+    -- When the mod path IS the game directory (launcher-derived; init.lua
+    -- snapshots the trampoline global before file.lua loads), ALL raw-io
+    -- retargeting stays off: the open/lines wrapper AND the popen
+    -- cd-prepend must NOT install — stock DMF conventions resolve naturally
+    -- from binaries/. An absent gate (no Mods._relay, or the field nil)
+    -- means NOT gated = today's behavior (wrappers install).
+
+    -- Build a sandbox with explicit gate control. gate is true/false, or
+    -- "absent" (no Mods._relay at all). mod_root defaults to a set root;
+    -- pass "" to exercise the empty-root + gate-on combination. files
+    -- optionally backs the io mock (path -> content) so rooted opens resolve.
+    -- Captures the raw io functions the sandbox provided so identity
+    -- comparison proves no wrap. Returns (sb, raw) where raw =
+    -- { open, lines, popen }.
+    local function setup_gated(gate, mod_root, files)
+        local sb = mock.new_sandbox()
+        local mods = {
+            lua = {},
+            _mod_path = "C:/staged",
+            _mod_root = mod_root or "C:/staged/mods",
+        }
+        if gate ~= "absent" then
+            mods._relay = { mods_in_game_tree = gate }
+        end
+        sb.Mods = mods
+        local iot = mock.make_io(files or {})
+        iot.popen = function() return "FAKE_HANDLE" end
+        local raw = { open = iot.open, lines = iot.lines, popen = iot.popen }
+        sb.Mods.lua.io = iot
+        sb.Mods.lua.loadstring = sb.loadstring
+        sb.__print = function() end
+        mock.attach_logger(sb)
+        sb.Mods.load_module = function(name) return mock.run_module(name, sb) end
+        mock.run_module("file", sb)
+        return sb, raw
+    end
+
+    runner.register("io gate: game-tree mods skip open/lines + popen wrapping (raw identities)", function()
+        local sb, raw = setup_gated(true)
+        runner.assert_eq(raw.open, sb.Mods.lua.io.open,
+            "io.open must stay the raw original under the gate")
+        runner.assert_eq(raw.lines, sb.Mods.lua.io.lines,
+            "io.lines must stay the raw original under the gate")
+        runner.assert_eq(raw.popen, sb.Mods.lua.io.popen,
+            "io.popen must stay the raw original under the gate")
+    end)
+
+    runner.register("io gate: gate explicitly false installs the wrappers (today's behavior)", function()
+        local sb, raw = setup_gated(false)
+        runner.assert_truthy(raw.open ~= sb.Mods.lua.io.open, "io.open must be wrapped")
+        runner.assert_truthy(raw.lines ~= sb.Mods.lua.io.lines, "io.lines must be wrapped")
+        runner.assert_truthy(raw.popen ~= sb.Mods.lua.io.popen, "io.popen must be wrapped")
+    end)
+
+    runner.register("io gate: no Mods._relay at all installs the wrappers (nil-safe)", function()
+        local sb, raw = setup_gated("absent")
+        runner.assert_truthy(raw.open ~= sb.Mods.lua.io.open,
+            "an absent Mods._relay means not gated (io.open wraps)")
+        runner.assert_truthy(raw.lines ~= sb.Mods.lua.io.lines,
+            "an absent Mods._relay means not gated (io.lines wraps)")
+        runner.assert_truthy(raw.popen ~= sb.Mods.lua.io.popen,
+            "an absent Mods._relay means not gated (io.popen wraps)")
+    end)
+
+    runner.register("io gate: game-tree mods + empty _mod_root installs nothing (both conditions required)", function()
+        local sb, raw = setup_gated(true, "")
+        runner.assert_eq(raw.open, sb.Mods.lua.io.open,
+            "empty _mod_root: io.open never wraps (gate or not)")
+        runner.assert_eq(raw.lines, sb.Mods.lua.io.lines,
+            "empty _mod_root: io.lines never wraps")
+        runner.assert_eq(raw.popen, sb.Mods.lua.io.popen,
+            "empty _mod_root: io.popen never wraps")
+    end)
+
+    runner.register("io gate: game-tree mods + gate ON — Mods.file.* still resolves at _mod_root", function()
+        -- The gate disables only the io wrappers (Mods.lua.io.open/io.lines/io.popen).
+        -- Mods.file.* (used by the manager and the manager-slot convention) still
+        -- roots at _mod_root — which is GAME_DIR\mods in game-tree mode.
+        -- This is the not-gated scope decision: the wrappers are off, but the
+        -- internal rooting is unchanged. The gate is present BEFORE file.lua
+        -- evaluates (the setup_gated shape, with real file backing), so gating
+        -- Mods.file.* at module load would break the rooted open and fail this.
+        local mod_root = "C:/staged/mods"
+        local files = { [mod_root .. "/test.lua"] = "return 'game-tree-mods'" }
+        local sb = setup_gated(true, mod_root, files)
+        -- Verify Mods.file.dofile still resolves from _mod_root under the gate.
+        local v = sb.Mods.file.dofile("test")
+        runner.assert_eq("game-tree-mods", v,
+            "Mods.file.dofile must still resolve from _mod_root under the gate")
     end)
 end

@@ -9,7 +9,7 @@ must honor. The implementation architecture lives in
 The injected C shell (`relay_shell.dll`) — the DLL linked with the Rust
 `relay-discovery` staticlib (C-ABI) + MinHook, delivered by `CreateRemoteThread`.
 This document covers the contracts and hazards a maintainer must preserve:
-the two required hooks, the pcall#1 trampoline game-safety invariants, the two
+the two required hooks, the pcall#1 trampoline game-safety invariants, the
 trampoline-baked roots, the deliberately-not-hooked discovery anchor, and the
 logging destinations. It is a spec, not a narrative.
 
@@ -60,9 +60,10 @@ must hold or the engine corrupts:
   `io.open`s exactly `<MOD_LOADER_DIR>/init.lua` (read → `loadstring` → run).
   No user-controlled path is executed here.
 
-## Two roots (trampoline-baked globals)
+## Trampoline-baked globals (the roots)
 
-The chunk sets four globals before `io.open`. Two are roots; two are one-shot
+The chunk sets six globals before `io.open`. Three are roots — the mod-loader
+root, the mod path, and the optional alternate-manager path; three are one-shot
 internal handoffs.
 
 - **`MOD_LOADER_DIR`** — the runtime-controlled loader root. Self-located by the
@@ -76,11 +77,37 @@ internal handoffs.
   publishes it from `--mod-path`/`RELAY_MOD_PATH`). **Optional:** unset or
   overlong yields an empty-string global; the loader runs, finds no mod root, and
   degrades gracefully — mods do not load, but nothing crashes.
-- **`MOD_RELAY_VERSION`** and **`RELAY_SKIP_SPLASH`** — one-shot internal
-  handoffs. `MOD_RELAY_VERSION` carries the build-injected product version (nil
+- **`RELAY_MOD_MANAGER`** — the user-controlled alternate mod manager (the
+  launcher publishes it from `--mod-manager`/`RELAY_MOD_MANAGER`, used verbatim).
+  **Optional when unset** (empty-string global — no alternate manager), but **a
+  set value that cannot be read intact is FATAL**: unreadable, overlong
+  (≥ 1024 chars), or carrying a control character (the chunk's Lua-string
+  escape handles only backslash and double-quote, so a raw control byte —
+  practically unreachable via the launcher's flag path, but reachable through
+  the environment by other means — would corrupt the staged literal).
+  Unlike `RELAY_MOD_PATH` there
+  is no degrade-to-unset, because silently dropping a configured manager would
+  launch a managerless game. The shell logs at `ERROR` and `ExitProcess(1)`s
+  during staging — while the launcher still holds the main thread suspended — so
+  the game never resumes half-configured. The launcher also pre-flights the
+  configured target (must exist as a regular file) before creating the game
+  process; the shell check is the authoritative backstop for direct injectors
+  and for values the launcher's own buffer could not read. What the loader does
+  with a configured path after staging (selection, retry, the post-resume
+  in-engine hard exit) is the manager-slot contract — normative in
+  [`manager-slot.md`](manager-slot.md), not a native-shell concern.
+- **`MOD_RELAY_VERSION`**, **`RELAY_SKIP_SPLASH`**, and
+  **`RELAY_MODS_IN_GAME_TREE`** — one-shot internal handoffs.
+  `MOD_RELAY_VERSION` carries the build-injected product version (nil
   when absent/overlong, so malformed metadata disables only version diagnostics);
   `RELAY_SKIP_SPLASH` carries the splash-skip opt-in (`"1"` only when
-  `--skip-splash`/`RELAY_SKIP_SPLASH=1`, else `""`). Both are snapshotted into
+  `--skip-splash`/`RELAY_SKIP_SPLASH=1`, else `""`);
+  `RELAY_MODS_IN_GAME_TREE` carries the launcher-derived mods-in-game-tree
+  hint (`"1"` only when the launcher detected that the mod path IS the game
+  directory — by handle identity, volume serial + file index, not path-text
+  comparison — else `""`). A hint, not an operator commitment: non-`1`/unset
+  is the normal default, so there is deliberately no FATAL path for it (unlike
+  `RELAY_MOD_MANAGER`). All three are snapshotted into
   the chunk and retired by the loader before community code runs; they are
   **not** community APIs and must not gain a stable consumer.
 
@@ -119,3 +146,6 @@ tee, and failure contract is normative in
 - `docs/architecture/MOD_LOADER-DMF.md` — the mod loader contract (what the
   `<MOD_LOADER_DIR>/init.lua` entry does with the baked globals, the deferred
   bootstrap, and the DMF compatibility boundary).
+- [`manager-slot.md`](manager-slot.md) — the manager-slot contract: what a
+  configured `RELAY_MOD_MANAGER` path must provide and how its failures are
+  handled after the shell hands off.

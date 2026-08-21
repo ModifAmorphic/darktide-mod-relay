@@ -1,10 +1,12 @@
 -- mod_manager.lua — Relay's private scan/load/lifecycle driver.
 --
 -- Owns mods.lst scanning, run-result validation, outer-object lifecycle
--- driving, generation-aware Crashify metadata, one-strike outer failure
+-- driving, generation-aware per-mod Crashify metadata, one-strike outer failure
 -- containment, guarded engine alerts, and two-frame developer-mode hot reload.
 -- Stock-DMF-specific field transitions + stale-global retirement stay in
--- dmf_adapter.lua.
+-- dmf_adapter.lua; the manager-agnostic startup duties (adapter establish, io
+-- observer, the process-lifetime Crashify version property) are chassis-owned
+-- (lifecycle.lua Step 1c) and run under ANY manager.
 --
 -- Full load/failure/reload contracts: docs/architecture/MOD_LOADER-DMF.md.
 
@@ -27,10 +29,8 @@ local log_debug = Mods._relay.log_debug
 local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
 
-local dmf_adapter = Mods.load_module("dmf_adapter")
 local ModManager = class("ModManager")
 
-local VERSION_MAX_BYTES = 128
 local MOD_NAME_MAX_BYTES = 120
 local DISPLAY_NAME_MAX_BYTES = 80
 local ALERT_REMINDER_SECONDS = 15
@@ -84,9 +84,16 @@ local function protected_failure_detail(err)
 end
 
 function ModManager:init()
+    -- The chassis (lifecycle.lua) loads dmf_adapter exactly once per process
+    -- and publishes it on Mods._relay; read it here. A missing module means a
+    -- corrupted install: fail creation with a clear error so the bootstrap
+    -- wrapper logs + retries (same semantics as a failed module load).
+    local relay = (_type(Mods) == "table") and _rawget(Mods, "_relay") or nil
+    local dmf_adapter = (_type(relay) == "table") and _rawget(relay, "dmf_adapter") or nil
+    if _type(dmf_adapter) ~= "table" or _type(dmf_adapter.new) ~= "function" then
+        error("dmf_adapter module unavailable on Mods._relay (corrupted install?)")
+    end
     self._adapter = dmf_adapter.new(self)
-    self._adapter:establish()
-    self._adapter:register_io_observer()
 
     self._mods = {}
     self._mods_loaded = false
@@ -112,7 +119,6 @@ function ModManager:init()
     self._crashify_key_set = {}
     self._crashify_disabled = false
     self._crashify_unavailable_logged = false
-    self._version_invalid_logged = false
 
     self._kb_resolved = false
     self._kb_r = nil
@@ -195,26 +201,6 @@ function ModManager:_crashify_call(method_name, phase, ...)
     return true
 end
 
-function ModManager:_publish_version_property()
-    local relay = (_type(Mods) == "table") and _rawget(Mods, "_relay") or nil
-    if _type(relay) == "table" and relay.crashify_version_published == true then
-        return
-    end
-    local version = (_type(relay) == "table") and _rawget(relay, "version") or nil
-    if _type(version) ~= "string" or version == "" or #version > VERSION_MAX_BYTES
-       or _string_find(version, "%c") then
-        if not self._version_invalid_logged then
-            log_debug("Relay version crash metadata unavailable (missing or invalid private build value)")
-            self._version_invalid_logged = true
-        end
-        return
-    end
-    if self:_crashify_call("print_property", "version publication",
-                           "ModRelay:Version", version) then
-        relay.crashify_version_published = true
-    end
-end
-
 function ModManager:_prepare_crashify_generation(remove_old)
     self._crashify_disabled = false
     if remove_old then
@@ -227,9 +213,6 @@ function ModManager:_prepare_crashify_generation(remove_old)
         -- unavailable. Never carry old keys into the replacement set.
         self._crashify_keys = {}
         self._crashify_key_set = {}
-    end
-    if not self._crashify_disabled then
-        self:_publish_version_property()
     end
 end
 
@@ -739,7 +722,9 @@ function ModManager:_load_one(entry, reload_data)
     local shown = display_name(name)
     local mod_data = Mods.file.exec_with_return(name .. "/" .. name .. ".mod")
     if mod_data == false then
-        log_error("mod '" .. shown .. "' .mod missing or unreadable")
+        -- Safe exec already logged the accurate cause for an existing chunk
+        -- that failed to compile/raise; this line covers the rest.
+        log_error("mod '" .. shown .. "' .mod missing, unreadable, or failed to execute")
         return self:_fail_load_entry(entry, ".mod missing/unreadable")
     end
     local descriptor_ok, run_function = _pcall(function()
@@ -756,6 +741,11 @@ function ModManager:_load_one(entry, reload_data)
         log_warn("mod '" .. shown .. "' .mod invalid (no run function)")
         return self:_fail_load_entry(entry, ".mod invalid")
     end
+
+    -- DMF's DMFMod:init reads _mods[_mod_load_index].data (then .packages) during
+    -- construction — inside run() for user mods, during init for DMF itself — so
+    -- publish BEFORE run(); verbatim table, .packages validation is DMF-owned.
+    entry.data = mod_data
 
     self:_publish_mod_property(entry)
     local ok_run, object = _pcall(run_function)

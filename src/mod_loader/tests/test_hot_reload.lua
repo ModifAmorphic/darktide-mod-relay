@@ -79,14 +79,16 @@ return function(runner)
         sb.Managers.dmf = sb.Managers.dmf or { persistent_tables = { mods = {} } }
         sb.Mods = { file = {}, _relay = { version = "0.2.0" } }
         mock.attach_logger(sb)
+        -- The chassis (lifecycle.lua module scope) loads dmf_adapter exactly
+        -- once and publishes it on Mods._relay.dmf_adapter; mod_manager's init
+        -- reads it from there. Simulate that chassis load (the real wiring is
+        -- covered by test_lifecycle).
+        sb.Mods._relay.dmf_adapter = mock.run_module("dmf_adapter", sb)
         sb.Mods.require_store = {}
         sb.Crashify = {
             print_property = function() end,
             remove_print_property = function() end,
         }
-        sb.Mods.load_module = function(name)
-            return mock.run_module(name, sb)
-        end
         sb.Mods.file.add_observer = function() end
         -- class_registry owns the _G[class_name] retire surface (production
         -- loads it before dmf_adapter). Seed the contract so reload teardown
@@ -154,6 +156,10 @@ return function(runner)
 
     local function new_loaded(sb)
         local mm = load_driver(sb):new()
+        -- Chassis Step-1c built-in path: the manager's own adapter establishes
+        -- (Managers.mod publication + settings restore-if-nil). The real
+        -- chassis wiring is covered by test_lifecycle.
+        mm._adapter:establish()
         mm:update(0.016)
         return mm
     end
@@ -164,6 +170,7 @@ return function(runner)
     local function new_loaded_with_class(sb)
         local ModManager = load_driver(sb)
         local mm = ModManager:new()
+        mm._adapter:establish()
         mm:update(0.016)
         return mm, ModManager
     end
@@ -220,7 +227,8 @@ return function(runner)
 
     runner.register("hot_reload: request_reload requires done state", function()
         local sb = setup()
-        local mm = load_driver(sb):new()  -- init only; not yet loaded
+        local mm = load_driver(sb):new()
+        mm._adapter:establish()  -- chassis Step 1c (settings restored; not yet loaded)
         runner.assert_eq(false, mm._adapter:is_load_done())
         local ok, reason = mm:request_reload("test")
         runner.assert_eq(false, ok)
@@ -582,6 +590,26 @@ return function(runner)
         end
     end)
 
+    runner.register("hot_reload: entry.data is re-executed + re-published per generation", function()
+        -- The rescan rebuilds _mods fresh and _load_one re-executes each
+        -- descriptor, so each generation's entry carries its OWN descriptor
+        -- table (DMF reads .data during mod construction in run()).
+        local sb, state = setup()
+        local gen1 = mod_file("alpha", recording_mod("alpha", {}))
+        stage(state, { "alpha" }, { alpha = gen1 })
+        local mm = new_loaded(sb)
+        runner.assert_eq(gen1, mm._mods[1].data,
+            "generation 1 publishes its executed descriptor on the entry")
+        local gen2 = mod_file("alpha", recording_mod("alpha", {}))
+        stage(state, { "alpha" }, { alpha = gen2 })
+        mm:request_reload("test")
+        mm:update(0.016)  -- teardown (rescan rebuilds the entry tables)
+        mm:update(0.016)  -- replacement
+        runner.assert_eq(2, mm._generation)
+        runner.assert_eq(gen2, mm._mods[1].data,
+            "generation 2 carries the freshly executed descriptor table")
+    end)
+
     -- ---------------------------------------------------------------------
     -- Identity survival across THREE consecutive reload generations
     -- ---------------------------------------------------------------------
@@ -658,7 +686,6 @@ return function(runner)
         sb.Managers = { dmf = { persistent_tables = {} } }
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT, require_store = {} }
         mock.attach_logger(sb)
-        sb.Mods.load_module = function(n) return mock.run_module(n, sb) end
         -- class_registry owns the _G[class_name] retire surface (production
         -- loads it before dmf_adapter). Seed the contract so reload teardown
         -- routing through Mods.retire_class works.
@@ -680,6 +707,10 @@ return function(runner)
         files[mock.MOD_ROOT .. "/other.lua"] = "return 'other'"
         sb.Mods.lua.io = mock.make_io(files)
         sb.Mods.lua.loadstring = sb.loadstring
+        -- file.lua loads path.lua via Mods.load_module at its module top; wire
+        -- the generic source loader (dmf_adapter is NOT served through here —
+        -- the chassis loads it exactly once, simulated below).
+        sb.Mods.load_module = function(n) return mock.run_module(n, sb) end
 
         mock.run_module("file", sb)
         local observer_count = 0
@@ -689,10 +720,17 @@ return function(runner)
             real_add(fn)
         end
 
+        -- Simulate the chassis module-scope load (published on Mods._relay),
+        -- then load the real mod_manager.
+        sb.Mods._relay.dmf_adapter = mock.run_module("dmf_adapter", sb)
         mock.run_module("mod_manager", sb)
         local mm = registry.ModManager:new()
+        -- Chassis Step-1c built-in path: the manager's own adapter establishes
+        -- + registers the real observer (exactly one registering instance).
+        mm._adapter:establish()
+        mm._adapter:register_io_observer()
         mm:update(0.016)  -- initial load (empty mods.lst -> done, no mods)
-        runner.assert_eq(1, observer_count, "exactly one observer registered at init")
+        runner.assert_eq(1, observer_count, "exactly one observer registered at chassis establishment")
         runner.assert_nil(mm._adapter:adapted_dmfmod())
 
         -- Surface a synthetic DMFMod (mirrors DMF core/io.lua defining io_*).
