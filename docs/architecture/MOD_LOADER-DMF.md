@@ -114,7 +114,9 @@ Loading is split across two `ModManager` entry points:
   table up front. The order file is authoritative — the loader loads exactly the
   listed mods in the listed order and injects nothing (no framework assumption;
   DMF is a normal first entry in the order file). Each entry is shaped
-  `{ id, name, handle, state, object }`. A missing/empty `mods.lst` → empty
+  `{ id, name, handle, state, object }` at scan; the `data` field (the executed
+  `.mod` descriptor) joins per-entry during LOAD, not here. A missing/empty
+  `mods.lst` → empty
   `_mods` → no mod loads (graceful, no crash). **No mod is loaded here** —
   `init()` only scans. The `Managers.mod` publication, the `_settings`
   restore, and the IO observer registration are NOT here — they are
@@ -122,9 +124,11 @@ Loading is split across two `ModManager` entry points:
   [Chassis duties (Step 1c)](#chassis-duties-step-1c)).
 - **`ModManager:update(dt)`** — **LOAD on the first call**, then drive per-frame
   callbacks on every call. On the first call (`not self._mods_loaded`): run the
-  LOAD loop — for each entry, in order, ask the adapter to set the current load
-   index → validate the entry shape via the adapter → `exec_with_return` the
-   mod's `.mod` file → call its `run()` (pcall-guarded) → accept only nil
+   LOAD loop — for each entry, in order, ask the adapter to set the current load
+    index → validate the entry shape via the adapter → `exec_with_return` the
+    mod's `.mod` file → publish the executed descriptor table on the entry as
+    `entry.data` (before `run()` — see the shape contract below) → call its
+    `run()` (pcall-guarded) → accept only nil
    (DMF-driven side-effect registration) or a table (an outer object) → for a
    table, store it and call `object:init()` synchronously, **before the next
    mod loads** — then ask the adapter to clear the load index, set
@@ -169,8 +173,9 @@ writing/validating them.
 | Surface | Physical location | Owner / writer | Consumer | Transition semantics |
 | --- | --- | --- | --- | --- |
 | `Managers.mod` (the slot publication) | the engine `Managers` global | `lifecycle.lua` Step 1b instantiates; the adapter's `establish()` (chassis Step 1c, under any manager) publishes/re-asserts the same instance | DMF + mods (the manager handle); the lifecycle wraps read it per-call | Published as soon as the class instantiates; `establish()` re-asserts the identical instance. The chassis never re-instantiates or replaces an occupied slot (hot reload reloads mods through the existing manager). |
-| `_mods` (the collection + ordering + per-entry state/object) | `Managers.mod._mods` | `mod_manager.lua` (generic) | DMF reads `_mods[_mod_load_index].{id,name,handle}` during a mod's init; the outer drive/unload iterate it | Generic — owned by the manager, not the adapter. Built up front in SCAN, iterated in load order in LOAD, driven per-frame, unloaded in reverse. |
+| `_mods` (the collection + ordering + per-entry state/object) | `Managers.mod._mods` | `mod_manager.lua` (generic) | DMF reads `_mods[_mod_load_index].{id,name,handle,data}` during a mod's init; the outer drive/unload iterate it | Generic — owned by the manager, not the adapter. Built up front in SCAN, iterated in load order in LOAD, driven per-frame, unloaded in reverse. |
 | `_mods[*].id` / `.name` / `.handle` (the DMF-required entry shape) | on each `_mods` entry | `mod_manager.lua` writes them during SCAN; `dmf_adapter.lua` validates them at the load boundary | DMF (`dmf_mod_data.lua`) reads them during `DMFMod:init()` | Set once at scan; the adapter's `validate_entry` is a pure check at the load boundary — the manager decides what to do on failure (skip + log). |
+| `_mods[*].data` (the executed `.mod` descriptor table) | on each `_mods` entry | `mod_manager.lua` publishes it per-entry during LOAD — after the descriptor passes the run-function check, before `run()` is invoked; re-executed + republished per hot-reload generation | DMF (`dmf_mod_data.lua`) reads `.data` then `.data.packages` during `DMFMod:init()` (declared packages) | Published verbatim — the manager filters nothing. `packages` validation is DMF-owned (its package manager treats `nil` as a supported no-op and reports its own errors). Not part of the scan-time shape, so `validate_entry` does not check it; an entry whose descriptor never validated carries no `data`. |
 | `_mod_load_index` | `Managers.mod._mod_load_index` | `dmf_adapter.lua` via `begin_load_entry(idx)` / `end_load_pass()` | DMF (`dmf_mod_data.lua`) | `nil` initially. The manager asks the adapter to set it per-mod before each `run()`/`init()` and to clear it after the loop. `mod_manager.lua` never writes it directly. |
 | `_state` | `Managers.mod._state` | `dmf_adapter.lua` via `mark_load_done()` / `mark_load_pending()` | DMF (`dmf_loader.lua`) reads `_state == "done"` for its `all_mods_loaded` event | Remains `nil` until the manager decides the pass is complete and asks the adapter to publish `"done"`. `mark_load_pending()` resets it to `nil` at the start of a hot-reload teardown (the nil-before-done contract holds across reload too). `mod_manager.lua` never writes it directly. |
 | `_settings` (`developer_mode`, `log_level`) | `Managers.mod._settings` | `dmf_adapter.lua` via `establish()` — invoked by the chassis (lifecycle Step 1c) under any manager; restored from `Application.user_setting("mod_manager_settings")` at startup only when the manager left `_settings` nil, identity preserved | DMF (`dmf_options.lua`) for option registration; the adapter's `developer_mode_enabled()` is the reload gate; DML-lineage managers read `log_level` (unguarded — a missing value crashes their print path) | Restored once at startup: defensively pcall'd, validated as a table, identity + every unrelated field preserved. The persisted `mod_manager_settings` shape is ecosystem-visible (DML-lineage managers and DMF read and write it), so Relay both consumes and produces the full shape: `developer_mode` required boolean (corrected to `false` in place if missing/invalid) and `log_level` required number (corrected to `1` in place if missing/invalid). Falls back to `{ log_level = 1, developer_mode = false }` when `Application` is absent/throwing or the result is non-table. `establish()` never nils manager-owned load fields (`_state`/`_mod_load_index`). The adapter **never** calls `Application.set_user_setting` — official DMF owns persistence when its option changes. The same `_settings` table identity survives every hot-reload generation (reload never re-establishes). |
@@ -406,7 +411,7 @@ logic is the loader **logic**.
 | `Mods.require_store` | entry + `require_bridge` | per-path array of distinct table identities returned by the engine `require`; the wrapped `require` records them identity-deduped (enables DMF's `hook_require`) |
 | `Mods.lua.io` / `Mods.lua.loadstring` | entry + `file.lua` | the engine's real `io` / `loadstring` (captured before stripped). `io.open`/`io.lines` are wrapped by `file.lua` to root DMF's `./../mods/<rest>` convention at `_mod_root` (absolute paths pass through verbatim — see [Raw `Mods.lua.io` redirection](#raw-modsluaio-redirection)) |
 | `Mods.lua.os` / `Mods.lua.ffi` | entry | published for DMF's debug modules (`table_dump`, dev console). `os` is captured nil-safe (`or`). `ffi` is obtained via the pre-wrap engine module loader (`Mods.original_require("ffi")`) — `require("ffi")` creates no global in LuaJIT 2.1, so a global grab yields nil; acquisition is bootstrap-private (does not flow through the require bridge) and degrades to nil with one diagnostic if unavailable. See the [pinned FFI contract](../reference/darktide/darktide-binary.md#ffi-module-loading). |
-| `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table` — every op takes the path form `(path, args?)` **or** the join form: `(name, ext)` → `name.ext` and `(dir, name, ext[, args])` → `dir/name.ext` (a string second argument selects it; `ext` is bare — `"mod"`, not `".mod"`; components are validated as single path segments). The join form is the manager-slot convention (an alternate manager's `exec_with_return(folder, folder, "mod")`); the full manager-facing file contract is in `docs/reference/relay/manager-slot.md`. Plus the internal `add_observer` (used to adapt DMF IO) |
+| `Mods.file.*` | `file.lua` | mod-root-rooted file IO: `dofile`, `exec`/`exec_unsafe`, `exec_with_return`/`exec_unsafe_with_return`, `read_content`, `read_content_to_table` — every op takes the path form `(path, args?)` **or** the join form: `(name, ext)` → `name.ext` and `(dir, name, ext[, args])` → `dir/name.ext` (a string second argument selects it; `ext` is bare — `"mod"`, not `".mod"`; components are validated as single path segments). The join form is the manager-slot convention (an alternate manager's `exec_with_return(folder, folder, "mod")`); the full manager-facing file contract is in `docs/reference/relay/manager-slot.md`. Safe exec variants log one ERROR diagnostic when a chunk that exists fails to compile or raises at runtime; missing/unreadable files and path-resolution rejections stay silent (mods probe for optional files via safe ops returning `false`). Plus the internal `add_observer` (used to adapt DMF IO) |
 | `CLASS` | `class_registry.lua` | registry of every `class()` result, built by wrapping the engine's global `class` (engine state classes are never bare `_G` globals — this is the authoritative handle). Missing keys return the unresolved name as a **string sentinel** (`CLASS.InputService == "InputService"` before registration) so official DMF's `generic_hook` string/table validator accepts `dmf:hook_safe(CLASS.X, …)` issued before the class exists and queues it as a delayed hook; `rawget(CLASS, name)` still returns nil for unresolved classes so the lifecycle's readiness checks treat them as absent. Each registered class is also mirrored to `_G[name]` (rawget-guarded so explicit engine/DMF assignments are preserved) for mod compatibility — mods cache class globals like `_G.Promise` (the engine's `class("Promise")` in `scripts/foundation/utilities/promise.lua`); this module also owns the `_G[class_name]` clear via `retire_class(name)` (CLASS[name] is retained), so the adapter routes `DMFMod` retirement through it rather than writing `_G` directly; the unresolved-class sentinel never writes `_G` |
 | `__print` / `print` | entry | the engine's print, aliased as the global `__print` for loader/mod logging. When the Lua print tee is enabled (`--log-lua` / `RELAY_LOG_LUA=1`), entry also wraps both globals with the process-lifetime, non-stacking tee (see [Lua print tee](#lua-print-tee)) |
 
@@ -506,11 +511,11 @@ DMF reads exactly three fields off `Managers.mod` (grepped across
 
 | DMF read site | What it reads | When |
 | --- | --- | --- |
-| `dmf_mod_data.lua` | `Managers.mod._mods[Managers.mod._mod_load_index]` → `.id` / `.name` / `.handle` | synchronously, during `DMFMod:init()` — fired from a user mod's `run()` (via `new_mod`) and from DMF's own `init()` (via `create_mod("DMF")`) |
+| `dmf_mod_data.lua` | `Managers.mod._mods[Managers.mod._mod_load_index]` → `.id` / `.name` / `.handle` / `.data` (then `.data.packages`) | synchronously, during `DMFMod:init()` — fired from a user mod's `run()` (via `new_mod`) and from DMF's own `init()` (via `create_mod("DMF")`) |
 | `dmf_loader.lua` | `Managers.mod._state == "done"` | to fire DMF's `all_mods_loaded` event |
 | `dmf_options.lua` | `Managers.mod._settings.developer_mode` | option registration |
 
-Three consequences drive the loader's design:
+Four consequences drive the loader's design:
 
 - **Scan builds the full `_mods` table before any load.** DMF reads
   `_mods[_mod_load_index]` during a mod's own `init()`, and a user mod may also
@@ -522,6 +527,14 @@ Three consequences drive the loader's design:
   `DMFMod:init()` (fired synchronously inside `run()` for user mods, inside
   `object:init()` for DMF) reads the right `_mods` entry. It is cleared after
   the loop.
+- **The executed descriptor is published as `entry.data` *before* `run()`.**
+  `DMFMod:init()` also reads `_mods[_mod_load_index].data` (then `.packages`,
+  for the declared-packages feature) during construction — which happens inside
+  `run()` for user mods — so the manager assigns the freshly executed `.mod`
+  table to the entry after the run-function check and before invoking `run()`.
+  The table is published verbatim: `packages` validation is DMF-owned (nil is a
+  supported no-op; DMF reports its own errors). A hot reload re-executes every
+  descriptor and republishes per generation.
 - **`Managers.mod` is published before the first load tick.** DMF reads it
   synchronously during the LOAD loop, which runs in `update()`. The chassis
   publishes it during the bootstrap (Step 1b instantiates, Step 1c's

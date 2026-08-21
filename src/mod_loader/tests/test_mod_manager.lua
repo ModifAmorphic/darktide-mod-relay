@@ -726,4 +726,62 @@ return function(runner)
         runner.assert_eq("beta", mm._mods[2].name)
         runner.assert_eq("beta", mm._mods[2].handle)
     end)
+
+    runner.register("mod_manager: _mods[_mod_load_index].data is the descriptor table during run() (DMF expectation)", function()
+        -- DMF's DMFMod:init reads _mods[_mod_load_index].data (then .packages)
+        -- during mod construction, which happens synchronously inside run()
+        -- (new_mod) — so the manager must publish the executed descriptor on
+        -- the entry BEFORE invoking run().
+        local sb = setup({ order = { "usermod" } })
+        local seen = {}
+        local descriptor = {
+            packages = { "some/package" },
+            run = function()
+                local m = sb.Managers.mod
+                local entry = m._mods[m._mod_load_index]
+                seen.data = entry and entry.data
+                seen.packages = seen.data and seen.data.packages
+                -- DMF convention: side-effect registration, no return.
+            end,
+        }
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("usermod")] = descriptor })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq(descriptor, seen.data,
+            "entry.data must be the descriptor table itself, published before run()")
+        runner.assert_eq({ "some/package" }, seen.packages,
+            "a .packages field on the descriptor is visible via entry.data during run()")
+        runner.assert_eq("dmf_driven", mm._mods[1].state)
+    end)
+
+    runner.register("mod_manager: entry.data stays unpublished when the descriptor is invalid (no run)", function()
+        local sb = setup({ order = { "bad", "good" } })
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("bad")] = { packages = { "p" } },  -- table, but no run
+                [mod_path("good")] = mod_file("good", { init = function() end }),
+            })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq("failed", mm._mods[1].state)
+        runner.assert_nil(mm._mods[1].data,
+            "an entry whose descriptor never passed validation carries no .data")
+        runner.assert_truthy(mm._mods[2].data ~= nil,
+            "the valid sibling still publishes its descriptor")
+    end)
+
+    runner.register("mod_manager: a failed run leaves stale entry.data (deliberately not cleared)", function()
+        -- Nothing reads .data of a failed entry (_mod_load_index only points
+        -- at an entry during its own _load_one), so no clearing logic exists.
+        local sb = setup({ order = { "boom" } })
+        local descriptor = mod_file("boom", nil, nil, true)  -- run raises
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("boom")] = descriptor })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq("failed", mm._mods[1].state)
+        runner.assert_eq(descriptor, mm._mods[1].data,
+            "publication precedes run(); a failed run does not unwind it")
+    end)
 end

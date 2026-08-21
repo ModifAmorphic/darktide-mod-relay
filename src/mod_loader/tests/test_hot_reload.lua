@@ -590,6 +590,26 @@ return function(runner)
         end
     end)
 
+    runner.register("hot_reload: entry.data is re-executed + re-published per generation", function()
+        -- The rescan rebuilds _mods fresh and _load_one re-executes each
+        -- descriptor, so each generation's entry carries its OWN descriptor
+        -- table (DMF reads .data during mod construction in run()).
+        local sb, state = setup()
+        local gen1 = mod_file("alpha", recording_mod("alpha", {}))
+        stage(state, { "alpha" }, { alpha = gen1 })
+        local mm = new_loaded(sb)
+        runner.assert_eq(gen1, mm._mods[1].data,
+            "generation 1 publishes its executed descriptor on the entry")
+        local gen2 = mod_file("alpha", recording_mod("alpha", {}))
+        stage(state, { "alpha" }, { alpha = gen2 })
+        mm:request_reload("test")
+        mm:update(0.016)  -- teardown (rescan rebuilds the entry tables)
+        mm:update(0.016)  -- replacement
+        runner.assert_eq(2, mm._generation)
+        runner.assert_eq(gen2, mm._mods[1].data,
+            "generation 2 carries the freshly executed descriptor table")
+    end)
+
     -- ---------------------------------------------------------------------
     -- Identity survival across THREE consecutive reload generations
     -- ---------------------------------------------------------------------

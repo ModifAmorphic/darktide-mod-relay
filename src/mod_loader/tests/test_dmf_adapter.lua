@@ -623,6 +623,8 @@ return function(runner)
         sb.__print = function() end
         sb.Managers = {}
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        -- file.lua captures its leveled log_error at module scope.
+        mock.attach_logger(sb)
 
         local files = {}
         -- A synthetic chunk that, when executed, surfaces DMFMod with its io_*
@@ -1039,6 +1041,8 @@ return function(runner)
         sb.__print = function() end
         sb.Managers = {}
         sb.Mods = { lua = {}, _mod_root = mock.MOD_ROOT }
+        -- file.lua captures its leveled log_error at module scope.
+        mock.attach_logger(sb)
         -- class_registry owns the _G[class_name] retire surface (production
         -- loads it before dmf_adapter). Seed the contract so retire routes
         -- DMFMod through Mods.retire_class.
