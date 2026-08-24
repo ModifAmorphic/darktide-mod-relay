@@ -483,4 +483,157 @@ return function(runner)
         local ok = pcall(sb.Mods._relay.log_info, "anything")
         runner.assert_eq(true, ok, "log_info must not propagate a print-surface error")
     end)
+
+    -- -----------------------------------------------------------------
+    -- Trace diagnostics: the source-gated log_trace helper + frame_stamp
+    -- -----------------------------------------------------------------
+
+    -- Run the REAL entry with a (possibly absent) trampoline-baked
+    -- RELAY_LOG_LEVEL global — the trace gate's config seam, same pattern as
+    -- the other baked globals (see the RELAY_SKIP_SPLASH /
+    -- RELAY_MODS_IN_GAME_TREE tests above). Returns (sb, logged) with
+    -- bootstrap-time captures cleared.
+    local function run_init_trace(baked_level)
+        local logged = {}
+        local sb = mock.new_sandbox()
+        sb.MOD_LOADER_DIR = mock.MOD_LOADER_ROOT
+        sb.RELAY_MOD_PATH = mock.MOD_ROOT
+        if baked_level ~= nil then
+            sb.RELAY_LOG_LEVEL = baked_level
+        end
+        sb.require = function() return {} end
+        sb.print = function(m) logged[#logged + 1] = m end
+        sb.io = mock.make_io(mock.stage_mod_loader())
+        mock.load_module("init", sb)()
+        for i = #logged, 1, -1 do logged[i] = nil end
+        return sb, logged
+    end
+
+    runner.register("entry: publishes log_trace + frame_stamp + _tick_bump on Mods._relay", function()
+        local sb = run_init_trace(nil)
+        runner.assert_type("function", sb.Mods._relay.log_trace)
+        runner.assert_type("function", sb.Mods._relay.frame_stamp)
+        runner.assert_type("function", sb.Mods._relay._tick_bump)
+        runner.assert_eq(0, sb.Mods._relay._tick,
+            "the tick counter starts at 0 (injection epoch)")
+        runner.assert_eq(false, sb.Mods._relay._trace_enabled,
+            "no baked RELAY_LOG_LEVEL -> the private trace flag is false")
+        runner.assert_nil(sb.RELAY_LOG_LEVEL,
+            "the trampoline global must be retired (absent case)")
+    end)
+
+    runner.register("entry: log_trace is a no-op unless the gate is on (level filtering stays the shell's job)", function()
+        -- Off by default with the global absent.
+        local sb, logged = run_init_trace(nil)
+        sb.Mods._relay.log_trace("a trace message")
+        sb.Mods._relay.log_trace(42)
+        runner.assert_eq(0, #logged, "no baked global: log_trace prints nothing")
+        -- A baked non-trace level is NOT trace.
+        local sb2, logged2 = run_init_trace("debug")
+        sb2.Mods._relay.log_trace("a trace message")
+        runner.assert_eq(0, #logged2, "'debug' does not enable trace")
+        runner.assert_eq(false, sb2.Mods._relay._trace_enabled)
+        runner.assert_nil(sb2.RELAY_LOG_LEVEL, "the trampoline global must be retired")
+        -- The empty-string baked form (the C unset representation) is off too.
+        local sb3, logged3 = run_init_trace("")
+        sb3.Mods._relay.log_trace("a trace message")
+        runner.assert_eq(0, #logged3, "the empty-string baked form means unset -> off")
+        runner.assert_eq(false, sb3.Mods._relay._trace_enabled)
+        runner.assert_nil(sb3.RELAY_LOG_LEVEL)
+    end)
+
+    runner.register("entry: trace gate is case-insensitive ('trace' / 'TRACE') and stamps every line", function()
+        for _, value in ipairs({ "trace", "TRACE", "Trace" }) do
+            local sb, logged = run_init_trace(value)
+            runner.assert_eq(true, sb.Mods._relay._trace_enabled,
+                "'" .. value .. "' enables trace (case-insensitive, like the shell)")
+            runner.assert_nil(sb.RELAY_LOG_LEVEL,
+                "the trampoline global must be retired (enabled case)")
+            sb.Mods._relay.log_trace("a trace message")
+            runner.assert_eq(1, #logged, "exactly one line for one call")
+            runner.assert_eq("TRACE [mod_loader] a trace message tick=0 frame=?", logged[1],
+                "TRACE follows the community prefix shape + appends the combined tick/frame stamp")
+        end
+    end)
+
+    runner.register("entry: log_trace is total over bad input (safe_text) and never errors", function()
+        local sb = run_init_trace("trace")
+        local unprintable = setmetatable({}, { __tostring = function() error("boom") end })
+        local ok = pcall(function()
+            sb.Mods._relay.log_trace(nil)
+            sb.Mods._relay.log_trace(42)
+            sb.Mods._relay.log_trace({})
+            sb.Mods._relay.log_trace(unprintable)
+        end)
+        runner.assert_eq(true, ok, "non-string/unprintable messages must not raise")
+    end)
+
+    runner.register("entry: frame_stamp formats ' tick=N frame=M' (tick primary, frame secondary)", function()
+        local sb = run_init_trace(nil)
+        -- Pre-main.lua moment: FRAME_INDEX does not exist yet; tick 0 = injection.
+        runner.assert_eq(" tick=0 frame=?", sb.Mods._relay.frame_stamp(),
+            "no FRAME_INDEX yet (pre-main.lua) -> tick=0, frame '?'")
+        sb.FRAME_INDEX = -1  -- scripts/main.lua initializes it to -1 at load
+        runner.assert_eq(" tick=0 frame=-1", sb.Mods._relay.frame_stamp(),
+            "pre-first-update: tick still 0, the initial -1 renders")
+        -- Per engine update: tick +1 (observed boundaries), FRAME_INDEX +1.
+        sb.Mods._relay._tick_bump()
+        sb.FRAME_INDEX = 0
+        runner.assert_eq(" tick=1 frame=0", sb.Mods._relay.frame_stamp(),
+            "during/after the first observed update: tick=1 frame=0")
+        sb.Mods._relay._tick_bump()
+        sb.FRAME_INDEX = 1
+        runner.assert_eq(" tick=2 frame=1", sb.Mods._relay.frame_stamp())
+        sb.Mods._relay._tick_bump()
+        sb.FRAME_INDEX = 12345
+        runner.assert_eq(" tick=3 frame=12345", sb.Mods._relay.frame_stamp())
+        -- A non-number FRAME_INDEX degrades only the frame field.
+        sb.FRAME_INDEX = "not a number"
+        runner.assert_eq(" tick=3 frame=?", sb.Mods._relay.frame_stamp(),
+            "a non-number FRAME_INDEX degrades to '?' (tick unaffected)")
+        -- Contract shape: leading space, tick first (non-negative digits),
+        -- frame second (optional minus, digits, or '?').
+        sb.FRAME_INDEX = 7
+        local stamp = sb.Mods._relay.frame_stamp()
+        runner.assert_truthy(stamp:find("^ tick=%d+ frame=%-?%d+$") ~= nil,
+            "numeric stamps match '^ tick=%d+ frame=%-?%d+$'")
+    end)
+
+    runner.register("entry: _tick_bump increments monotonically and is total over corrupted state", function()
+        local sb = run_init_trace(nil)
+        for i = 1, 3 do
+            sb.Mods._relay._tick_bump()
+            runner.assert_eq(i, sb.Mods._relay._tick)
+        end
+        -- A corrupted counter (non-number / negative) never throws and
+        -- restarts from a sane value.
+        local ok = pcall(function()
+            sb.Mods._relay._tick = "bogus"
+            sb.Mods._relay._tick_bump()
+            runner.assert_eq(1, sb.Mods._relay._tick,
+                "a non-number counter resets to 0 then increments")
+            sb.Mods._relay._tick = -5
+            sb.Mods._relay._tick_bump()
+            runner.assert_eq(1, sb.Mods._relay._tick,
+                "a negative counter clamps to 0 then increments")
+        end)
+        runner.assert_eq(true, ok, "the bump must never throw")
+        -- frame_stamp renders a corrupted counter as tick=0, never throws.
+        sb.Mods._relay._tick = {}
+        local ok2, stamp = pcall(sb.Mods._relay.frame_stamp)
+        runner.assert_eq(true, ok2)
+        runner.assert_eq(" tick=0 frame=?", stamp)
+    end)
+
+    runner.register("entry: a malformed (non-string) baked global degrades to trace off (never a failure path)", function()
+        local sb, logged = run_init_trace({ bogus = true })  -- non-string baked value
+        runner.assert_eq(true, sb.Mods._loaded,
+            "the entry still succeeds with a malformed baked value")
+        runner.assert_eq(false, sb.Mods._relay._trace_enabled,
+            "a non-string baked value degrades to trace off")
+        runner.assert_nil(sb.RELAY_LOG_LEVEL,
+            "even a malformed trampoline global is retired")
+        sb.Mods._relay.log_trace("anything")
+        runner.assert_eq(0, #logged, "the gated helper stays silent")
+    end)
 end

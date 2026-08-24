@@ -12,13 +12,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The trampoline chunk template. The seven `%s` receive, in order: the escaped
+/* The trampoline chunk template. The eight `%s` receive, in order: the escaped
  * mod loader root, the escaped mod root (empty string when unset), the escaped
  * alternate-manager path (empty string when unset), the version assignment
  * value (a quoted escaped string or nil), the splash-skip token (literal "1"
  * or "", not escaped), the mods-in-game-tree token (literal "1" or "", not
- * escaped), and the escaped entry-file path — each becomes an
- * internal bootstrap global (see trampoline.h). Step order is
+ * escaped), the escaped log level (empty string when unset), and the escaped
+ * entry-file path — each becomes an internal bootstrap global (see
+ * trampoline.h). Step order is
  * io.open -> read -> loadstring -> run, guarded at each step except f:read, so
  * a read error is the one unguarded failure and surfaces as CHUNK PCALL FAILED
  * (caught by the outer pcall in trampoline_run). */
@@ -29,6 +30,7 @@ static const char TRAMPOLINE_CHUNK_FMT[] =
     "MOD_RELAY_VERSION = %s\n"
     "RELAY_SKIP_SPLASH = \"%s\"\n"
     "RELAY_MODS_IN_GAME_TREE = \"%s\"\n"
+    "RELAY_LOG_LEVEL = \"%s\"\n"
     "local f, err = io.open(\"%s\", \"r\")\n"
     "if not f then return \"FAIL io.open: \" .. tostring(err) end\n"
     "local data = f:read(\"*all\"); f:close()\n"
@@ -63,10 +65,11 @@ int trampoline_path_has_control(const char *s, size_t len) {
 }
 
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
-                           const char *mod_manager,
-                           const char *entry_path, const char *relay_version,
-                           int skip_splash, int mods_in_game_tree,
-                           char *out, size_t out_cap) {
+                            const char *mod_manager,
+                            const char *entry_path, const char *relay_version,
+                            int skip_splash, int mods_in_game_tree,
+                            const char *log_level,
+                            char *out, size_t out_cap) {
     if (!mod_loader_dir || !entry_path || !out || out_cap == 0) return -1;
     size_t loader_len = strlen(mod_loader_dir);
     size_t entry_len = strlen(entry_path);
@@ -143,10 +146,26 @@ int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
         }
     }
 
+    /* The log level is optional + VERBATIM: never canonicalized here — each
+     * consumer (the native filter, the loader's trace gate) applies its own
+     * matching. NULL/empty/overlong yields the empty-string global (the unset
+     * form every consumer treats as its default). The 16-char cap carries one
+     * char of deliberate slack over the shell's env read (level_buf[16]
+     * rejects lengths >= 16, so at most 15 chars ever reach the helper; the
+     * longest level name is 5). */
+    char esc_level[64];
+    esc_level[0] = '\0';
+    if (log_level && log_level[0] != '\0' && strlen(log_level) <= 16) {
+        int lln = trampoline_escape_path(log_level, strlen(log_level),
+                                         esc_level, sizeof(esc_level));
+        if (lln < 0) return -1;
+    }
+
     int n = snprintf(out, out_cap, TRAMPOLINE_CHUNK_FMT,
                      esc_loader, esc_mod, esc_mgr, version_value,
                      skip_splash ? "1" : "",
                      mods_in_game_tree ? "1" : "",
+                     esc_level,
                      esc_entry);
     if (n < 0 || (size_t)n >= out_cap) return -1;  /* encoding error or overflow */
     return n;

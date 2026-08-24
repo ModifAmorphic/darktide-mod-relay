@@ -147,6 +147,37 @@ return function(runner)
         return name .. "/" .. name .. ".mod"
     end
 
+    -- Find the first log line containing a substring (plain find); nil if absent.
+    local function find_log(logged, sub)
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find(sub, 1, true) then return line end
+        end
+        return nil
+    end
+
+    -- Count log lines containing a substring (plain find).
+    local function count_log(logged, sub)
+        local n = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find(sub, 1, true) then n = n + 1 end
+        end
+        return n
+    end
+
+    -- Count WARN/ERROR-level lines. A load pass emits low-volume DEBUG lines by
+    -- contract (scan summary, pass summary), so "no error" assertions must
+    -- filter by level rather than count all lines.
+    local function count_error_level(logged)
+        local n = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string"
+               and (line:find("^ERROR ", 1, false) or line:find("^WARN ", 1, false)) then
+                n = n + 1
+            end
+        end
+        return n
+    end
+
     -- ---------------------------------------------------------------------
     -- Class declaration
     -- ---------------------------------------------------------------------
@@ -321,7 +352,7 @@ return function(runner)
         runner.assert_nil(mm._mods[1].object, "boom's run failed -> no object")
         runner.assert_truthy(mm._mods[2].object ~= nil, "good still loads")
         runner.assert_eq(1, good_init)
-        runner.assert_truthy(logged[1]:find("mod 'boom' run failed") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'boom' run failed"))
     end)
 
     runner.register("mod_manager: run() returning nil is DMF-driven (not failure, not outer-driven)", function()
@@ -372,7 +403,7 @@ return function(runner)
         runner.assert_eq("done", mm._state)
         runner.assert_nil(mm._mods[1].object, "failed-init object must not be driven")
         runner.assert_truthy(mm._mods[2].object ~= nil, "good still loads")
-        runner.assert_truthy(logged[1]:find("mod 'boom' init failed") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'boom' init failed"))
         -- Driving update must not touch the failed-init mod's object.
         local droven = false
         -- (object is nil, so the update loop skips it by construction)
@@ -392,7 +423,7 @@ return function(runner)
         runner.assert_eq("done", mm._state)
         runner.assert_nil(mm._mods[1].object)
         runner.assert_truthy(mm._mods[2].object ~= nil)
-        runner.assert_truthy(logged[1]:find("mod 'ghost'") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'ghost'"))
     end)
 
     runner.register("mod_manager: .mod without run() logged + skipped", function()
@@ -405,7 +436,7 @@ return function(runner)
         local mm = new_loaded(sb)
         runner.assert_eq("done", mm._state)
         runner.assert_nil(mm._mods[1].object)
-        runner.assert_truthy(logged[1]:find("mod 'bad'") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'bad'"))
     end)
 
     runner.register("mod_manager: invalid DMF entry shape is skipped at the load boundary; load continues", function()
@@ -467,6 +498,119 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
+    -- Startup trace diagnostics (FRAME_INDEX-stamped load-pass events)
+    -- ---------------------------------------------------------------------
+
+    runner.register("mod_manager: successful scan emits the DEBUG scan summary", function()
+        local logged = {}
+        local sb = setup({ order = { "alpha", "beta" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        new_manager(sb)  -- scan runs in :new()
+        runner.assert_eq(1, count_log(logged, "scan: 2 entries from mods.lst"),
+            "exactly one scan summary naming the entry count")
+        -- An empty mods.lst still produces a sensible 0-entries line.
+        local logged2 = {}
+        local sb2 = setup({ order = {} })
+        sb2.__print = function(m) table.insert(logged2, m) end
+        local mm2 = load_driver(sb2):new()
+        mm2._adapter:establish()
+        runner.assert_eq(1, count_log(logged2, "scan: 0 entries from mods.lst"),
+            "empty mods.lst yields the 0-entries summary")
+    end)
+
+    runner.register("mod_manager: initial pass TRACE lines (begin, per-entry, summary) when trace on", function()
+        local logged = {}
+        local sb = setup({ order = { "dmfmod", "good" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = -1  -- engine initializes FRAME_INDEX to -1 in main.lua
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("dmfmod")] = { run = function() end },  -- nil result: DMF-driven
+                [mod_path("good")] = mod_file("good", { init = function() end }),
+            })[p]
+        end
+        new_loaded(sb)
+        runner.assert_eq(1, count_log(logged, "load pass begin (initial)"),
+            "one pass-begin line")
+        runner.assert_eq(1, count_log(logged, "load entry #1 'dmfmod'"), "entry 1 begin line")
+        runner.assert_eq(1, count_log(logged, "entry 'dmfmod' result=dmf_driven"),
+            "entry 1 outcome line (dmf_driven)")
+        runner.assert_eq(1, count_log(logged, "load entry #2 'good'"), "entry 2 begin line")
+        runner.assert_eq(1, count_log(logged, "entry 'good' result=running"),
+            "entry 2 outcome line (running)")
+        runner.assert_eq(1, count_log(logged, "initial load pass complete: 2 entries, 0 failed"),
+            "the completion summary names totals")
+        local begin_line = find_log(logged, "load pass begin (initial)")
+        runner.assert_truthy(begin_line:find("^TRACE %[mod_loader%] ") ~= nil,
+            "the begin line carries the TRACE community prefix")
+        runner.assert_truthy(begin_line:find(" frame=%-1$", 1, false) ~= nil,
+            "TRACE lines carry the FRAME_INDEX stamp (negative included)")
+    end)
+
+    runner.register("mod_manager: failure outcomes land in the entry outcome lines", function()
+        local logged = {}
+        local sb = setup({ order = { "boom", "good" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("boom")] = { run = function() error("run boom") end },
+                [mod_path("good")] = mod_file("good", { init = function() end }),
+            })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq(1, count_log(logged, "entry 'boom' result=failed"),
+            "a failed run reports result=failed")
+        runner.assert_eq(1, count_log(logged, "initial load pass complete: 2 entries, 1 failed"),
+            "the summary counts the failed entry")
+        runner.assert_eq("failed", mm._mods[1].state)
+    end)
+
+    runner.register("mod_manager: framework stop marks later entries result=skipped", function()
+        local logged = {}
+        local sb = setup({ order = { "dmf", "later" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("dmf")] = mod_file("dmf", recording_mod("dmf", {}, "init")),
+                [mod_path("later")] = mod_file("later", { init = function() end }),
+            })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq(1, count_log(logged, "entry 'dmf' result=disabled"),
+            "the framework-boundary entry reports result=disabled")
+        runner.assert_eq(1, count_log(logged, "entry 'later' result=skipped"),
+            "entries after a generation stop report result=skipped")
+    end)
+
+    runner.register("mod_manager: trace off — no TRACE lines, existing per-entry lines unchanged", function()
+        local logged = {}
+        local sb = setup({ order = { "dmfmod", "ghost" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods.file.exec_with_return = function(p)
+            if p == mod_path("ghost") then return false end  -- missing .mod
+            return ({ [mod_path("dmfmod")] = { run = function() end } })[p]
+        end
+        local mm = new_loaded(sb)
+        runner.assert_eq(0, count_log(logged, "TRACE "),
+            "trace off: zero TRACE-prefixed lines")
+        runner.assert_eq(0, count_log(logged, "load entry "),
+            "trace off: no per-entry begin lines")
+        runner.assert_eq(0, count_log(logged, "result="),
+            "trace off: no per-entry outcome lines")
+        -- The EXISTING per-entry diagnostics keep firing at their own levels.
+        runner.assert_eq(1, count_log(logged, "mod 'dmfmod' DMF-driven (run returned no object)"),
+            "the existing DMF-driven DEBUG line is unchanged")
+        runner.assert_eq(1, count_log(logged, "mod 'ghost' .mod missing, unreadable, or failed to execute"),
+            "the existing missing-.mod ERROR line is unchanged")
+        -- The low-volume DEBUG additions are present exactly once each.
+        runner.assert_eq(1, count_log(logged, "scan: 2 entries from mods.lst"))
+        runner.assert_eq(1, count_log(logged, "initial load pass complete: 2 entries, 1 failed"))
+    end)
+
+    -- ---------------------------------------------------------------------
     -- Per-frame drive
     -- ---------------------------------------------------------------------
 
@@ -501,7 +645,7 @@ return function(runner)
         end
         new_loaded(sb)
         runner.assert_eq(0.016, good_dt)
-        runner.assert_truthy(logged[1]:find("mod 'boom' update failed") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'boom' update failed"))
     end)
 
     runner.register("mod_manager: update skips mods without update() (no error)", function()
@@ -514,7 +658,8 @@ return function(runner)
         local mm = new_manager(sb)
         local ok, err = pcall(function() mm:update(0.016) end)
         runner.assert_eq(true, ok, tostring(err))
-        runner.assert_eq(0, #logged)
+        runner.assert_eq(0, count_error_level(logged),
+            "a clean load pass logs no WARN/ERROR lines")
     end)
 
     runner.register("mod_manager: on_game_state_changed forwards status+name+object; isolated", function()
@@ -540,7 +685,7 @@ return function(runner)
         local sobj = { _name = "StateIngame" }
         mm:on_game_state_changed("enter", "StateIngame", sobj)
         runner.assert_eq({ "enter", "StateIngame", sobj }, good_recv)
-        runner.assert_truthy(logged[1]:find("mod 'boom' on_game_state_changed failed") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'boom' on_game_state_changed failed"))
     end)
 
     runner.register("mod_manager: destroy() calls on_unload in reverse order; isolated", function()
@@ -565,7 +710,7 @@ return function(runner)
         mm:destroy()
         runner.assert_eq({ "alpha", "dmf" }, unloaded,
             "destroy() must call on_unload in reverse load order (beta failed)")
-        runner.assert_truthy(logged[1]:find("mod 'beta' on_unload failed") ~= nil)
+        runner.assert_not_nil(find_log(logged, "mod 'beta' on_unload failed"))
     end)
 
     runner.register("mod_manager: destroy() skips mods without on_unload", function()
@@ -584,7 +729,8 @@ return function(runner)
         local mm = new_loaded(sb)
         local ok, err = pcall(function() mm:destroy() end)
         runner.assert_eq(true, ok, tostring(err))
-        runner.assert_eq(0, #logged)
+        runner.assert_eq(0, count_error_level(logged),
+            "a clean load + destroy logs no WARN/ERROR lines")
         runner.assert_eq(true, unloaded)
     end)
 

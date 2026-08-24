@@ -5,16 +5,19 @@
 >
 > Documents the three components of the current Darktide modding
 > ecosystem: **dtkit-patch** (bundle database patcher),
-> **Darktide-Mod-Loader** (Lua runtime bridge), and
+> **Darktide-Mod-Loader** (Lua mod-loading runtime), and
 > **Darktide-Mod-Framework / DMF** (modding API). This is background
 > context for understanding what Mod Relay replaces and what it
-> preserves.
+> preserves. The Relay-side counterpart — the same stack shape with
+> Mod Relay in place of dtkit-patch and Darktide-Mod-Loader — is
+> [`../relay/relay-stack-analysis.md`](../relay/relay-stack-analysis.md).
 >
 > Loader facts are pinned to Darktide-Mod-Loader release
 > [`26.06.24`](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Loader/releases/tag/26.06.24)
 > (`4bd075a`). DMF consumer facts are pinned to
 > [`b9cc65f`](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Framework/tree/b9cc65f773cd8aaa974bf5b9312a79f5c5785f90).
-> Verification details are recorded in
+> Stock-game activation facts are pinned to the Darktide 1.12.5 extracted
+> scripts (`0f0cb459`). Verification details are recorded in
 > [`analysis-verification.md`](analysis-verification.md).
 
 ---
@@ -33,17 +36,19 @@
 
 ## Architecture Overview
 
-The Darktide modding ecosystem is a **three-layer system** that hooks into Warhammer 40,000: Darktide's native mod support (Fatshark's built-in `ModManager`):
+Current Darktide retains Stingray's native Steam/UGC mod machinery compiled into the binary, but current stock Lua startup does not drive it (see [Native mod substrate versus the active community path](#native-mod-substrate-versus-the-active-community-path) below). The community ecosystem is therefore a **three-layer system** that supplies its own loading path: dtkit-patch splices a patch layer onto the engine's boot bundle; the engine's normal bundle patch mechanism applies that layer at boot; the layer's trampoline loads DML's modified `main.lua`, which installs DML's own Lua mod manager; and that manager — not a stock game manager — discovers and executes community `.mod` descriptors:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  Darktide Game Engine                │
-│         (Fatshark's built-in ModManager)             │
+│         (Stingray bundle/resource system)            │
 │                                                      │
-│  Loads bundles listed in bundle_database.data        │
-│  Executes .mod entry points for each "mod"           │
+│  Reads bundle_database.data; applies patch layers    │
+│  Native Steam/UGC mod substrate compiled in —        │
+│  not driven by current stock Lua startup             │
 └──────────────────────┬──────────────────────────────┘
-                       │ patch_999 bundle entry
+                       │ patch_999 boot-bundle patch layer
+                       │ (trampoline opens ./mod_loader)
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │           Darktide-Mod-Loader (DML)                  │
@@ -55,7 +60,7 @@ The Darktide modding ecosystem is a **three-layer system** that hooks into Warha
 │  toggle_darktide_mods.bat → dtkit-patch wrapper      │
 │  tools/dtkit-patch.exe                               │
 └──────────────────────┬──────────────────────────────┘
-                       │ loads as first mod
+                       │ DML's ModManager loads DMF first
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │        Darktide-Mod-Framework (DMF)                  │
@@ -74,25 +79,47 @@ The Darktide modding ecosystem is a **three-layer system** that hooks into Warha
 └─────────────────────────────────────────────────────┘
 ```
 
+### Native mod substrate versus the active community path
+
+Current Darktide's native binary contains Stingray's compiled Steam/UGC mod
+machinery — binding-name evidence such as
+`stingray::steam::SteamUgcModManager`, `Mod`, `start_scan`, `is_scanning`,
+`mods`, `.mod`, and `.mod_bundle`. That is compiled **capability**: a
+substrate the engine retains. It is not **activation**: current stock Lua
+startup drives no such manager. The Darktide 1.12.5 extracted scripts
+contain no game-level `scripts/managers/mod/mod_manager.lua`, no
+`Managers.mod`, and no `Mod.start_scan` call, and stock `scripts/main.lua`
+bootstraps no mods. (An External-Test-era boot-state stub referencing a
+`scripts/managers/mod/mod_manager` exists in the early script history, but
+it is vestigial/inactive scaffolding, not evidence of a retail pipeline —
+details in [`analysis-verification.md`](analysis-verification.md).)
+
+The active community path therefore supplies its own layers: the engine's
+normal bundle patch mechanism applies the `patch_999` boot-bundle layer,
+the layer's trampoline opens `./mod_loader` (DML's modified `main.lua`),
+and DML's own Lua `ModManager` reads `mod_load_order.txt` and executes each
+`<mod>/<mod>.mod` descriptor through DML's filesystem `Mods.file` host.
+DML's entry never touches the native UGC scan path.
+
 ---
 
 ## Component: dtkit-patch
 
 ### Purpose
 
-A Rust CLI tool that **patches Darktide's `bundle_database.data`** to register a custom bundle entry (`9ba626afa44a3aa3.patch_999`). Without this patch, the game engine has no knowledge of the mod loader and does not load its mod code.
+A Rust CLI tool that **patches Darktide's `bundle_database.data`** to splice a community patch layer onto the engine's boot bundle (`9ba626afa44a3aa3.patch_999`, with its stream patch). This is a bundle-database patch-layer registration — not a mod registered with any manager. Without it, the engine applies no layer that bootstraps the mod loader, so no community mod code runs.
 
 ### How It Works
 
 1. **Locates the game** via Steam (app ID `1361210`) or Xbox Game Pass (Windows registry via `winreg` crate)
 2. **Searches** `bundle_database.data` for the 8-byte magic signature `0xA33A4AA4AF26A69B`
 3. **Creates a backup** as `bundle_database.data.bak`
-4. **Replaces** 84 bytes at the found offset with a 184-byte pre-built record (`patch.bin`) that registers:
-   - Bundle ID: `9ba626afa44a3aa3`
+4. **Replaces** 84 bytes at the found offset with a 184-byte pre-built record (`patch.bin`) that registers, for the boot bundle:
+   - Bundle ID: `9ba626afa44a3aa3` (the boot bundle)
    - Stream file: `9ba626afa44a3aa3.stream`
-   - **Patch entry**: `9ba626afa44a3aa3.patch_999` (the mod loader bundle)
+   - **Patch layer**: `9ba626afa44a3aa3.patch_999` (carries the mod-loader trampoline)
    - Stream patch: `9ba626afa44a3aa3.stream.patch_999`
-5. The `.patch_999` suffix ensures it loads **last** in the engine's bundle load order
+5. At boot, the engine's normal bundle/patch mechanism applies the registered patch layer for that bundle; the `.patch_999` suffix denotes a deliberately high patch position within that bundle's own patch-layer list — it is not a claim about global bundle load order across the database
 
 ### CLI Interface
 
@@ -124,7 +151,7 @@ Game updates or Steam file verification **revert the patch**, requiring users to
 
 ### Purpose
 
-The **bridge layer** between Darktide's native `ModManager` and user mods. It provides the foundational Lua runtime that replaces/augments game engine functions, and manages mod discovery and load ordering.
+DML supplies the **game-level Lua mod-loading and lifecycle layer** that current stock Darktide startup does not provide. It delivers the foundational Lua runtime that replaces/augments game engine functions; its own Lua `ModManager` owns mod discovery and load ordering. DML enters through the boot-bundle patch trampoline and bypasses the dormant native Steam/UGC scan path entirely.
 
 Repo: [/Darktide-Mod-Framework/Darktide-Mod-Loader](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Loader)
 
@@ -139,7 +166,7 @@ Darktide-Mod-Loader/
 ├── mods/
 │   ├── mod_load_order.txt             # User-edited text file listing mods by load order
 │   └── base/
-│       ├── mod_manager.lua            # Core ModManager class (Fatshark-style)
+│       ├── mod_manager.lua            # DML's own ModManager class (game-style)
 │       └── function/
 │           ├── class.lua              # Monkey-patches global `class()` to register in CLASS table
 │           ├── hook.lua               # Mods.hook API (function hooking chain system)
@@ -151,7 +178,7 @@ Darktide-Mod-Loader/
 
 ### Key: `mod_manager.lua`
 
-This is the **heart of the loader**. It implements a `ModManager` class that:
+This is the **heart of the loader**. It implements DML's own `ModManager` class — the game-level manager that current stock Darktide does not supply — that:
 
 1. **Scanning phase**: Reads `mod_load_order.txt`, prepends `dmf` to the list, builds an internal mod table
 2. **Loading phase**: Advances one listed mod per loading update, executes its
@@ -222,7 +249,7 @@ When installed into a game directory, the file layout is:
 ```
 <game_dir>/
 ├── binaries/mod_loader              # Modified main.lua (replaces game entry point)
-├── bundle/9ba626afa44a3aa3.patch_999 # Patch bundle (loaded by engine)
+├── bundle/9ba626afa44a3aa3.patch_999 # Boot-bundle patch layer (applied by the engine's patch mechanism)
 ├── tools/dtkit-patch.exe            # Patch tool
 ├── toggle_darktide_mods.bat         # Toggle script
 └── mods/
@@ -237,7 +264,7 @@ When installed into a game directory, the file layout is:
 
 ### Purpose
 
-A comprehensive **Lua modding framework** that sits on top of the Mod Loader and provides a rich API for mod authors. It is itself loaded as the first mod. It provides hook management, events, keybindings, options UI, chat commands, localization, package management, and network scaffolding.
+A comprehensive **Lua modding framework** that sits on top of the Mod Loader and provides a rich API for mod authors. It is itself loaded as the first mod by DML's `ModManager`. It provides hook management, events, keybindings, options UI, chat commands, localization, package management, and network scaffolding.
 
 Repo: [Darktide-Mod-Framework](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Framework)
 
@@ -350,13 +377,15 @@ behavior occurs even when `Mods.lua.ffi` is present.
 3. User launches Darktide
        │
        ▼
-4. Engine reads bundle_database.data, finds patch_999 entry
-       │
-       ▼
-5. Engine loads 9ba626afa44a3aa3.patch_999 bundle
-       │
-       ▼
-6. Bundle executes its trampoline script:
+4. Engine reads bundle_database.data during boot; the patched record adds
+   patch_999 as a patch layer on boot bundle 9ba626afa44a3aa3
+        │
+        ▼
+5. Engine's normal bundle/patch mechanism applies the
+   9ba626afa44a3aa3.patch_999 layer (no mod manager involved)
+        │
+        ▼
+6. The patch layer's trampoline script runs:
    → io.open("./mod_loader") → reads plain text from disk
    → loadstring(data)() → executes mod_loader (modified main.lua)
        │
@@ -367,10 +396,12 @@ behavior occurs even when `Mods.lua.ffi` is present.
    → Hooks StateRequireScripts, StateGame.update, GameStateMachine
        │
        ▼
-7. Loader's ModManager (mods/base/mod_manager.lua) takes over:
+7. DML's ModManager (mods/base/mod_manager.lua — the loader's own Lua
+   manager, not a stock game/native one) takes over:
    a. Reads mod_load_order.txt
    b. Prepends "dmf" to load order
-   c. For each mod: executes .mod file → runs init()
+   c. For each mod: executes its .mod descriptor through DML's Mods.file
+      host → runs init()
        │
        ▼
 8. DMF loads first (dmf.mod → dmf_loader.lua):
@@ -426,7 +457,7 @@ behavior occurs even when `Mods.lua.ffi` is present.
 | Darktide-Mod-Framework | Lua | Darktide engine | None (runs inside game) |
 | toggle_darktide_mods.bat | Batch | Windows cmd | dtkit-patch |
 
-The entire runtime mod system (Loader + Framework) is **pure Lua** executing inside Darktide's Lua VM. There is no native code at runtime — the only native component is `dtkit-patch` which runs as a standalone tool before the game launches.
+The community-supplied in-process mod system (Loader + Framework) is **pure Lua** executing inside Darktide's Lua VM — it adds no native runtime component of its own. It still runs on the native Stingray host, which retains the compiled (currently stock-undriven) mod substrate described above. The only community native component is `dtkit-patch`, which runs as a standalone tool before the game launches.
 
 ### How `mod_loader` Works (Critical Detail)
 
@@ -435,7 +466,7 @@ The `binaries/mod_loader` file is a modified copy of Darktide's own
 updated alongside game-main changes and adds the community loader surfaces and
 lifecycle integration described above.
 
-**The `patch_999` bundle does NOT contain compiled mod loader code.** Instead, the 524KB bundle contains only a tiny **trampoline script** that:
+**The `patch_999` bundle does NOT contain compiled mod loader code.** Instead, the 524KB bundle contributes a tiny **trampoline script** that:
 
 ```lua
 local file_name = "mod_loader"

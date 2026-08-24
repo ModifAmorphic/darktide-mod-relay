@@ -24,10 +24,12 @@ local _string_sub = string.sub
 
 -- Leveled diagnostics (init.lua publishes the helper on Mods._relay before this
 -- module loads). Pcall-guarded so diagnostics never become a second failure path.
+-- log_trace is source-gated (no-op unless --log-level trace / RELAY_LOG_LEVEL=trace).
 local log_info  = Mods._relay.log_info
 local log_debug = Mods._relay.log_debug
 local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
+local log_trace = Mods._relay.log_trace
 
 local ModManager = class("ModManager")
 
@@ -143,6 +145,7 @@ function ModManager:_scan_mods()
                 object = nil,
             }
         end
+        log_debug("scan: " .. #order .. " entries from mods.lst")
         return true
     end
     log_warn("mods.lst missing or unreadable; no mods will load")
@@ -513,6 +516,7 @@ function ModManager:update(dt)
         self._generation_failed = false
         self._stop_load_pass = false
         self._generation_globals_retired = false
+        log_trace("load pass begin (reload, generation " .. target_generation .. ")")
 
         local load_ok, load_result = _pcall(function()
             return self:_load_all(reload_data)
@@ -550,6 +554,7 @@ function ModManager:update(dt)
         self._stop_load_pass = false
         self._generation_globals_retired = false
         self:_prepare_crashify_generation(false)
+        log_trace("load pass begin (initial)")
         local load_ok, load_result = _pcall(function()
             return self:_load_all(nil)
         end)
@@ -557,6 +562,7 @@ function ModManager:update(dt)
         self._load_target_generation = nil
         self._generation = 1
         self._adapter:mark_load_done()
+        self:_log_load_pass_summary()
         if not load_ok then
             log_error("initial mod load pass error: " .. safe_text(load_result)
                 .. "; initial generation finalized with errors")
@@ -682,16 +688,42 @@ function ModManager:_begin_reload()
     self._reload_in_progress = true
 end
 
+-- One low-volume DEBUG summary line after the INITIAL load pass finalizes,
+-- computed from the entry states ("failed" and "disabled" both count as
+-- failed; a missing/empty mods.lst yields a sensible "0 entries" line here).
+function ModManager:_log_load_pass_summary()
+    local total = #self._mods
+    local failed = 0
+    for _, entry in _ipairs(self._mods) do
+        local state = entry.state
+        if state == "failed" or state == "disabled" then
+            failed = failed + 1
+        end
+    end
+    log_debug("initial load pass complete: " .. total .. " entries, " .. failed .. " failed")
+end
+
 function ModManager:_load_all(reload_data)
     local had_errors = false
     for idx, entry in _ipairs(self._mods) do
         if self._stop_load_pass then
-            if entry.state == "not_loaded" then entry.state = "skipped" end
+            if entry.state == "not_loaded" then
+                entry.state = "skipped"
+            end
+            -- The framework-failure rebuild may have pre-marked later entries
+            -- skipped; either way, each non-loaded entry reports once.
+            if entry.state == "skipped" then
+                log_trace("entry '" .. display_name(entry.name) .. "' result=skipped")
+            end
         else
             self._adapter:begin_load_entry(idx)
+            log_trace("load entry #" .. safe_text(entry.id) .. " '"
+                .. display_name(entry.name) .. "'")
             if not self:_load_one(entry, reload_data) then
                 had_errors = true
             end
+            log_trace("entry '" .. display_name(entry.name)
+                .. "' result=" .. safe_text(entry.state))
             self:_drain_cleanup(false)
             if self._generation_failed then
                 self:_drain_cleanup(false)

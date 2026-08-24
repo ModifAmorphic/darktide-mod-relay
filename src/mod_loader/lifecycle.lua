@@ -23,11 +23,20 @@ local _type = type
 local _string_find = string.find
 
 -- Leveled diagnostics (init.lua publishes the helper on Mods._relay before this
--- module loads).
+-- module loads). frame_stamp appends the combined tick/frame correlation stamp
+-- to the state-dispatch lines (tick = loader-relative engine updates since
+-- injection, primary; FRAME_INDEX secondary — see
+-- docs/reference/relay/logging.md); _tick_bump advances the counter at each
+-- observed engine update boundary. display_text safely renders the
+-- interpolated state names (pcall'd, scrubbed, capped — a raising __tostring
+-- can never throw out of a dispatch line).
 local log_info  = Mods._relay.log_info
 local log_debug = Mods._relay.log_debug
 local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
+local frame_stamp = Mods._relay.frame_stamp
+local display_text = Mods._relay.display_text
+local _tick_bump = Mods._relay._tick_bump
 
 -- ---------------------------------------------------------------------------
 -- Throttled containment-error logging for the five chassis containment sites
@@ -243,6 +252,9 @@ local bs = {
     -- destroy step (final state-exit dispatch before destruction)
     destroy_wrapped = false,
     destroy_missing_logged = false,
+    -- tick-driver step (CLASS.StateBoot.update wrap, installed by the
+    -- coordinator the moment the class appears — see coordinate_bootstrap)
+    tick_boot_wrapped = false,
     -- splash-skip step (opt-in; only attempted when _skip_splash_enabled)
     splash_wrapped = false,
     splash_missing_logged = false,
@@ -404,6 +416,7 @@ local function advance_bootstrap()
             end
             if Managers and Managers.mod then
                 bs.manager_created = true
+                log_debug("bootstrap: manager created")
             end
         else
             Managers = Managers or {}
@@ -411,6 +424,7 @@ local function advance_bootstrap()
                 Managers.mod = bs.manager_class:new()
             end
             bs.manager_created = true
+            log_debug("bootstrap: manager created")
         end
     end
 
@@ -449,11 +463,17 @@ local function advance_bootstrap()
     -- Step 2: wrap CLASS.StateGame.update so Managers.mod:update(dt) runs BEFORE
     --    the engine update (mods see pre-frame state). Reads Managers.mod at
     --    call time, so installing before the manager exists is harmless.
+    --    This wrap is also the post-boot half of the tick observation chain:
+    --    the entry bump (the Main.update boundary) continues the count the
+    --    StateBoot.update wrap started — the GSM runs exactly one
+    --    current-state update per engine update, so the two wraps never both
+    --    fire in one update (no double increment).
     if not bs.state_game_wrapped then
         local sg = CLASS and _rawget(CLASS, "StateGame")
         if sg and _type(sg.update) == "function" then
             local orig_update = sg.update
             sg.update = function(self, dt, ...)
+                _tick_bump()
                 local m = Managers and Managers.mod
                 if m then
                     -- Opportunistic version-publication retry (cheap flag
@@ -470,6 +490,7 @@ local function advance_bootstrap()
                 return orig_update(self, dt, ...)
             end
             bs.state_game_wrapped = true
+            log_debug("bootstrap: StateGame.update wrapped")
         else
             if not bs.state_game_missing_logged then
                 log_debug("bootstrap: CLASS.StateGame.update not yet available; will retry")
@@ -503,6 +524,8 @@ local function advance_bootstrap()
                     end)
                     if not ok then
                         log_contained_error("state exit drive failed: ", err)
+                    else
+                        log_debug("state exit: " .. display_text(old_name) .. frame_stamp())
                     end
                 end
                 -- Call the original exactly once with unchanged self/varargs.
@@ -517,11 +540,14 @@ local function advance_bootstrap()
                     end)
                     if not ok then
                         log_contained_error("state enter drive failed: ", err)
+                    else
+                        log_debug("state enter: " .. display_text(new_name) .. frame_stamp())
                     end
                 end
                 return _unpack(results, 1, results.n)
             end
             bs.change_state_wrapped = true
+            log_debug("bootstrap: GameStateMachine._change_state wrapped")
         else
             if not bs.change_state_missing_logged then
                 log_debug("bootstrap: CLASS.GameStateMachine._change_state not yet available; will retry")
@@ -556,6 +582,8 @@ local function advance_bootstrap()
                     end)
                     if not ok then
                         log_contained_error("final state exit drive failed: ", err)
+                    else
+                        log_debug("state exit (final): " .. display_text(cur_name) .. frame_stamp())
                     end
                 end
                 -- Original runs exactly once with unchanged self/varargs. Its
@@ -564,6 +592,7 @@ local function advance_bootstrap()
                 return _unpack(results, 1, results.n)
             end
             bs.destroy_wrapped = true
+            log_debug("bootstrap: GameStateMachine.destroy wrapped")
         else
             if not bs.destroy_missing_logged then
                 log_debug("bootstrap: CLASS.GameStateMachine.destroy not yet available; will retry")
@@ -609,6 +638,7 @@ local function advance_bootstrap()
                 return orig_on_enter(self, parent, params, creation_context)
             end
             bs.splash_wrapped = true
+            log_debug("bootstrap: StateSplash.on_enter wrapped")
         else
             if not bs.splash_missing_logged then
                 log_debug("bootstrap: CLASS.StateSplash.on_enter not yet available; will retry")
@@ -659,6 +689,29 @@ local function coordinate_bootstrap()
                 return _unpack(results, 1, results.n)
             end
             bs.boot_wrapped = true
+        end
+    end
+
+    -- 3. Wrap CLASS.StateBoot.update as the tick driver: it runs exactly once
+    --    per engine update for the WHOLE boot phase (the boot sub-states,
+    --    including BootStateRequireGameScripts, nest inside it), so tick
+    --    observation starts at the first engine update after injection. The
+    --    coordinator fires after every require during main.lua's initial
+    --    loads (pre-first-update), so the wrap is in place before Main.update
+    --    #1. The bump runs at wrap ENTRY — the Main.update boundary where the
+    --    engine increments FRAME_INDEX; original results/errors pass through
+    --    unchanged (errors propagate, return-cardinality preserved).
+    if not bs.tick_boot_wrapped and CLASS then
+        local sbt = _rawget(CLASS, "StateBoot")
+        if sbt and _type(sbt.update) == "function" then
+            local orig_boot_update = sbt.update
+            sbt.update = function(self, ...)
+                _tick_bump()
+                local results = _pack(orig_boot_update(self, ...))
+                return _unpack(results, 1, results.n)
+            end
+            bs.tick_boot_wrapped = true
+            log_debug("bootstrap: StateBoot.update wrapped")
         end
     end
 end
