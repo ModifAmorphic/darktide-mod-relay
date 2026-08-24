@@ -4,7 +4,8 @@
 > [`darktide-framework-analysis.md`](darktide-framework-analysis.md).
 >
 > The reference is checked against a live installed toolchain, current upstream
-> loader/framework revisions, and the game install. Version-specific facts are
+> loader/framework revisions, the game install, and the game binary plus
+> extracted script history. Version-specific facts are
 > pinned below rather than presented as timeless API guarantees.
 
 ## Evidence baselines
@@ -16,6 +17,8 @@
 | Darktide-Mod-Framework | Commit [`b9cc65f`](https://github.com/Darktide-Mod-Framework/Darktide-Mod-Framework/tree/b9cc65f773cd8aaa974bf5b9312a79f5c5785f90) |
 | Installed legacy loader snapshot | `binaries/mod_loader` at 14,542 bytes / 549 lines, used to verify the original physical-install and trampoline claims |
 | Game install | Darktide app ID `1361210`, patched and backup bundle databases, installed patch bundle |
+| Darktide native binary | Current installed `Darktide.exe`; static string/binding-name inspection |
+| Darktide extracted scripts | [`Aussiemon/Darktide-Source-Code`](https://github.com/Aussiemon/Darktide-Source-Code) mirror at 1.12.5 commit [`0f0cb459`](https://github.com/Aussiemon/Darktide-Source-Code/tree/0f0cb45991e9305ef4a7b925370792d7d6035f95); early External-Test commit `d5b66e94` and 1.0.40 removal commit `4cd2fae4` |
 
 ## dtkit-patch
 
@@ -113,6 +116,46 @@ The bundle remains Oodle-compressed. The string evidence establishes the file
 path, loadstring handoff, and diagnostics; it does not establish a byte-for-byte
 rendering of the compressed script's complete control flow.
 
+## Native mod substrate versus current stock activation
+
+The reference's capability-versus-activation distinction is verified against
+the game binary and the extracted script mirror:
+
+- The current installed `Darktide.exe` contains Stingray mod
+  machinery/binding-name strings — `stingray::steam::SteamUgcModManager`,
+  `Mod`, `start_scan`, `is_scanning`, `mods`, `.mod`, `.mod_bundle`,
+  `resource_package`, `release_resource_package`, and UGC-mod diagnostics.
+  This establishes compiled native capability (the substrate the engine
+  carries); it does not establish that current stock Lua drives it.
+- The Darktide 1.12.5 extracted scripts
+  (`0f0cb45991e9305ef4a7b925370792d7d6035f95`) contain no
+  `scripts/managers/mod/mod_manager.lua`, no `Managers.mod`, and no call to
+  `Mod.start_scan`; stock `scripts/main.lua` does not bootstrap mods.
+- The earliest External-Test source commit `d5b66e94` includes
+  `scripts/game_states/boot/state_load_mods.lua`, which would require
+  `scripts/managers/mod/mod_manager` and assign `Managers.mod`. The
+  referenced manager is absent from the extracted history and
+  `StateBootLoadMods` is not present in the explicit `Main` boot-state list,
+  so the stub is recorded as vestigial/inactive scaffolding — not proof of
+  an active retail pipeline. The stub and its `main.lua` require were
+  deleted in 1.0.40 commit `4cd2fae4`.
+
+Community `.mod` discovery/execution is therefore attributed to DML's own
+manager, on DML's own evidence:
+
+- DML `binaries/mod_loader` (`4bd075adf47aedaabacd114a668d45789ecd9f85`)
+  states, in its own comments, `The mod manager isn't in the bundles, so
+  load our version from the mods folder`, then executes `base/mod_manager`.
+- `mods/base/mod_manager.lua` reads `mod_load_order.txt` and executes each
+  `<mod>/<mod>.mod` through DML's filesystem `Mods.file` host.
+- The entry path needs no native UGC scan: the dtkit-patch source
+  identifies `9ba626afa44a3aa3` as the boot bundle and splices
+  `9ba626afa44a3aa3.patch_999` (plus the stream patch) into
+  `bundle_database.data` as a patch layer; the installed patch bundle
+  carries the trampoline that opens `./mod_loader` (see
+  [Patch-bundle trampoline](#patch-bundle-trampoline)); and
+  `binaries/mod_loader` is a complete modified `scripts/main.lua`.
+
 ## Direct community-use references
 
 - [`Alfs_DMF_Extensions` reload integration](https://github.com/deathbeam/darktide-mods-mine/blob/9e59327fb16297f6d70f014a2577965428ef7cff/mods/Alfs_DMF_Extensions/scripts/mods/Alfs_DMF_Extensions/modules/mod_reload_keybind.lua)
@@ -124,8 +167,15 @@ rendering of the compressed script's complete control flow.
 
 ## Verification limits
 
-- The exact compressed trampoline body is not decompressed; its distinctive
+- The exact compressed trampoline body is not decompressed and no
+  byte-for-byte bundle-resource mapping was verified; its distinctive
   strings and the runtime file handoff are verified.
+- Static binary string/binding-name evidence is not a live Lua availability
+  probe: no live `type(Mod)` probe was run, so whether the native global
+  `Mod` remains callable in the current live Lua VM is unverified.
+- The Aussiemon repository is an extracted/decompiled script mirror, not
+  Fatshark's official complete native source; absences in it evidence the
+  shipped/extracted script set, not Fatshark's internal tree.
 - The initial game-update patch-reversion observation is ecosystem behavior,
   not a mutation test performed during this audit.
 - Public source snapshots demonstrate specific consumers, not every mod in the
@@ -134,6 +184,7 @@ rendering of the compressed script's complete control flow.
 ## Method
 
 Evidence comes from direct file reads, repository history/source inspection,
-the installed game/toolchain layout, file-size and line-count checks, and string
-inspection of the patch bundle. No game process was launched for the static
-verification pass.
+the installed game/toolchain layout, file-size and line-count checks, string
+inspection of the patch bundle, static string inspection of the installed game
+executable, and inspection of the extracted Darktide script mirror and its
+history. No game process was launched for the static verification pass.
