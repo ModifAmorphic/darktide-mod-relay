@@ -1573,12 +1573,18 @@ return function(runner)
             "exactly one io observer registered (chassis used the manager's adapter)")
 
         -- The version property published once at creation, BEFORE any per-mod
-        -- key from the load pass (which runs on the first StateGame tick).
-        sg.update(sg, 0.016)
+        -- key from the load pass. The pass is phased (anchor tick, then one
+        -- entry per tick), so drive StateGame.update until the manager done.
+        local sg_ticks = 0
+        repeat
+            sg.update(sg, 0.016)
+            sg_ticks = sg_ticks + 1
+        until mm._state == "done" or sg_ticks > 100
+        runner.assert_eq("done", mm._state, "the real manager completed its load pass")
+        runner.assert_eq(2, sg_ticks, "1-entry phased pass: anchor tick + entry tick")
         runner.assert_eq({ { "ModRelay:Version", "0.4.0-test" },
                            { "Mod:some_dmf_mod", true } }, crash_calls,
             "version precedes per-mod keys; one of each")
-        runner.assert_eq("done", mm._state, "the real manager completed its load pass")
 
         -- Later ticks (boot + update) register/publish nothing further.
         bsr._state_update(bsr)

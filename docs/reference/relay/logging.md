@@ -174,7 +174,15 @@ TRACE is the one deliberate exception, plus one correlation convention:
   log nothing); class retirement: one DEBUG per `retire_class` (rare).
   Load passes: one DEBUG scan summary per scan, one DEBUG initial-pass
   completion summary, and — trace only — a pass-begin line (`(initial)`, or
-  `(reload, generation N)`) plus a begin/outcome line pair per entry. Bootstrap
+  `(reload, generation N)`; the begin line lands on the pass's first manager
+  tick — the phase-0 anchor, which loads no entries), a begin/outcome line
+  pair per entry (each entry's pair lands on its own load tick — the pass
+  advances one entry per manager tick), and a pass-end line
+  (`load pass end (initial, generation G)` or
+  `load pass end (reload, generation G)`, emitted on the tick the pass
+  finalizes — the same tick as the DEBUG initial-pass completion summary for
+  an initial pass, or the hot-reload completion INFO/WARN for a replacement
+  replay; `G` is the generation the pass installed). Bootstrap
   landings: one DEBUG line the first time each wrapped step lands (manager
   created, the `StateBoot.update` tick driver, `StateGame.update`,
   `GameStateMachine._change_state` / `.destroy`, and the opt-in StateSplash

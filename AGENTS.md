@@ -134,13 +134,17 @@ src/                Mod Relay — the injected modding runtime + injector
                        success) — the manager-facing contract is normative in
                        docs/reference/relay/manager-slot.md;
                        mod_manager.lua is the generic
-                       scan/load/lifecycle driver (the built-in manager) + the
+                       scan/load/lifecycle driver (the built-in manager;
+                       phased initial load — exactly one mods.lst entry per
+                       manager tick from the phase-0 anchor, community
+                       pacing, updates interleaved with the pass) + the
                        hot-reload state machine
                       (request_reload seam, _check_reload trigger-detection seam
                       for the community reload-control contract (detection only,
                       dynamic dispatch so a community replacement can suppress or
                       redirect the built-in gesture), LEFT Ctrl+Shift+R keyboard
-                      trigger, two-frame teardown/replacement sequencing,
+                      trigger, teardown frame + one-entry-per-tick
+                      replacement replay,
                        reload-data association keyed by name, nil/table-only
                        run-result validation, unconditional load finalization,
                        generation-aware per-mod Crashify metadata (`Mod:<name>`;

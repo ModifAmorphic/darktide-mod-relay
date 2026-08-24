@@ -122,31 +122,47 @@ Loading is split across two `ModManager` entry points:
   restore, and the IO observer registration are NOT here — they are
   manager-agnostic chassis duties (Step 1c, see
   [Chassis duties (Step 1c)](#chassis-duties-step-1c)).
-- **`ModManager:update(dt)`** — **LOAD on the first call**, then drive per-frame
-  callbacks on every call. On the first call (`not self._mods_loaded`): run the
-   LOAD loop — for each entry, in order, ask the adapter to set the current load
-    index → validate the entry shape via the adapter → `exec_with_return` the
-    mod's `.mod` file → publish the executed descriptor table on the entry as
-    `entry.data` (before `run()` — see the shape contract below) → call its
-    `run()` (pcall-guarded) → accept only nil
-   (DMF-driven side-effect registration) or a table (an outer object) → for a
-   table, store it and call `object:init()` synchronously, **before the next
-   mod loads** — then ask the adapter to clear the load index, set
-  `_mods_loaded = true`, and ask the adapter to publish `_state = "done"`. On
-  every call (including the first, after the load): poll the reload shortcut,
-  drive the reload state machine (if a request is pending or a replacement is
-  due — see [Hot reload](#hot-reload)), and pump each loaded mod's `update(dt)`.
+- **`ModManager:update(dt)`** — **BEGIN the load pass on the first call, then
+  advance it one entry per call**, driving per-frame callbacks on every call.
+  The first call is the **phase-0 anchor**: it sets the loader-internal
+  `_mods_loaded` flag (an anchor guard — it flips true here, before any entry
+  loads, so the initial pass begins exactly once) and runs pass bookkeeping
+  only (the pass bracket, Crashify generation prep; the scan ran earlier, at
+  manager creation). Each later call runs at most one load step, in `mods.lst`
+  order (entry i on the i-th tick after the anchor — the community loader's
+  pacing): ask the adapter to set the current load index → validate the entry
+  shape via the adapter → `exec_with_return` the mod's `.mod` file → publish
+  the executed descriptor table on the entry as `entry.data` (before `run()` —
+  see the shape contract below) → call its `run()` (pcall-guarded) → accept
+  only nil (DMF-driven side-effect registration) or a table (an outer object) →
+  for a table, store it and call `object:init()` synchronously, **before any
+  later entry loads**. A failed or invalid entry burns its tick — the cadence
+  stays tick-aligned, so a mod's phase is always its list position. On the
+  last entry's tick the pass finalizes: ask the adapter to clear the load
+  index (once, at finalize — it persists between entry ticks) and publish
+  `_state = "done"`. On every call (after the load step, if any): poll the
+  reload shortcut, drive the reload state
+  machine (if a request is pending or a replacement is due — see
+  [Hot reload](#hot-reload)), and pump `update(dt)` for every outer object
+  loaded so far — an outer mod's first `update` lands on its own load tick,
+  and already-loaded mods keep updating while later entries still load. The
+  full phase contract (anchor, per-tick ordering, failure and replay
+  semantics) is normative in
+  [`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md).
 
-That per-mod run+init ordering (inside the LOAD loop) is what makes DMF's
-`init()` define `new_mod`/`get_mod` before any user mod's `run()` runs.
+That per-mod run+init ordering (each entry's `init()` completes inside its
+own tick, before any later entry's `run()`) is what makes DMF's `init()`
+define `new_mod`/`get_mod` before any user mod's `run()` runs.
 
 `_state` is DMF's contract field (DMF reads `_state == "done"`). It remains
 `nil` before the load completes; the manager decides when the pass is complete
 and asks the adapter to publish `_state = "done"` — exactly once, after the
 pass (including the empty/all-failed cases). DMF does not read any other value;
-nil-before-done is the contract. The loader's own "have I loaded?" flag is the
+nil-before-done is the contract. The loader's own anchor guard is the
 **separate** instance field `_mods_loaded` (loader-internal; DMF never reads
-it). Clean separation: `_state` = DMF's, written via the adapter on the
+it) — set on the first manager tick, at pass begin, so the initial pass is
+anchored exactly once rather than when loading completes. Clean separation:
+`_state` = DMF's, written via the adapter on the
 manager's request; `_mods_loaded` = the loader's.
 
 Initial and replacement load attempts share the same unconditional-finalization
@@ -176,7 +192,7 @@ writing/validating them.
 | `_mods` (the collection + ordering + per-entry state/object) | `Managers.mod._mods` | `mod_manager.lua` (generic) | DMF reads `_mods[_mod_load_index].{id,name,handle,data}` during a mod's init; the outer drive/unload iterate it | Generic — owned by the manager, not the adapter. Built up front in SCAN, iterated in load order in LOAD, driven per-frame, unloaded in reverse. |
 | `_mods[*].id` / `.name` / `.handle` (the DMF-required entry shape) | on each `_mods` entry | `mod_manager.lua` writes them during SCAN; `dmf_adapter.lua` validates them at the load boundary | DMF (`dmf_mod_data.lua`) reads them during `DMFMod:init()` | Set once at scan; the adapter's `validate_entry` is a pure check at the load boundary — the manager decides what to do on failure (skip + log). |
 | `_mods[*].data` (the executed `.mod` descriptor table) | on each `_mods` entry | `mod_manager.lua` publishes it per-entry during LOAD — after the descriptor passes the run-function check, before `run()` is invoked; re-executed + republished per hot-reload generation | DMF (`dmf_mod_data.lua`) reads `.data` then `.data.packages` during `DMFMod:init()` (declared packages) | Published verbatim — the manager filters nothing. `packages` validation is DMF-owned (its package manager treats `nil` as a supported no-op and reports its own errors). Not part of the scan-time shape, so `validate_entry` does not check it; an entry whose descriptor never validated carries no `data`. |
-| `_mod_load_index` | `Managers.mod._mod_load_index` | `dmf_adapter.lua` via `begin_load_entry(idx)` / `end_load_pass()` | DMF (`dmf_mod_data.lua`) | `nil` initially. The manager asks the adapter to set it per-mod before each `run()`/`init()` and to clear it after the loop. `mod_manager.lua` never writes it directly. |
+| `_mod_load_index` | `Managers.mod._mod_load_index` | `dmf_adapter.lua` via `begin_load_entry(idx)` / `end_load_pass()` | DMF (`dmf_mod_data.lua`) | `nil` initially. The manager asks the adapter to set it to the entry's index at its load tick (before that entry's `run()`/`init()`); it persists between entry ticks — visible across engine updates mid-pass (community parity) — and is cleared once, at pass finalize. `mod_manager.lua` never writes it directly. |
 | `_state` | `Managers.mod._state` | `dmf_adapter.lua` via `mark_load_done()` / `mark_load_pending()` | DMF (`dmf_loader.lua`) reads `_state == "done"` for its `all_mods_loaded` event | Remains `nil` until the manager decides the pass is complete and asks the adapter to publish `"done"`. `mark_load_pending()` resets it to `nil` at the start of a hot-reload teardown (the nil-before-done contract holds across reload too). `mod_manager.lua` never writes it directly. |
 | `_settings` (`developer_mode`, `log_level`) | `Managers.mod._settings` | `dmf_adapter.lua` via `establish()` — invoked by the chassis (lifecycle Step 1c) under any manager; restored from `Application.user_setting("mod_manager_settings")` at startup only when the manager left `_settings` nil, identity preserved | DMF (`dmf_options.lua`) for option registration; the adapter's `developer_mode_enabled()` is the reload gate; DML-lineage managers read `log_level` (unguarded — a missing value crashes their print path) | Restored once at startup: defensively pcall'd, validated as a table, identity + every unrelated field preserved. The persisted `mod_manager_settings` shape is ecosystem-visible (DML-lineage managers and DMF read and write it), so Relay both consumes and produces the full shape: `developer_mode` required boolean (corrected to `false` in place if missing/invalid) and `log_level` required number (corrected to `1` in place if missing/invalid). Falls back to `{ log_level = 1, developer_mode = false }` when `Application` is absent/throwing or the result is non-table. `establish()` never nils manager-owned load fields (`_state`/`_mod_load_index`). The adapter **never** calls `Application.set_user_setting` — official DMF owns persistence when its option changes. The same `_settings` table identity survives every hot-reload generation (reload never re-establishes). |
 | `DMFMod:io_*` (eight overrides + path construction + debug/error logging) | on the adapted `DMFMod` table in `_G` | `dmf_adapter.lua` via the file observer | DMF Phase-2 module loads + user-mod resources route through these | Installation-aware: the observer is registered **once** for the adapter; it re-fires on every successful file exec but no-ops ONLY when BOTH the current `DMFMod` table is the tracked table AND its `io_dofile` is still Relay's installed wrapper. A genuinely new table adapts once `io_dofile` is a function; the SAME table whose `io_dofile` was overwritten (reused class table after `core/io.lua`) trips the wrapper mismatch and re-adapts all eight. No-op until `DMFMod` exists in `_G` AND `io_dofile` is a function; never fabricates `DMFMod`. The markers are RETAINED across `retire_stale_generation_globals()`. |
@@ -264,8 +280,12 @@ closure-wrap — **before `Managers.input` and other boot-complete globals
 exist.** Mods whose
 `new_mod`/`init` touches those globals (e.g. Power_DI's option/keybind
 validation reads `Managers.input`) would hit `nil` if loaded that early. The
-LOAD is therefore deferred to the first `StateGame.update` tick, which fires
-after boot, where those globals exist. The scan can safely run at boot (it reads
+LOAD is therefore deferred to the first `StateGame.update` tick (the
+**phase-0 anchor**), which fires after boot, where those globals exist — and
+it advances from there at exactly one `mods.lst` entry per manager tick (the
+community loader's pacing; the normative phase contract is in
+[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md)).
+The scan can safely run at boot (it reads
 no engine globals, only `Mods.file`), so it stays in `init()` — pre-building the
 full `_mods` table there means every entry exists before any mod's `run()`/`init()`
 reads it (see [The `Managers.mod` shape contract](#the-managersmod-shape-contract-dmf-requires)).
@@ -284,6 +304,17 @@ only that entry `failed`; later entries continue. A malformed `dmf` load result
 remains a load-contract failure, not an outer framework-boundary failure,
 because no valid outer object exists.
 
+The initial pass is **phased** (normative contract:
+[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md)): it
+begins on the first `StateGame.update` manager tick — the phase-0 anchor, pass
+bookkeeping only (the scan ran earlier, at manager creation) — and advances
+**exactly one entry per manager tick** in `mods.lst` order: entry i loads at
+phase i, the tick exactly i engine updates after the anchor. Isolation is
+unchanged and tick-aligned: a failed or invalid entry burns its phase (a mod's
+phase is always its list position regardless of sibling failures), and each
+tick then drives `update(dt)` for every outer object loaded so far (see
+[Two-level driving](#two-level-driving)).
+
 For outer tables Relay owns the complete lookup+invocation operation for
 `init`, `update`, and `on_game_state_changed`. The first escaped error (including
 an `__index` lookup error) atomically disables that entry for the generation,
@@ -293,14 +324,23 @@ one protected best-effort `on_unload`. There is no automatic retry. A standalone
 entry failure remains local and healthy siblings continue.
 
 The outer entry named exactly `dmf` is the framework boundary. If one of those
-three lifecycle calls escapes, Relay stops the current generation: the failed
-entry is `disabled`, other attached outer entries are `stopped`, not-yet-attempted
-load entries are `skipped`, and detached objects receive reverse-order,
-exactly-once best-effort cleanup. Relay then retires the existing DMF generation
+three lifecycle calls escapes, Relay stops the current generation and
+finalizes the pass **on that tick**: the failed entry is `disabled`, other
+attached outer entries are `stopped`, not-yet-attempted load entries are
+`skipped` (one trace line each — they never get their own load ticks), and
+detached objects receive reverse-order, exactly-once best-effort cleanup.
+Relay then retires the existing DMF generation
 globals through the adapter. It does not inspect or modify DMF's inner event
 dispatcher, registered mods, safe calls, hooks, or enable/disable policy, and it
 does not attribute the escape to an inner user mod. `_state` still finalizes to
 `"done"`; a user-requested developer-mode reload remains the recovery path.
+
+Two phased-pass corners complete the picture. Because each tick drives
+`update(dt)` for every outer object loaded so far, a framework-boundary
+escape can also fire during the update drive on a mid-pass tick — the pass
+then finalizes on the next tick's load step with the same semantics. And an
+error that escapes the per-tick load containment finalizes the pass with
+errors; remaining entries stay `not_loaded`.
 
 `on_reload` and `on_unload` stay teardown operations: errors are logged and
 cleanup continues without recursively entering lifecycle disablement. Cleanup
@@ -378,16 +418,26 @@ boot:
 first StateGame.update tick  (after boot; Managers.input now exists):
   StateGame.update  (closure-wrapped)
     -> Managers.mod:update(dt)
-         not _mods_loaded -> LOAD: per-mod run()/init() in order
-                               (DMF's init loads its modules; the IO observer
-                                adapts DMFMod:io_* mid-init — see below)
-         _mods_loaded = true; adapter publishes _state = "done"
-         drive each loaded mod's update(dt)
+         phase-0 anchor: _mods_loaded set true (anchor guard — the initial
+                               pass begins exactly once); pass bookkeeping
+                               only — no entries load (the scan ran at
+                               manager creation)
 
-every subsequent StateGame.update tick:
+each subsequent tick until the pass completes:
   StateGame.update  (closure-wrapped)
     -> Managers.mod:update(dt)
-         _mods_loaded already true -> just drive per-mod update(dt)
+         load step: at most the next entry — run()/init() in order
+                               (DMF's init loads its modules; the IO observer
+                                adapts DMFMod:io_* mid-init — see below)
+          on the last entry's tick: clear the load index (once, at finalize),
+                               adapter publishes _state = "done"
+          drive update(dt) for every outer object loaded so far (a mod's
+                               first update lands on its own load tick)
+
+every tick after the pass:
+  StateGame.update  (closure-wrapped)
+    -> Managers.mod:update(dt)
+         pass complete — no load step -> just drive per-mod update(dt)
 
   (DMF is one of those mods. Its own per-frame update polls
    Managers.mod._state == "done"; the first time it sees it, DMF fires its
@@ -396,7 +446,9 @@ every subsequent StateGame.update tick:
 
 Same thread, frame by frame. `_state` is the **loader↔DMF hand-off**: the
 manager decides the load is complete and asks the adapter to publish `"done"`;
-DMF reads it on a later frame and reacts. Nothing polls off-thread.
+DMF reads it no earlier than the finalize tick's own update drive (its update
+runs every tick from its own load tick onward) and reacts. Nothing polls
+off-thread.
 
 ### Startup trace diagnostics
 
@@ -414,7 +466,17 @@ line per string-named class publication
 (`class registered: <name>`; non-string names are not registered), a load-pass
 begin line (`(initial)`, or `(reload, generation N)`) plus a per-entry
 begin/outcome pair (`load entry #<id> '<name>'` / `entry '<name>'
-result=<state>`), alongside
+result=<state>`), and — landing on the final entry's tick — a load-pass end
+line (`load pass end (initial, generation G)` / `load pass end (reload,
+generation G)`). The begin lines mark the **phase-0 anchor** (the initial
+pass's first manager tick, or the reload replay's anchor tick — both load no
+entries); entries `skipped` at a framework stop log their outcome line at the
+stop tick when the stop is load-time (the failure fires inside the load
+step), but a drive-time stop — a fan-out framework failure during the update
+drive of a mid-pass tick — latches after that tick's load, and the next
+tick's load step goes straight to finalize, so its skip lines land on that
+finalize tick. The phased semantics these lines trace are normative in
+`docs/reference/relay/load-phases.md`. They appear alongside
 the unconditional low-volume DEBUG events: scan and initial-pass summaries,
 one-time bootstrap landing lines for each wrapped step, and the
 tick/frame-stamped `state exit:` / `state enter:` / `state exit (final):`
@@ -508,8 +570,9 @@ mod logging interface.
 
 DMF is the first entry in the load order because it's listed first
 in `mods.lst` (the loader injects nothing — it is framework-agnostic). The
-sequence for DMF is the same as for any mod, just first — and it runs on the
-first `StateGame.update` tick (not at boot):
+sequence for DMF is the same as for any mod, just first — it loads at
+**phase 1**, the manager tick one engine update after the phase-0 anchor
+(the first `StateGame.update` tick), not at boot:
 
 1. The loader loads `dmf.mod` (`Mods.file.exec_with_return("dmf", "dmf", "mod")`).
 2. It calls `dmf.mod`'s `run()`, which returns the `dmf_mod_object` — a **plain
@@ -527,7 +590,8 @@ first `StateGame.update` tick (not at boot):
    after `core/io.lua` defines them, before Phase-2 uses them (see
    [IO adaptation](#io-adaptation)).
 
-User mods load after, each the same way. A user mod's `.mod` `run()` typically
+User mods load after, each the same way — one entry per subsequent manager
+tick, in list order. A user mod's `.mod` `run()` typically
 calls `new_mod(...)` for its side effect and returns **nothing** — see
 [Two-level driving](#two-level-driving).
 
@@ -549,11 +613,12 @@ Four consequences drive the loader's design:
   *walk* `_mods`. Building every entry up front in SCAN means they all exist
   before any mod's `run()`/`init()` reads the table — and SCAN can run at boot
   (it needs no engine globals), so it stays in `init()`.
-- **`_mod_load_index` is set per-mod during the LOAD loop.** The loader sets it
+- **`_mod_load_index` is set per entry at its load tick.** The loader sets it
   to the current entry's index *before* its `run()`, so DMF's `new_mod` →
   `DMFMod:init()` (fired synchronously inside `run()` for user mods, inside
-  `object:init()` for DMF) reads the right `_mods` entry. It is cleared after
-  the loop.
+  `object:init()` for DMF) reads the right `_mods` entry. It persists
+  between entry ticks (visible across engine updates mid-pass — community
+  parity) and is cleared once, at pass finalize.
 - **The executed descriptor is published as `entry.data` *before* `run()`.**
   `DMFMod:init()` also reads `_mods[_mod_load_index].data` (then `.packages`,
   for the declared-packages feature) during construction — which happens inside
@@ -563,10 +628,11 @@ Four consequences drive the loader's design:
   supported no-op; DMF reports its own errors). A hot reload re-executes every
   descriptor and republishes per generation.
 - **`Managers.mod` is published before the first load tick.** DMF reads it
-  synchronously during the LOAD loop, which runs in `update()`. The chassis
-  publishes it during the bootstrap (Step 1b instantiates, Step 1c's
+  synchronously during the per-tick load steps, which run in `update()`. The
+  chassis publishes it during the bootstrap (Step 1b instantiates, Step 1c's
   `establish()` re-asserts the same instance, idempotently), so the
-  DMF-visible contract holds from the first tick.
+  DMF-visible contract holds from the first tick — and across every later
+  entry tick of the pass.
 
 ## IO adaptation
 
@@ -791,6 +857,14 @@ The flip side: a mod whose `run()` *does* return an object is **outer-driven** �
 the loader calls its `init`/`update`/`on_game_state_changed` directly. DMF is the
 canonical example.
 
+During a load pass the outer level interleaves with loading: each manager tick
+loads at most one entry and then drives `update(dt)` for every outer object
+loaded so far. An outer mod's first `update` therefore lands on its own load
+tick, and already-loaded mods keep updating while later entries still load
+(community parity — pre-phasing, every init completed before any update ran).
+DMF is outer-driven from its own load tick onward, so its inner loop starts
+driving its registered user mods while later list entries are still loading.
+
 ## Hot reload
 
 Relay implements DMF-compatible in-game hot reload, gated by DMF's
@@ -838,14 +912,18 @@ generations complete without layered observers, wrappers, or hooks.
   Developer mode false/default never triggers. The legacy direct
   `_reload_requested = true` field-set path is preserved for compatibility (at
   least one public extension uses it); `request_reload(source)` is the supported
-  seam for new callers.
+  seam for new callers. (While a load pass is active — initial or replacement
+  replay — the not-done check refuses the request with "manager not done".)
 
 ### State machine and frame boundary
 
-Initial startup behavior is unchanged: `init()` scans only; the first
-`StateGame.update` performs a complete one-pass load, publishes `done`, then
-drives loaded updates. For an accepted reload, the state machine spans **two
-update frames**:
+Initial startup behavior: `init()` scans only; the load pass begins on the
+first `StateGame.update` tick (the phase-0 anchor) and advances one
+`mods.lst` entry per tick, publishing `done` on the final entry's tick (the
+normative phase contract is in
+[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md)).
+For an accepted reload, the state machine spans a **teardown frame plus a
+replacement replay**:
 
 **Teardown frame** (request consumed at the start of `update`, before normal
 outer updates):
@@ -876,27 +954,39 @@ outer updates):
 7. Mark replacement pending (`_reload_in_progress`); **return immediately** from
    that update. No old updates or new loads run in the teardown frame.
 
-**Replacement frame** (next `update`):
+**Replacement replay** (the next `update` onward — an anchor tick, then one
+entry per tick):
 
-8. `_load_all(reload_data)` — synchronous full pass in order, with entry-local
-   load isolation and one-strike outer lifecycle containment. For each outer
-   object, `init(reload_data_for_same_name)`
-   runs **before** the next entry loads. Startup `init` receives `nil`;
-   newly-added mods receive `nil`; removed data is discarded; reordered same-name
-   mods receive **their own** data (Relay keys by stable mod NAME — never
-   numeric position). Per-mod `.mod`/`run`/`init` failure isolates and
-   marks degraded. A `dmf` descriptor/run/result failure remains an isolated
-   framework-load failure; an escaped `dmf` outer `init` failure stops and
-   reverse-cleans the replacement generation.
-9. Clear reload data; `adapter:mark_load_done()`; clear request/in-progress;
-   increment + report the generation (distinguishing clean completion from
-   completion with errors); then drive new-generation updates **in that same
-   completed frame**.
+8. The replacement loads as a **replay of the phased pass**: an anchor tick
+    (`load pass begin (reload, generation N)` — no entries), then at most one
+    entry per tick in order, with entry-local load isolation and one-strike
+    outer lifecycle containment. For each outer object,
+    `init(reload_data_for_same_name)`
+    runs **before** the next entry loads; per-name reload data is retained
+    across the replay and delivered to each entry at its tick. Startup
+    `init` receives `nil`; newly-added mods receive `nil`; removed data is
+    discarded; reordered same-name mods receive **their own** data (Relay
+    keys by stable mod NAME — never numeric position). Per-mod
+    `.mod`/`run`/`init` failure isolates and marks degraded. A `dmf`
+    descriptor/run/result failure remains an isolated framework-load
+    failure; an escaped `dmf` outer `init` failure stops and reverse-cleans
+    the replacement generation.
+9. On the final replay tick (the last entry's load): clear reload data;
+    `adapter:mark_load_done()`; clear request/in-progress; increment +
+    report the generation (distinguishing clean completion from completion
+    with errors) — the completion INFO/WARN land on that tick.
+    New-generation updates run under the same per-tick interleaving as the
+    initial pass (each replay tick drives `update(dt)` for every outer
+    object loaded so far) and continue normally after completion.
 
 Completion logs only after replacement loading completes. While `_state ~= "done"`
-(initial load, teardown, or replacement pending), outer `on_game_state_changed`
-callbacks are NOT driven (a controlled single log per not-done period); after
-completion, new-generation callbacks work normally.
+(initial pass, teardown, or replacement replay pending), outer `on_game_state_changed`
+callbacks are NOT driven (a controlled single log per not-done period) — a
+deliberate, documented divergence from the community loader, which delivers
+state changes to already-loaded mods during its loading phase (recorded as a
+known divergence + candidate follow-up in
+[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md));
+after completion, new-generation callbacks work normally.
 
 ### What survives reload vs. what is rebuilt
 
@@ -1170,8 +1260,9 @@ without modifying DMF.
 - `src/mod_loader/{file,class_registry,require_bridge}.lua` — the loader API
   surface (file ops + observer, the CLASS registry, the require store + bridge).
 - `src/mod_loader/tests/test_hot_reload.lua` — the focused hot-reload behavior
-  harness (request seam, exact keyboard parity, two-frame teardown/replacement
-  ordering, reload-data keying, identity survival across three generations,
+  harness (request seam, exact keyboard parity, teardown-frame +
+  one-entry-per-tick replacement-replay ordering, reload-data keying,
+  identity survival across three generations,
   installation-aware IO + single observer, global retirement, failure/best-effort
   contract, no-double-unload shutdown invariant). Run via `make mod-loader-test`.
 - `src/mod_loader/tests/test_loader_hardening.lua` — malformed result,

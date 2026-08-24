@@ -69,17 +69,23 @@ No Lua editing is required. The failure is selected by `dmf/mode.txt`.
 ## Expected sequence (initial `fail` mode)
 
 Relay scans `mods.lst` into an entry list **without** executing any `.mod`;
-`.mod` execution happens during the load pass, in listed order. The load pass
-stops the moment the synthetic `dmf` entry fails init, so the later entry's
-`.mod` is never executed at all in the failing generation.
+`.mod` execution happens during the load pass, in listed order — the pass
+spans multiple manager ticks, exactly one entry per tick (list position =
+tick offset from the pass anchor). With `dmf` listed second, the synthetic
+entry fails init on its own load tick and the pass finalizes on that same
+tick: the later entry never gets its own load tick, so its `.mod` is never
+executed at all in the failing generation.
 
 On reaching the main menu, the shared `framework_boundary.log` must show
 (roughly, in order):
 
-1. Load-pass entry #1 (`framework_prior_probe`): its `.mod` executes →
+1. Tick 1 — load-pass entry #1 (`framework_prior_probe`): its `.mod`
+   executes →
    `[FB_PRIOR] scenario-loaded ...`, then `[FB_PRIOR] run ...`, then
-   `[FB_PRIOR] init ...` (it initializes cleanly before `dmf` is reached).
-2. Load-pass entry #2 (`dmf`): its `.mod` executes →
+   `[FB_PRIOR] init ...` (it initializes cleanly before `dmf` is reached),
+   then its bounded first `[FB_PRIOR] update ...` (an outer mod's first
+   update lands on its own load tick — before `dmf` ever loads).
+2. Tick 2 — load-pass entry #2 (`dmf`): its `.mod` executes →
    `[FB_DMF] scenario-loaded mode=fail ... (SYNTHETIC probe; not stock DMF)`,
    then `[FB_DMF] run ...`, then `[FB_DMF] init ...`.
 3. `[FB_DMF] init raising injected framework-boundary scratch error ...`.
@@ -96,22 +102,26 @@ On reaching the main menu, the shared `framework_boundary.log` must show
    > error. Restart the game or hot reload in developer mode. See the Darktide
    > console log for details.
 6. Cleanup drain, **reverse load order**: `[FB_DMF] on_unload ...` THEN
-   `[FB_PRIOR] on_unload ...` (drained inside the load pass right after the
-   failure, before the later entry is reached).
-7. Load-pass entry #3 (`framework_later_probe`): the stop flag is set, so the
-   entry is marked `skipped` and its `.mod` is **never executed**.
+   `[FB_PRIOR] on_unload ...` (drained on the failure tick right after the
+   failure — the later entry is skipped at that same tick and never loads).
+7. Also on the failure tick — load-pass entry #3 (`framework_later_probe`):
+   the stop flag is set, so the entry is marked `skipped` at this tick (one
+   trace line) and its `.mod` is **never executed**.
 
 ### What must NOT appear in the initial failing generation
 
 - **No** `[FB_LATER]` line **at all** — not even `[FB_LATER] scenario-loaded`.
-   Complete absence is the evidence that the entry was skipped: its `.mod`
-   never runs, so it emits nothing and its process-global counters are never
-   created (absent from `_G`, not zero).
-- **No** `[FB_PRIOR] update` line in the failing generation. The generation is
-  stopped, so no outer `update` callbacks run.
+    Complete absence is the evidence that the entry was skipped: its `.mod`
+    never runs, so it emits nothing and its process-global counters are never
+    created (absent from `_G`, not zero).
+- **No** `[FB_PRIOR]` update line **after the generation stop**. One bounded
+   first `update` legitimately appears — on `framework_prior_probe`'s own
+   load tick (tick 1), before `dmf` loads, because updates overlap the pass.
+   Once the generation is stopped, no outer `update` callbacks run again in
+   this generation (no per-frame `update` spam).
 - **No** alert or diagnostic that names an inner culprit. The framework alert
-  must say "framework-boundary error" and must **not** blame DMF, a user mod,
-  or any inner callback.
+   must say "framework-boundary error" and must **not** blame DMF, a user mod,
+   or any inner callback.
 
 ### Marker-count expectations (initial fail mode)
 
@@ -120,7 +130,8 @@ On reaching the main menu, the shared `framework_boundary.log` must show
   created. After healthy recovery its `scenario-loaded`/`run`/`init`/`update`
   lines appear normally (see Recovery below).
 - `[FB_DMF]` run=1, init=1, update=0, unload=1.
-- `[FB_PRIOR]` run=1, init=1, update=0, unload=1.
+- `[FB_PRIOR]` run=1, init=1, update=1 (the bounded first update on its own
+  load tick, before the `dmf` failure), unload=1.
 - Exactly one `[mod_loader] framework-boundary lifecycle failure ...` line
   with a traceback. The traceback must not repeat every frame.
 - One immediate alert; reminders repeat on the controlled cadence (every ~15
@@ -150,7 +161,9 @@ To recover in-process (developer mode already on):
    cp mode-healthy.txt mode.txt
    ```
 2. Trigger a developer-mode hot reload: **Left Ctrl + Left Shift + R**.
-3. Wait one generation. All three entries should now load and drive normally.
+3. Wait one generation (the replacement replays the phased pass — an anchor
+   tick, then one entry per tick). All three entries should now load and
+   drive normally.
 
 ### Expected after recovery
 
