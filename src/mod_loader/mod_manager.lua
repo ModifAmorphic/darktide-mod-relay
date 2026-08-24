@@ -911,7 +911,18 @@ function ModManager:_drive_update(dt)
 end
 
 function ModManager:on_game_state_changed(status, state_name, state_object)
-    if not self._adapter:is_load_done() then
+    -- Community parity: the initial pass spans multiple ticks now, and boot
+    -- state transitions can land inside it (e.g. StateTitle enter ~1 tick
+    -- after the anchor), so dispatch to already-loaded entries while the
+    -- initial pass is actively loading — updates already flow to those same
+    -- entries on those same ticks, and the dispatch loop's nil-object skip
+    -- limits delivery to loaded entries. Suppression stays load-bearing for
+    -- the reload window (never dispatch into half-torn-down objects) and
+    -- after destroy: a never-finalized pass is suppressed through the gate
+    -- (settled fields -> not done), while after a done destroy the gate is
+    -- open and the emptied entry table delivers nothing.
+    local initial_pass_open = self._load_phase ~= nil and self._pass_kind == "initial"
+    if not self._adapter:is_load_done() and not initial_pass_open then
         if not self._gsc_ignored_logged then
             log_debug("on_game_state_changed ignored (reload/load in progress)")
             self._gsc_ignored_logged = true

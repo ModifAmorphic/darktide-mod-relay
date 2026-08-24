@@ -795,6 +795,241 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
+    -- on_game_state_changed across the phased pass: dispatch to loaded
+    -- entries during the INITIAL pass (community parity — boot transitions
+    -- can land inside the multi-tick pass); suppression everywhere else.
+    -- ---------------------------------------------------------------------
+
+    runner.register("mod_manager: gsc mid-initial-pass dispatches to already-loaded entries only", function()
+        local received = {}
+        local sb = setup({ order = { "alpha", "beta" } })
+        local function outer(name)
+            return {
+                init = function() end,
+                on_game_state_changed = function(self, status, sname)
+                    received[name] = { status, sname }
+                end,
+            }
+        end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("alpha")] = mod_file("alpha", outer("alpha")),
+                      [mod_path("beta")] = mod_file("beta", outer("beta")) })[p]
+        end
+        local mm = new_manager(sb)
+        mm:update(0.016)  -- anchor
+        mm:update(0.016)  -- alpha's tick (beta still not_loaded)
+        runner.assert_eq(false, mm._adapter:is_load_done(), "pass still open")
+
+        local sobj = { _name = "StateTitle" }
+        local ok, err = pcall(function()
+            mm:on_game_state_changed("enter", "StateTitle", sobj)
+        end)
+        runner.assert_eq(true, ok, "mid-pass gsc must not error: " .. tostring(err))
+        runner.assert_eq({ "enter", "StateTitle" }, received.alpha,
+            "the loaded entry receives the transition (StateTitle enter lands mid-pass)")
+        runner.assert_nil(received.beta,
+            "the not-yet-loaded entry receives nothing (no object to dispatch to)")
+        runner.assert_eq(false, mm._adapter:is_load_done(), "still not done after the dispatch")
+    end)
+
+    runner.register("mod_manager: gsc before the anchor (no pass yet) stays suppressed", function()
+        local logged = {}
+        local received = 0
+        local sb = setup({ order = { "alpha" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("alpha")] = mod_file("alpha", {
+                init = function() end,
+                on_game_state_changed = function() received = received + 1 end,
+            }) })[p]
+        end
+        local mm = new_manager(sb)  -- scanned, but no update() yet: no pass
+        local ok, err = pcall(function()
+            mm:on_game_state_changed("exit", "StateSplash", {})
+        end)
+        runner.assert_eq(true, ok, "pre-anchor gsc must not error: " .. tostring(err))
+        runner.assert_eq(0, received, "nothing dispatched before the pass begins")
+        runner.assert_eq(1, count_log(logged,
+            "on_game_state_changed ignored (reload/load in progress)"),
+            "the suppressed window still logs once")
+    end)
+
+    runner.register("mod_manager: gsc after a framework stop mid-pass dispatches nothing", function()
+        local received = {}
+        local sb = setup({ order = { "prior", "dmf" } })
+        local function outer(name)
+            return {
+                init = function()
+                    if name == "dmf" then error("framework escape") end
+                end,
+                on_game_state_changed = function()
+                    received[name] = true
+                end,
+            }
+        end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("prior")] = mod_file("prior", outer("prior")),
+                      [mod_path("dmf")] = mod_file("dmf", outer("dmf")) })[p]
+        end
+        local mm = new_manager(sb)
+        mm:update(0.016)  -- anchor
+        mm:update(0.016)  -- prior loads
+        mm:update(0.016)  -- dmf init raises -> framework stop
+        runner.assert_eq(true, mm._generation_failed, "sanity: generation stopped")
+        runner.assert_eq(true, mm._adapter:is_load_done(), "pass finalized on the failure tick")
+
+        local ok, err = pcall(function()
+            mm:on_game_state_changed("enter", "StateTitle", {})
+        end)
+        runner.assert_eq(true, ok, "post-stop gsc must not error: " .. tostring(err))
+        runner.assert_nil(next(received),
+            "the stopped generation dispatches nothing (early return)")
+    end)
+
+    runner.register("mod_manager: a gsc failure mid-initial-pass isolates without stalling the pass", function()
+        local logged = {}
+        local sb = setup({ order = { "boom", "good" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("boom")] = mod_file("boom", {
+                    init = function() end,
+                    on_game_state_changed = function() error("gsc boom") end,
+                }),
+                [mod_path("good")] = mod_file("good", {
+                    init = function() end,
+                    on_game_state_changed = function() end,
+                }),
+            })[p]
+        end
+        local mm = new_manager(sb)
+        mm:update(0.016)  -- anchor
+        mm:update(0.016)  -- boom's tick
+        runner.assert_eq("running", mm._mods[1].state)
+
+        mm:on_game_state_changed("enter", "StateTitle", {})  -- boom raises
+        runner.assert_eq("disabled", mm._mods[1].state,
+            "the one-strike containment disabled the failing entry")
+        runner.assert_eq(false, mm._adapter:is_load_done(), "the pass is still open")
+
+        mm:update(0.016)  -- good's own tick — the pass advances normally
+        runner.assert_eq(true, mm._adapter:is_load_done())
+        runner.assert_eq("running", mm._mods[2].state,
+            "the sibling still loads on its own tick (pass unaffected)")
+        runner.assert_not_nil(find_log(logged, "mod 'boom' on_game_state_changed failed"))
+        runner.assert_eq(1, #mm._failure_records)
+        runner.assert_eq(1, mm._failure_records[1].generation,
+            "the failure record carries the pass's target generation")
+    end)
+
+    runner.register("mod_manager: a gsc-driven framework failure mid-initial-pass stops + finalizes cleanly", function()
+        -- The composition the gsc gate makes reachable: dmf's outer
+        -- on_game_state_changed raises AFTER its load tick (prior loaded,
+        -- later still unloaded). The framework path fires FROM the dispatch
+        -- (stop flag set, loaded outers reverse-cleaned on that tick), an
+        -- interim gsc dispatches nothing (gate open, _generation_failed early
+        -- return), and the NEXT tick finalizes the stopped pass.
+        local logged = {}
+        local seq = {}
+        local unloads = {}
+        local sb = setup({ order = { "prior", "dmf", "later" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({
+                [mod_path("prior")] = mod_file("prior", {
+                    init = function() table.insert(seq, "prior:init") end,
+                    on_game_state_changed = function(_, status)
+                        table.insert(seq, "prior:gsc:" .. status)
+                    end,
+                    on_unload = function() table.insert(unloads, "prior") end,
+                }),
+                [mod_path("dmf")] = mod_file("dmf", {
+                    init = function() table.insert(seq, "dmf:init") end,
+                    on_game_state_changed = function() error("framework gsc boom") end,
+                    on_unload = function() table.insert(unloads, "dmf") end,
+                }),
+                [mod_path("later")] = mod_file("later", {
+                    init = function() table.insert(seq, "later:init") end,
+                }),
+            })[p]
+        end
+        local mm = new_manager(sb)
+        mm:update(0.016)  -- anchor
+        mm:update(0.016)  -- prior's tick
+        mm:update(0.016)  -- dmf's load tick (init fine; later still unloaded)
+        runner.assert_eq(false, mm._adapter:is_load_done(), "pass open after dmf's tick")
+
+        local ok, err = pcall(function()
+            mm:on_game_state_changed("enter", "StateTitle", {})
+        end)
+        runner.assert_eq(true, ok, "the framework gsc raise must be contained: " .. tostring(err))
+        runner.assert_eq(true, mm._generation_failed, "the framework path fired from gsc")
+        runner.assert_eq(true, mm._stop_load_pass, "the stop flag is set")
+        runner.assert_eq({ "dmf", "prior" }, unloads,
+            "loaded outers reverse-cleaned on the gsc tick")
+        runner.assert_not_nil(find_log(logged, "framework-boundary lifecycle failure"))
+        runner.assert_eq(1, #mm._failure_records)
+        runner.assert_eq(true, mm._failure_records[1].framework)
+
+        -- Interim gsc before the next tick: gate OPEN (initial pass), so no
+        -- suppressed log — and the _generation_failed early return dispatches
+        -- nothing (no further callbacks, no double teardown).
+        runner.assert_not_nil(mm._load_phase, "the stopped pass is still open")
+        local ok2, err2 = pcall(function()
+            mm:on_game_state_changed("exit", "StateTitle", {})
+        end)
+        runner.assert_eq(true, ok2, "the interim gsc must not error: " .. tostring(err2))
+        runner.assert_eq(0, count_log(logged, "on_game_state_changed ignored"),
+            "no suppressed log: the gate is open mid-initial-pass")
+        runner.assert_eq({ "dmf", "prior" }, unloads, "no additional teardown")
+        runner.assert_eq(false, mm._adapter:is_load_done(), "finalize waits for the next tick")
+
+        mm:update(0.016)  -- the finalize tick
+        runner.assert_eq(true, mm._adapter:is_load_done())
+        runner.assert_eq("skipped", mm._mods[3].state, "later never loaded -> skipped")
+        local later_ran = false
+        for _, tag in ipairs(seq) do
+            if tag == "later:init" then later_ran = true end
+        end
+        runner.assert_eq(false, later_ran, "later:init never ran")
+        runner.assert_eq(1, mm._generation)
+        runner.assert_eq("stopped", mm._mods[1].state)
+        runner.assert_eq("disabled", mm._mods[2].state)
+    end)
+
+    runner.register("mod_manager: gsc after a mid-pass destroy dispatches nothing", function()
+        -- This stages the never-finalized destroy variant, where the gate is
+        -- CLOSED via the not-done branch — so the suppressed-log assertion
+        -- below pins the GATE (received == 0 alone would also pass with the
+        -- gate open, since destroy empties the entry objects either way).
+        local logged = {}
+        local received = 0
+        local sb = setup({ order = { "alpha", "beta" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("alpha")] = mod_file("alpha", {
+                        init = function() end,
+                        on_game_state_changed = function() received = received + 1 end,
+                    }),
+                      [mod_path("beta")] = mod_file("beta", { init = function() end }) })[p]
+        end
+        local mm = new_manager(sb)
+        mm:update(0.016)  -- anchor
+        mm:update(0.016)  -- alpha's tick (pass open)
+        mm:destroy()      -- settles the pass: fields nil -> suppressed again
+
+        local ok, err = pcall(function()
+            mm:on_game_state_changed("enter", "StateTitle", {})
+        end)
+        runner.assert_eq(true, ok, "post-destroy gsc must not error: " .. tostring(err))
+        runner.assert_eq(0, received,
+            "nothing dispatched after destroy settles the pass")
+        runner.assert_eq(1, count_log(logged,
+            "on_game_state_changed ignored (reload/load in progress)"),
+            "the gate itself is closed (suppressed window logs once)")
+    end)
+
+    -- ---------------------------------------------------------------------
     -- Startup trace diagnostics (FRAME_INDEX-stamped load-pass events)
     -- ---------------------------------------------------------------------
 

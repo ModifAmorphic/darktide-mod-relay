@@ -112,6 +112,21 @@ Therefore:
   default each phase has exactly one entry; this rule is what a future
   multi-entry (authored) phase inherits.
 
+**`on_game_state_changed` during the pass.** State changes dispatch to
+already-loaded entries while the initial pass runs — community parity with
+the update interleaving. A mod scheduled at phase P sees the state changes
+fired after its own load tick; changes fired before it are uncatchable by
+its load-time code (the same
+[fired-before edge](#visibility-guarantee-and-its-limit) as any load-time
+hook). Three windows remain suppressed, each with a single debug log per
+suppressed period: the **reload window** (the teardown frame plus the
+replacement replay — never dispatch into half-torn-down objects) and the
+**pre-anchor window** (manager created, pass not yet begun — nothing is
+loaded, a natural no-op). **Post-destroy** a manager dispatches nothing
+further — through the gate when the pass never finalized (suppressed, with
+the same single debug log), or through the emptied entry table after a
+completed pass (the gate is open; every `entry.object` is gone).
+
 ## Default scheduling (positional)
 
 In scope today: **a plain `mods.lst`, interpreted positionally** — no
@@ -246,14 +261,7 @@ are settled and implemented:
 ## Open design decisions (recorded, not settled)
 
 - **The authored multi-mod-per-phase carrier.** Loading multiple mods per
-  phase ("tier") from a differently-shaped mods file organized into stages
-  by dependencies and/or load-order requirements. The carrier's SHAPE is
+  phase ("tier") from a differently-shaped mods file organized into stages by
+  dependencies and/or load-order requirements. The carrier's SHAPE is
   TBD (the `modsScheduling.json` sidecar concept is superseded); the
   phase-number semantics above are the foundation.
-- **`on_game_state_changed` during the pass — known divergence, candidate
-  follow-up.** Relay gates `on_game_state_changed` on load-done: the event
-  is suppressed for ALL mods until the pass completes (a single debug log
-  per not-done period). The community loader delivers state changes to
-  already-loaded mods during its loading phase. This is a deliberate,
-  documented divergence — not an accident — and delivering state changes to
-  already-loaded entries mid-pass is the candidate follow-up.

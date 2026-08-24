@@ -979,14 +979,20 @@ entry per tick):
     initial pass (each replay tick drives `update(dt)` for every outer
     object loaded so far) and continue normally after completion.
 
-Completion logs only after replacement loading completes. While `_state ~= "done"`
-(initial pass, teardown, or replacement replay pending), outer `on_game_state_changed`
-callbacks are NOT driven (a controlled single log per not-done period) — a
-deliberate, documented divergence from the community loader, which delivers
-state changes to already-loaded mods during its loading phase (recorded as a
-known divergence + candidate follow-up in
-[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md));
-after completion, new-generation callbacks work normally.
+Completion logs only after replacement loading completes. Outer
+`on_game_state_changed` callbacks are NOT driven while `_state ~= "done"`
+covers the reload window (teardown frame or replacement replay — never
+dispatch into half-torn-down objects; a controlled single log per
+suppressed period) or in the pre-anchor
+window (manager created, pass not yet begun — nothing is loaded).
+Post-destroy nothing is delivered — through the gate when the pass never
+finalized, or through the emptied entry table after a completed pass. The
+**initial pass** is the deliberate exception — also a not-done window —
+where state changes DO dispatch to already-loaded entries, community parity
+with the update interleaving (a mod sees the events fired after its own
+load tick; the visibility edges are normative in
+[`docs/reference/relay/load-phases.md`](../reference/relay/load-phases.md)).
+After completion, new-generation callbacks work normally.
 
 ### What survives reload vs. what is rebuilt
 
