@@ -1162,4 +1162,28 @@ return function(runner)
         runner.assert_eq("done", mm._state)
         runner.assert_eq(2, mm._generation, "legacy path completed a reload")
     end)
+
+    -- -----------------------------------------------------------------
+    -- Startup trace diagnostics: the reload pass-begin line names its generation
+    -- -----------------------------------------------------------------
+
+    runner.register("hot_reload: reload pass-begin TRACE names the target generation", function()
+        local logged = {}
+        local sb, state = setup({ print = function(m) table.insert(logged, m) end })
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = 12
+        stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
+        local mm = new_loaded(sb)
+        runner.assert_eq(1, count_log(logged, "load pass begin (initial) tick=0 frame=12"),
+            "the initial pass-begin line is stamped")
+        mm:request_reload("test")
+        mm:update(0.016)  -- teardown frame (no load pass)
+        runner.assert_eq(1, count_log(logged, "load pass begin"),
+            "the teardown frame runs no load pass")
+        mm:update(0.016)  -- replacement frame
+        runner.assert_eq(1, count_log(logged, "load pass begin (reload, generation 2)"),
+            "the replacement pass names its target generation")
+        runner.assert_eq(2, count_log(logged, "load pass begin"),
+            "exactly two pass-begin lines total (initial + one reload)")
+    end)
 end

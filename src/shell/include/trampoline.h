@@ -51,20 +51,25 @@ int trampoline_escape_path(const char *path, size_t path_len,
 int trampoline_path_has_control(const char *s, size_t len);
 
 /*
- * Build the trampoline chunk: set the six internal globals — `mod_loader_dir`,
+ * Build the trampoline chunk: set the seven internal globals — `mod_loader_dir`,
  * `mod_path`, `mod_manager` (escaped; NULL/empty mod_path/mod_manager => ""
  * global), `relay_version` (NULL/empty/overlong => nil), the `skip_splash`
- * token, and the `mods_in_game_tree` token (each literal "1" or "", not
- * escaped) — then io.open/read/loadstring/run `entry_path`. Returns the chunk
- * length (excluding NUL), or -1 on a NULL `mod_loader_dir`/`entry_path`/`out`,
- * zero cap, empty `mod_loader_dir`/`entry_path`, or overflow. Per-global
- * build contract + status-string behavior ("OK" / "FAIL <step>: <err>"):
+ * token, the `mods_in_game_tree` token (each literal "1" or "", not escaped),
+ * and `log_level` (escaped VERBATIM, never canonicalized here; NULL/empty/
+ * overlong (> 16 chars — one char of deliberate slack over the shell's env
+ * read, which passes at most 15) => "" global, the unset form each consumer
+ * treats as its default) — then io.open/read/loadstring/run `entry_path`.
+ * Returns the chunk length (excluding NUL), or -1 on a NULL
+ * `mod_loader_dir`/`entry_path`/`out`, zero cap, empty
+ * `mod_loader_dir`/`entry_path`, or overflow. Per-global build contract +
+ * status-string behavior ("OK" / "FAIL <step>: <err>"):
  * docs/reference/relay/shell.md. Pure and side-effect-free.
  */
 int trampoline_build_chunk(const char *mod_loader_dir, const char *mod_path,
                            const char *mod_manager,
                            const char *entry_path, const char *relay_version,
                            int skip_splash, int mods_in_game_tree,
+                           const char *log_level,
                            char *out, size_t out_cap);
 
 #ifdef __cplusplus

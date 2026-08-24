@@ -398,6 +398,33 @@ Same thread, frame by frame. `_state` is the **loader↔DMF hand-off**: the
 manager decides the load is complete and asks the adapter to publish `"done"`;
 DMF reads it on a later frame and reacts. Nothing polls off-thread.
 
+### Startup trace diagnostics
+
+The startup sequence is observable enough to answer, from logs alone, when each
+mod loaded, when each class registered, and in what order relative to
+game-state transitions. Running with `--log-level trace --log-lua` yields, on
+one time axis — every TRACE line carries ` tick=N frame=M`: `N` is the
+loader-relative count of observed engine updates since injection (`0` at
+pcall#1, `+1` per observed `Main.update` entry — driven by the
+`StateBoot.update` → `StateGame.update` wrap chain, exactly one increment per
+engine update, so it is comparable across boots/machines/builds), and `M` is
+the engine's `FRAME_INDEX` (initialized to `-1` by `scripts/main.lua`;
+`frame=?` before it exists; secondary, hardware/build-dependent) — a TRACE
+line per string-named class publication
+(`class registered: <name>`; non-string names are not registered), a load-pass
+begin line (`(initial)`, or `(reload, generation N)`) plus a per-entry
+begin/outcome pair (`load entry #<id> '<name>'` / `entry '<name>'
+result=<state>`), alongside
+the unconditional low-volume DEBUG events: scan and initial-pass summaries,
+one-time bootstrap landing lines for each wrapped step, and the
+tick/frame-stamped `state exit:` / `state enter:` / `state exit (final):`
+dispatch lines. TRACE is
+source-gated — a no-op unless `RELAY_LOG_LEVEL` resolves to `trace` — because
+per-class-registration volume is far too high to emit unfiltered; every other
+level keeps the unconditional mechanism. The normative contract (gating, the
+tick/frame stamp convention, event categories and levels) is in
+`docs/reference/relay/logging.md`.
+
 ## Surfaces the mod loader provides for DMF/mods
 
 DMF expects the loader's surfaces to already exist when it loads (it is not a
@@ -969,7 +996,7 @@ calls after every successful `require`. Each step the coordinator drives is
 independently idempotent, so a partial first pass (a class not yet
 materialized) does not prevent a later pass from finishing.
 
-The coordinator does exactly two things, each idempotent, driven after each
+The coordinator does exactly three things, each idempotent, driven after each
 `require` as the engine's boot advances:
 
 1. **Install the class registry** the moment the engine's global `class`
@@ -998,13 +1025,15 @@ The coordinator does exactly two things, each idempotent, driven after each
         adapter, `establish()` publishing `Managers.mod` + restoring
         `_settings` when nil, the IO observer, the `ModRelay:Version`
         attempt — see [Chassis duties (Step 1c)](#chassis-duties-step-1c)).
-      - **Step 2 — closure-wrap `StateGame.update` exactly once** → drives
+      - **Step 2 — closure-wrap `StateGame.update` exactly once** → bumps the
+        loader-relative tick counter at entry (the `Main.update` boundary —
+        the post-boot half of the tick observation chain) and drives
         `Managers.mod:update(dt)` *before* the engine update — the first tick
         LOADs (DMF + every user mod), every tick pumps per-mod `update(dt)`;
        - **Step 3 — closure-wrap `GameStateMachine._change_state` exactly once** → dispatches
          `on_game_state_changed("exit", …)` *before* the original transition and
-         `("enter", …)` *after*, reading the outgoing/incoming state from the
-         engine-maintained `self._state` (it never writes a state field).
+         `("enter", …)` *after*, reading the outgoing/incoming state from
+         the engine-maintained `self._state` (it never writes a state field).
        - **Step 4 — closure-wrap `GameStateMachine.destroy` exactly once** → dispatches one
          final `on_game_state_changed("exit", state_name, state_object)` for the
          current state *before* the original destroy, unless that state was already
@@ -1013,6 +1042,19 @@ The coordinator does exactly two things, each idempotent, driven after each
          last-exited state object (identity-compared), shared between the two
          wrappers; the engine's `self._state` is never mutated and no public manager
          fields are added.
+   3. **Closure-wrap `CLASS.StateBoot.update` exactly once** it exists — the
+      tick-driver half of the loader-relative tick counter
+      (`Mods._relay._tick`, published by the entry). `StateBoot.update` runs
+      exactly once per engine update for the whole boot phase (the boot
+      sub-states, including `BootStateRequireGameScripts`, nest inside it), so
+      observation starts at the first engine update after injection; the
+      coordinator's per-`require` drive installs the wrap during main.lua's
+      initial loads, before `Main.update` #1. The wrap bumps the counter at
+      entry and passes the original through unchanged (results preserved,
+      errors propagate). The `StateGame.update` wrap (Step 2 above) continues
+      the count once boot completes; the game-state machine runs exactly one
+      current-state update per engine update, so the two wraps never both fire
+      in one update — exactly one increment per engine update.
 
 `GameStateMachine` contract (engine-facing, not synthesized here): the engine
 holds the current state as `self._state` and exposes a `current_state_name()`

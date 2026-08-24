@@ -134,6 +134,57 @@ adds `relay.log` copies of what traverses the wrapped surfaces.
   There is no `Mods.log` / `Mods.message` surface; the tee is runtime-private
   plumbing.
 
+## Mod loader Lua diagnostics (TRACE source-gating + frame stamps)
+
+The mod loader's own diagnostics are the `{LEVEL} [mod_loader] {message}` lines
+that go to the console log (and, with the tee enabled, into `relay.log` as
+`INFO lua:` copies). The loader applies **no level threshold**: INFO / DEBUG /
+WARN / ERROR print unconditionally, and level filtering is the shell's job.
+TRACE is the one deliberate exception, plus one correlation convention:
+
+- **TRACE is source-gated.** The loader-internal `log_trace` helper (published
+  beside the other levels on `Mods._relay`; not a public mod API) is a no-op —
+  it does not print at all — unless `--log-level trace` / `RELAY_LOG_LEVEL=trace`
+  is in effect. The trampoline bakes the env value verbatim into the pcall#1
+  chunk as the `RELAY_LOG_LEVEL` global (the same config channel as every
+  other setting), and the entry snapshots + retires it once, matching `trace`
+  case-insensitively like the shell. The gating exists because the TRACE event
+  set includes one line per class registration (thousands per boot); emitting
+  that unfiltered would swamp the console log. Every other level keeps the
+  unconditional mechanism.
+- **Tick/frame stamp convention.** Every TRACE line auto-appends
+  ` tick=N frame=M`, and the state-transition DEBUG lines append the same
+  stamp explicitly — so a startup log reads on one time axis (both sinks
+  already timestamp lines, so wall-clock time comes free). `tick` is the
+  **primary** axis: the loader-relative count of observed engine update
+  boundaries since injection — `0` at the loader's pcall#1 entry (the
+  injection epoch, before any engine update has run under its observation),
+  `+1` at each observed `Main.update` entry (the same boundary the engine
+  uses for `FRAME_INDEX`), driven by the loader's
+  `StateBoot.update` → `StateGame.update` wrap chain; the game-state machine
+  runs exactly one current-state update per engine update, so exactly one
+  wrap fires per update (no double increment). Being loader-relative, tick is
+  comparable across boots, machines, and builds. `frame` is the **secondary**
+  axis: the engine's `FRAME_INDEX` global (incremented once per
+  `Main.update`, initialized to `-1` by `scripts/main.lua`) — a
+  hardware/build-dependent performance gut-check; before that global exists
+  (pre-`main.lua` moments) the frame field is `?`.
+- **Event categories and levels.** Class registration: one gated TRACE per
+  string-named `class()` registration (non-string names are not registered and
+  log nothing); class retirement: one DEBUG per `retire_class` (rare).
+  Load passes: one DEBUG scan summary per scan, one DEBUG initial-pass
+  completion summary, and — trace only — a pass-begin line (`(initial)`, or
+  `(reload, generation N)`) plus a begin/outcome line pair per entry. Bootstrap
+  landings: one DEBUG line the first time each wrapped step lands (manager
+  created, the `StateBoot.update` tick driver, `StateGame.update`,
+  `GameStateMachine._change_state` / `.destroy`, and the opt-in StateSplash
+  wrap). State dispatches: one DEBUG line per
+  successful exit / enter / final-exit dispatch (tick/frame-stamped); a dispatch
+  that is skipped or fails contained logs no success line. Names interpolated
+  into these lines (class names, state names) are rendered through a safe,
+  scrubbed, length-capped form — a control-bearing or unprintable name can
+  neither forge lines nor throw from them.
+
 ## Argument rendering (the observable relay copy)
 
 When a captured call succeeds, the tee renders its argument list into one

@@ -108,6 +108,7 @@ static volatile int  g_in_trampoline = 0;     /* re-entrancy guard for the tramp
 #define MOD_MANAGER_ENV      "RELAY_MOD_MANAGER" /* alternate mod manager file (user-controlled; optional when unset, fatal when set-but-unreadable/too-long/control-bearing) */
 #define SKIP_SPLASH_ENV      "RELAY_SKIP_SPLASH" /* StateSplash skip (user-controlled; optional; exact "1") */
 #define MODS_IN_GAME_TREE_ENV "RELAY_MODS_IN_GAME_TREE" /* mods-in-game-tree hint (launcher-derived; optional; exact "1"; never operator-set) */
+#define LOG_LEVEL_ENV        "RELAY_LOG_LEVEL" /* log level (user-controlled; optional; baked verbatim for the loader's trace gate) */
 #define MOD_LOADER_DIRNAME   "mod_loader"            /* the loader dir, self-located next to the DLL */
 #define MOD_LOADER_ENTRY     "init.lua"              /* the loader bootstrap entry */
 static char            g_trampoline_chunk[4096];   /* NUL-terminated chunk; len 0 => not staged */
@@ -164,7 +165,7 @@ static int log_name_ieq(const char *a, const char *b) {
  * enum). Unset, overflow, or unknown name ⇒ INFO. */
 static int resolve_log_level(void) {
     char buf[16];
-    DWORD n = GetEnvironmentVariableA("RELAY_LOG_LEVEL", buf, sizeof(buf));
+    DWORD n = GetEnvironmentVariableA(LOG_LEVEL_ENV, buf, sizeof(buf));
     if (n == 0 || n >= sizeof(buf)) return RELAY_LOG_INFO;
     if (log_name_ieq(buf, "error")) return RELAY_LOG_ERROR;
     if (log_name_ieq(buf, "warn"))  return RELAY_LOG_WARN;
@@ -334,8 +335,11 @@ static void trampoline_stage_chunk(void) {
         return;
     }
 
-    /* Mod root (optional). Unset/too-long => NULL (the chunk emits an empty
-     * RELAY_MOD_PATH; mods just won't load, the loader degrades gracefully). */
+    /* Mod root (optional). Unset/too-long/control-bearing => NULL (the chunk
+     * emits an empty RELAY_MOD_PATH; mods just won't load, the loader degrades
+     * gracefully). The control gate keeps a raw control byte out of the
+     * staged literal — an unparseable chunk would kill the loader (and all
+     * mods) wholesale, strictly worse than degrading to "no mod path". */
     char mod_dir[1024];
     const char *mod_path = NULL;
     DWORD mg = GetEnvironmentVariableA(MOD_PATH_ENV, mod_dir, sizeof(mod_dir));
@@ -348,6 +352,9 @@ static void trampoline_stage_chunk(void) {
     } else if (mg >= sizeof(mod_dir)) {
         relay_log(RELAY_LOG_INFO, "trampoline", "%s too long (%lu chars, max %zu); treating as unset\n",
                   MOD_PATH_ENV, mg, sizeof(mod_dir) - 1);
+    } else if (trampoline_path_has_control(mod_dir, mg)) {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s contains a control character; treating as unset\n",
+                  MOD_PATH_ENV);
     } else {
         mod_path = mod_dir;
     }
@@ -395,6 +402,33 @@ static void trampoline_stage_chunk(void) {
      * deliberately no FATAL path here (unlike RELAY_MOD_MANAGER). */
     int mods_in_game_tree = env_is_exact_one(MODS_IN_GAME_TREE_ENV);
 
+    /* Log level (optional, verbatim). Baked RAW into the chunk as the
+     * RELAY_LOG_LEVEL global for the loader's trace gate — not canonicalized
+     * here (the native filter's own resolve_log_level read above is unchanged
+     * and applies its own matching). Unreadable/too-long/control-bearing is
+     * logged and treated as unset (the chunk emits the empty-string global);
+     * like RELAY_MOD_PATH this is a degradable optional value, so no FATAL
+     * path. The control gate keeps a raw control byte out of the staged
+     * literal (an unparseable chunk would kill the loader wholesale). */
+    char level_buf[16];
+    const char *log_level = NULL;
+    DWORD ll = GetEnvironmentVariableA(LOG_LEVEL_ENV, level_buf, sizeof(level_buf));
+    if (ll == 0) {
+        DWORD e = GetLastError();
+        if (e != ERROR_ENVVAR_NOT_FOUND) {
+            relay_log(RELAY_LOG_INFO, "trampoline", "%s read error (lu=%lu); treating as unset\n",
+                      LOG_LEVEL_ENV, e);
+        }
+    } else if (ll >= sizeof(level_buf)) {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s too long (%lu chars, max %zu); treating as unset\n",
+                  LOG_LEVEL_ENV, ll, sizeof(level_buf) - 1);
+    } else if (trampoline_path_has_control(level_buf, ll)) {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s contains a control character; treating as unset\n",
+                  LOG_LEVEL_ENV);
+    } else {
+        log_level = level_buf;
+    }
+
     /* Join <mod_loader_dir> + init.lua into the production entry path
      * (Windows-canonical: exactly one backslash separator, idempotent on a
      * trailing separator). */
@@ -409,6 +443,7 @@ static void trampoline_stage_chunk(void) {
                                     path, RELAY_VERSION,
                                     skip_splash,
                                     mods_in_game_tree,
+                                    log_level,
                                     g_trampoline_chunk, sizeof(g_trampoline_chunk));
     if (n < 0) {
         relay_log(RELAY_LOG_INFO, "trampoline", "chunk build failed (escape/overflow); trampoline will be SKIPPED\n");
@@ -428,6 +463,11 @@ static void trampoline_stage_chunk(void) {
     }
     relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", SKIP_SPLASH_ENV, skip_splash ? "1" : "0");
     relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", MODS_IN_GAME_TREE_ENV, mods_in_game_tree ? "1" : "0");
+    if (log_level) {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s=%s\n", LOG_LEVEL_ENV, log_level);
+    } else {
+        relay_log(RELAY_LOG_INFO, "trampoline", "%s unset\n", LOG_LEVEL_ENV);
+    }
     relay_log(RELAY_LOG_INFO, "trampoline", "entry path=%s\n", path);
     relay_log(RELAY_LOG_INFO, "trampoline", "chunk staged (%zu bytes); will run one-shot at pcall#1 (before orig pcall)\n",
               g_trampoline_chunk_len);
