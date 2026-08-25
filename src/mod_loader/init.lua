@@ -246,45 +246,57 @@ do
     end
     Mods._relay._trace_enabled = _trace_enabled
 
-    -- Loader-relative tick counter + the combined stamp. The tick counts
+    -- Loader-relative update counter + the combined stamp. The counter counts
     -- observed engine update boundaries since THIS entry: 0 = injection
     -- epoch (pcall#1, before any engine update has run under our
     -- observation), +1 at each observed Main.update entry — the same
     -- boundary the engine uses for FRAME_INDEX. lifecycle.lua's
     -- StateBoot.update -> StateGame.update wrap chain does the incrementing
     -- (exactly one wrap fires per engine update); until those wraps install,
-    -- stamps carry tick=0. FRAME_INDEX stays in the stamp as the secondary,
+    -- stamps carry update=0. FRAME_INDEX stays in the stamp as the secondary,
     -- hardware/build-dependent axis. Both helpers are total over corrupted
     -- state (pcall + type checks) and never throw into engine code.
-    Mods._relay._tick = 0
-    local function tick_bump()
+    Mods._relay._update = 0
+    local function update_bump()
         _pcall(function()
-            local t = Mods._relay._tick
-            if _type(t) ~= "number" or t < 0 then t = 0 end
-            Mods._relay._tick = t + 1
+            local u = Mods._relay._update
+            if _type(u) ~= "number" or u < 0 then u = 0 end
+            Mods._relay._update = u + 1
         end)
     end
-    Mods._relay._tick_bump = tick_bump
+    Mods._relay._update_bump = update_bump
 
-    -- Combined correlation stamp: " tick=N frame=M" (tick primary, FRAME_INDEX
-    -- secondary), " frame=?" before that global exists (pre-main.lua moments;
-    -- it is initialized to -1 by scripts/main.lua and increments once per
-    -- Main.update, so the initial -1 renders as a number). Leading space by
-    -- design so call sites can append it directly. Never throws.
+    -- Combined correlation stamp: " update=N frame=M", led by " stage=S"
+    -- while a load pass is between its first load attempt and its finalize
+    -- (mod_manager publishes the stage epoch — the update of that first
+    -- attempt — on Mods._relay._stage_epoch; S = current update - epoch,
+    -- 0 on the first loading update, +1 per update after, cleared at pass
+    -- end). Field order: stage, update, frame. " frame=?" before that global
+    -- exists (pre-main.lua moments; it is initialized to -1 by
+    -- scripts/main.lua and increments once per Main.update, so the initial
+    -- -1 renders as a number). Leading space by design so call sites can
+    -- append it directly. Never throws.
     local function frame_stamp()
         local ok, stamp = _pcall(function()
-            local t = Mods._relay._tick
-            if _type(t) ~= "number" or t < 0 then t = 0 end
+            local u = Mods._relay._update
+            if _type(u) ~= "number" or u < 0 then u = 0 end
+            local lead = ""
+            local epoch = Mods._relay._stage_epoch
+            if _type(epoch) == "number" and epoch >= 0 then
+                local s = u - epoch
+                if s < 0 then s = 0 end
+                lead = " stage=" .. _tostring(s)
+            end
             local n = _rawget(_G, "FRAME_INDEX")
             if _type(n) == "number" then
-                return " tick=" .. _tostring(t) .. " frame=" .. _tostring(n)
+                return lead .. " update=" .. _tostring(u) .. " frame=" .. _tostring(n)
             end
-            return " tick=" .. _tostring(t) .. " frame=?"
+            return lead .. " update=" .. _tostring(u) .. " frame=?"
         end)
         if ok and _type(stamp) == "string" then
             return stamp
         end
-        return " tick=? frame=?"
+        return " update=? frame=?"
     end
     Mods._relay.frame_stamp = frame_stamp
 

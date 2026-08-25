@@ -123,14 +123,15 @@ signals hook-ready.
     hook chain, no string-path deferred queue). The `destroy` wrapper dispatches
     one final `on_game_state_changed("exit", …)` for the active state before
     destruction (deduplicated against `_change_state` per state machine).
-  The loader splits load into two phases: `init()` SCANs (reads `mods.lst`,
+  The loader splits load into two steps: `init()` SCANs (reads `mods.lst`,
     builds the `_mods` table — the order file is authoritative, the loader
     injects nothing; no mod loaded — the settings restore + observer
     registration are chassis Step-1c duties, run under any manager), and the first
-    `StateGame.update` tick LOADs (per-mod `run()` → nil/table validation →
+    `StateGame.update` manager update anchors the LOAD pass (one entry per
+    update thereafter — per-mod `run()` → nil/table validation →
     optional object `init()`, then
     `_state="done"` via the adapter) — deferred so boot-complete globals like
-    `Managers.input` exist. Every `update` tick also polls the developer-mode-
+    `Managers.input` exist. Every `update` also polls the developer-mode-
     gated hot-reload shortcut (LEFT Ctrl + LEFT Shift + R) and drives the
     reload state machine: a request is consumed at the start of an update into a
     teardown frame (`on_reload` forward → `on_unload` reverse → retire stale DMF

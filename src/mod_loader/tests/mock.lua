@@ -258,31 +258,41 @@ function M.attach_logger(sb)
     relay.log_debug = relay.log_debug or make("DEBUG")
     relay.log_warn  = relay.log_warn  or make("WARN")
     relay.log_error = relay.log_error or make("ERROR")
-    -- The loader-relative tick counter (init.lua publishes the real one on
+    -- The loader-relative update counter (init.lua publishes the real one on
     -- Mods._relay; seeded here so isolated module tests can read — and inject,
-    -- by assignment — a tick source).
-    if relay._tick == nil then
-        relay._tick = 0
+    -- by assignment — an update source).
+    if relay._update == nil then
+        relay._update = 0
     end
-    -- frame_stamp mirrors init.lua's helper: " tick=N frame=M" from the
-    -- injectable relay._tick + the sandbox's FRAME_INDEX (sb._G == sb, so
-    -- this is the module-side rawget(_G, ...)); " frame=?" when absent or
-    -- non-number; a corrupted _tick renders as 0.
+    -- frame_stamp mirrors init.lua's helper: " stage=S update=N frame=M" —
+    -- the stage lead appears only while a load pass is between its first load
+    -- attempt and its finalize (mod_manager publishes the stage epoch on
+    -- relay._stage_epoch; S = update - epoch, 0-based per pass) — computed
+    -- from the injectable relay._update + the sandbox's FRAME_INDEX
+    -- (sb._G == sb, so this is the module-side rawget(_G, ...)); " frame=?"
+    -- when absent or non-number; a corrupted _update renders as 0.
     if relay.frame_stamp == nil then
         relay.frame_stamp = function()
-            local t = relay._tick
-            if type(t) ~= "number" or t < 0 then t = 0 end
+            local u = relay._update
+            if type(u) ~= "number" or u < 0 then u = 0 end
+            local lead = ""
+            local epoch = relay._stage_epoch
+            if type(epoch) == "number" and epoch >= 0 then
+                local s = u - epoch
+                if s < 0 then s = 0 end
+                lead = " stage=" .. tostring(s)
+            end
             local n = rawget(sb, "FRAME_INDEX")
             local f = type(n) == "number" and tostring(n) or "?"
-            return " tick=" .. tostring(t) .. " frame=" .. f
+            return lead .. " update=" .. tostring(u) .. " frame=" .. f
         end
     end
-    -- _tick_bump mirrors init.lua's helper (defensive reset + increment).
-    if relay._tick_bump == nil then
-        relay._tick_bump = function()
-            local t = relay._tick
-            if type(t) ~= "number" or t < 0 then t = 0 end
-            relay._tick = t + 1
+    -- _update_bump mirrors init.lua's helper (defensive reset + increment).
+    if relay._update_bump == nil then
+        relay._update_bump = function()
+            local u = relay._update
+            if type(u) ~= "number" or u < 0 then u = 0 end
+            relay._update = u + 1
         end
     end
     -- display_text mirrors init.lua's shared scrubber (real semantics —

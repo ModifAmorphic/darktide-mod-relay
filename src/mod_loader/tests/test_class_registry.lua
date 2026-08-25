@@ -316,6 +316,27 @@ return function(runner)
             "the gated TRACE helper appends the frame stamp")
     end)
 
+    runner.register("class_registry: registration lines carry the current stage while a pass epoch is published", function()
+        -- A class registering DURING a load pass (mods register classes from
+        -- their run) lands between the pass's first load and its finalize,
+        -- so its TRACE line leads with the derived stage.
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods._relay._update = 12
+        sb.Mods._relay._stage_epoch = 11
+        sb.Mods.install_class_registry()
+        sb.FRAME_INDEX = 11
+        sb.class("Staged")
+        runner.assert_eq(1, count_log(logged, "class registered: Staged stage=1 update=12 frame=11"),
+            "a registration during the pass carries the current stage")
+        -- Outside a pass (no epoch) the same registration is unstaged.
+        sb.Mods._relay._stage_epoch = nil
+        sb.class("Unstaged")
+        runner.assert_eq(1, count_log(logged, "class registered: Unstaged update=12 frame=11"),
+            "with no epoch published the registration stamp carries no stage")
+    end)
+
     runner.register("class_registry: registration emits NO trace lines when the gate is off (default)", function()
         local cf = fake_class()
         local sb, logged = setup(cf)
