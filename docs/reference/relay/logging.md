@@ -152,42 +152,69 @@ TRACE is the one deliberate exception, plus one correlation convention:
   set includes one line per class registration (thousands per boot); emitting
   that unfiltered would swamp the console log. Every other level keeps the
   unconditional mechanism.
-- **Tick/frame stamp convention.** Every TRACE line auto-appends
-  ` tick=N frame=M`, and the state-transition DEBUG lines append the same
-  stamp explicitly — so a startup log reads on one time axis (both sinks
-  already timestamp lines, so wall-clock time comes free). `tick` is the
-  **primary** axis: the loader-relative count of observed engine update
-  boundaries since injection — `0` at the loader's pcall#1 entry (the
-  injection epoch, before any engine update has run under its observation),
-  `+1` at each observed `Main.update` entry (the same boundary the engine
-  uses for `FRAME_INDEX`), driven by the loader's
+- **Stage/update/frame stamp convention.** Every TRACE line auto-appends
+  `update=U frame=F` — plus `stage=S` while a load pass is between its
+  first entry's load and its finalize — and the state-transition DEBUG lines
+  append the same stamp explicitly — so a startup log reads on one time axis
+  (both sinks already timestamp lines, so wall-clock time comes free).
+  `update` is the **primary** axis: the loader-relative count of observed
+  engine update boundaries since the loader started running at injection —
+  `0` at the loader's pcall#1 entry (the injection epoch, before any engine
+  update has run under its observation), `+1` at each observed
+  `Main.update` entry, driven by the loader's
   `StateBoot.update` → `StateGame.update` wrap chain; the game-state machine
   runs exactly one current-state update per engine update, so exactly one
-  wrap fires per update (no double increment). Being loader-relative, tick is
-  comparable across boots, machines, and builds. `frame` is the **secondary**
-  axis: the engine's `FRAME_INDEX` global (incremented once per
-  `Main.update`, initialized to `-1` by `scripts/main.lua`) — a
-  hardware/build-dependent performance gut-check; before that global exists
-  (pre-`main.lua` moments) the frame field is `?`.
+  wrap fires per update (no double increment). Being loader-relative, update
+  is comparable across boots, machines, and builds. `stage` is the per-pass
+  load counter: `0` on the update a pass's first entry begins loading, `+1`
+  every update until the pass's entries have all loaded, then absent. It is
+  present only while a pass is actively loading (never on the pass-begin
+  line, which precedes any load; never after finalize; never at all for an
+  empty/missing `mods.lst` pass), resets per pass (each hot-reload replay's
+  first entry is stage 0), and failed entries still consume their update —
+  a failed first entry logs stage 0, the next entry stage 1 — so the
+  numbering never compresses. `frame` is the **secondary** axis: the frame
+  number reported by the game (the engine's `FRAME_INDEX` global,
+  incremented once per `Main.update`, initialized to `-1` by
+  `scripts/main.lua`) — a hardware/build-dependent performance gut-check;
+  before that global exists (pre-`main.lua` moments) the frame field is `?`.
+- **Update ↔ frame relationship.** At every stable point
+  **`update = frame + 1`**: the engine increments `FRAME_INDEX` at
+  `Main.update` entry, and the update bump lands later in the same frame, at
+  the wrapped state-update entry (`StateBoot.update` / `StateGame.update`).
+  Two consequences for reading logs: on the single boot→session handoff
+  frame, stamped lines can carry the **previous** update value with the
+  **new** frame — the frame bumped at `Main.update` entry, but the frame's
+  wrapped state-update (and with it the update bump) had not fired yet when
+  they logged — a one-update anomaly, not
+  drift; and updates with no loggable loader events simply do not appear in
+  the log — a gap between stamped lines is a quiet update, not a skipped
+  one.
 - **Event categories and levels.** Class registration: one gated TRACE per
   string-named `class()` registration (non-string names are not registered and
   log nothing); class retirement: one DEBUG per `retire_class` (rare).
   Load passes: one DEBUG scan summary per scan, one DEBUG initial-pass
-  completion summary, and — trace only — a pass-begin line (`(initial)`, or
-  `(reload, generation N)`; the begin line lands on the pass's first manager
-  tick — the phase-0 anchor, which loads no entries), a begin/outcome line
-  pair per entry (each entry's pair lands on its own load tick — the pass
-  advances one entry per manager tick), and a pass-end line
+  completion summary, and — trace only — a pass-begin line
+  (`load pass begin (initial)`, or
+  `load pass begin (reload, generation N)`; the begin line lands on the
+  pass's anchor update — bookkeeping only, no entries load, so it carries no
+  stage), a begin/outcome line pair per entry (each entry's pair lands on
+  its own load update — the pass advances one entry per update — e.g.
+  `load entry #1 'dmf' stage=0 update=37 frame=36`), and a pass-end line
   (`load pass end (initial, generation G)` or
-  `load pass end (reload, generation G)`, emitted on the tick the pass
-  finalizes — the same tick as the DEBUG initial-pass completion summary for
-  an initial pass, or the hot-reload completion INFO/WARN for a replacement
-  replay; `G` is the generation the pass installed). Bootstrap
+  `load pass end (reload, generation G)`, emitted on the update the pass
+  finalizes — the last entry's load update — carrying the final stage, e.g.
+  `load pass end (initial, generation 1) stage=12 update=49 frame=48`;
+  `G` is the generation the pass installed; the same update carries the
+  DEBUG initial-pass completion summary for an initial pass, or the
+  hot-reload completion INFO/WARN for a replacement replay). The full
+  pacing/stage contract is normative in
+  [`load-stages.md`](load-stages.md). Bootstrap
   landings: one DEBUG line the first time each wrapped step lands (manager
-  created, the `StateBoot.update` tick driver, `StateGame.update`,
+  created, the `StateBoot.update` update driver, `StateGame.update`,
   `GameStateMachine._change_state` / `.destroy`, and the opt-in StateSplash
   wrap). State dispatches: one DEBUG line per
-  successful exit / enter / final-exit dispatch (tick/frame-stamped); a dispatch
+  successful exit / enter / final-exit dispatch (stage/update/frame-stamped); a dispatch
   that is skipped or fails contained logs no success line. Names interpolated
   into these lines (class names, state names) are rendered through a safe,
   scrubbed, length-capped form — a control-bearing or unprintable name can

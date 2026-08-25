@@ -60,11 +60,11 @@ the whole staging step.
 
 Relay scans `mods.lst` into an entry list **without** executing any `.mod`;
 `.mod` execution happens during the load pass, in listed order — one entry
-per manager tick. The probe is
+per manager update. The probe is
 listed last, so alpha and beta load (and publish their `Mod:` keys) on
-earlier ticks, before the probe's `.mod` executes on its own. On the first
+earlier updates, before the probe's `.mod` executes on its own. On the first
 generation expect (roughly, one line per
-event, in this order — the phased tick spread changes, the order does not):
+event, in this order — the staged update spread changes, the order does not):
 
 ```
 [CRASHIFY_ALPHA] run executed (nil-return descriptor)
@@ -123,9 +123,9 @@ while `ModRelay:Version` and retained keys survive.
    cp mods-without-alpha.lst mods.lst
    ```
 2. Trigger a developer-mode hot reload (Left Ctrl + Left Shift + R).
-3. Wait one generation (the replacement replays the phased pass — an anchor
-   tick, then one entry per tick). The probe emits a new observe line labeled
-   `generation-label=#2`.
+3. Wait one generation (the replacement replays the staged pass — an anchor
+   update, then one entry per update). The probe emits a new observe line
+   labeled `generation-label=#2`.
 
 ### Expected absence / presence after the reload
 

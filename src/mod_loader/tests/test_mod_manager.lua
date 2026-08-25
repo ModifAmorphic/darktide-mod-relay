@@ -113,34 +113,34 @@ return function(runner)
         return mm
     end
 
-    -- Tick update(0.016) until the load pass finalizes (phased loading: the
-    -- phase-0 anchor tick loads nothing, then one entry per tick). Bounded;
-    -- asserts the pass actually completes. Returns the ticks driven.
-    local function tick_to_done(mm, bound)
+    -- Drive update(0.016) until the load pass finalizes (staged loading: the
+    -- anchor update loads nothing, then one entry per update). Bounded;
+    -- asserts the pass actually completes. Returns the updates driven.
+    local function update_to_done(mm, bound)
         bound = bound or 100
-        local ticks = 0
+        local updates = 0
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
-            if ticks > bound then
-                runner.fail("load pass did not finalize within " .. bound .. " ticks")
+            updates = updates + 1
+            if updates > bound then
+                runner.fail("load pass did not finalize within " .. bound .. " updates")
             end
             mm:update(0.016)
         end
-        return ticks
+        return updates
     end
 
     local function new_loaded(sb)
         local mm = new_manager(sb)
-        tick_to_done(mm)
+        update_to_done(mm)
         return mm
     end
 
     -- A recording mod object.
-    local function recording_mod(name, seq, fail_phase)
+    local function recording_mod(name, seq, fail_at)
         return {
             init = function(self)
                 table.insert(seq, name .. ":init")
-                if fail_phase == "init" then error(name .. " init boom") end
+                if fail_at == "init" then error(name .. " init boom") end
             end,
             update = function(self, dt) end,
             on_game_state_changed = function(self, status, sname) end,
@@ -215,7 +215,7 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
-    -- SCAN phase (init)
+    -- SCAN step (init)
     -- ---------------------------------------------------------------------
 
     runner.register("mod_manager: init() scans only — builds _mods, loads no mod", function()
@@ -304,7 +304,7 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
-    -- LOAD phase (first update)
+    -- LOAD step (first update)
     -- ---------------------------------------------------------------------
 
     runner.register("mod_manager: _state nil after init, 'done' once the pass finalizes", function()
@@ -317,11 +317,11 @@ return function(runner)
         end
         local mm = new_manager(sb)
         runner.assert_nil(mm._state)
-        tick_to_done(mm)
+        update_to_done(mm)
         runner.assert_eq(false, state_done_during_load,
             "_state must NOT be 'done' while the entry is loading")
         runner.assert_eq("done", mm._state)
-        -- A later tick must not change _state.
+        -- A later update must not change _state.
         mm:update(0.033)
         runner.assert_eq("done", mm._state)
     end)
@@ -475,7 +475,7 @@ return function(runner)
         -- Mutate the first entry into a shape the adapter rejects (no handle).
         -- The "good" entry is left intact so it should still load.
         mm._mods[1].handle = nil
-        tick_to_done(mm)
+        update_to_done(mm)
 
         -- The invalid entry is skipped with the clear log line.
         local invalid_log
@@ -514,11 +514,11 @@ return function(runner)
     end)
 
     -- ---------------------------------------------------------------------
-    -- Phased loading: phase-0 anchor tick + exactly ONE entry per manager
-    -- tick, in mods.lst order (community loader parity).
+    -- Staged loading: anchor update + exactly ONE entry per manager
+    -- update, in mods.lst order (community loader parity).
     -- ---------------------------------------------------------------------
 
-    runner.register("mod_manager: phased — first update is the phase-0 anchor, loads NO entries", function()
+    runner.register("mod_manager: staged — first update is the anchor, loads NO entries", function()
         local sb = setup({ order = { "alpha", "beta" } })
         local execd = {}
         sb.Mods.file.exec_with_return = function(p)
@@ -527,55 +527,55 @@ return function(runner)
                       [mod_path("beta")] = mod_file("beta", { init = function() end }) })[p]
         end
         local mm = new_manager(sb)
-        mm:update(0.016)  -- anchor tick: pass bookkeeping only
-        runner.assert_eq({}, execd, "the anchor tick executes no .mod")
+        mm:update(0.016)  -- anchor update: pass bookkeeping only
+        runner.assert_eq({}, execd, "the anchor update executes no .mod")
         runner.assert_eq("not_loaded", mm._mods[1].state)
         runner.assert_eq("not_loaded", mm._mods[2].state)
         runner.assert_eq(false, mm._adapter:is_load_done(), "the pass is still in flight")
         runner.assert_nil(mm._mod_load_index, "no begin_load_entry fired on the anchor")
     end)
 
-    runner.register("mod_manager: phased — entry i loads exactly on tick i+1, in list order", function()
+    runner.register("mod_manager: staged — entry i loads exactly on update i+1, in list order", function()
         local logged = {}
         local sb = setup({ order = { "alpha", "beta" } })
         sb.__print = function(m) table.insert(logged, m) end
         sb.Mods._relay._trace_enabled = true
-        local load_tick = {}
-        local ticks = 0
+        local load_update = {}
+        local updates = 0
         sb.Mods.file.exec_with_return = function(p)
-            load_tick[p:match("^(.-)/")] = ticks  -- the tick currently running
+            load_update[p:match("^(.-)/")] = updates  -- the update currently running
             return ({ [mod_path("alpha")] = mod_file("alpha", { init = function() end }),
                       [mod_path("beta")] = mod_file("beta", { init = function() end }) })[p]
         end
         local mm = new_manager(sb)
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
+            updates = updates + 1
             mm:update(0.016)
-            if ticks == 1 then
-                runner.assert_nil(load_tick.alpha, "nothing loads on the anchor tick")
+            if updates == 1 then
+                runner.assert_nil(load_update.alpha, "nothing loads on the anchor update")
                 runner.assert_eq(0, count_log(logged, "load pass end"),
-                    "no pass-end line before the finalize tick")
-            elseif ticks == 2 then
-                runner.assert_eq(2, load_tick.alpha, "alpha loads on tick 2 (phase 1)")
-                runner.assert_nil(load_tick.beta, "beta still unloaded after tick 2")
-                runner.assert_eq(false, mm._adapter:is_load_done(), "pass active after tick 2")
+                    "no pass-end line before the finalize update")
+            elseif updates == 2 then
+                runner.assert_eq(2, load_update.alpha, "alpha loads on update 2 (first entry)")
+                runner.assert_nil(load_update.beta, "beta still unloaded after update 2")
+                runner.assert_eq(false, mm._adapter:is_load_done(), "pass active after update 2")
                 runner.assert_eq(0, count_log(logged, "load pass end"),
-                    "no pass-end line before the finalize tick")
+                    "no pass-end line before the finalize update")
             end
         end
-        runner.assert_eq(3, ticks, "the 2-entry pass finalizes on tick 3")
-        runner.assert_eq(3, load_tick.beta, "beta loads on tick 3 (phase 2)")
+        runner.assert_eq(3, updates, "the 2-entry pass finalizes on update 3")
+        runner.assert_eq(3, load_update.beta, "beta loads on update 3 (second entry)")
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq("running", mm._mods[1].state)
         runner.assert_eq("running", mm._mods[2].state)
         runner.assert_eq(1, count_log(logged, "load pass end (initial, generation 1)"),
-            "the pass-end TRACE lands exactly once, on the initial finalize tick")
+            "the pass-end TRACE lands exactly once, on the initial finalize update")
     end)
 
-    runner.register("mod_manager: phased — updates interleave: first update on the entry's own load tick", function()
+    runner.register("mod_manager: staged — updates interleave: first update on the entry's own load update", function()
         -- Earlier entries keep receiving updates while later entries are
         -- still unloaded; each entry's FIRST update fires on its own load
-        -- tick (load step, then the same tick's update fan-out).
+        -- update (load step, then the same update's fan-out).
         local events = {}
         local sb = setup({ order = { "alpha", "beta" } })
         local function outer(name)
@@ -589,8 +589,8 @@ return function(runner)
                       [mod_path("beta")] = mod_file("beta", outer("beta")) })[p]
         end
         local mm = new_manager(sb)
-        tick_to_done(mm)
-        -- tick 2: alpha:init then alpha:update. tick 3: beta:init, then the
+        update_to_done(mm)
+        -- update 2: alpha:init then alpha:update. update 3: beta:init, then the
         -- fan-out drives alpha (already loaded) and beta (just loaded).
         runner.assert_eq({
             "alpha:init", "alpha:update",
@@ -598,32 +598,32 @@ return function(runner)
         }, events)
     end)
 
-    runner.register("mod_manager: phased — a failing entry burns its phase; the next entry loads one tick later", function()
+    runner.register("mod_manager: staged — a failing entry burns its update; the next entry loads one update later", function()
         local sb = setup({ order = { "boom", "good" } })
-        local load_tick = {}
-        local ticks = 0
+        local load_update = {}
+        local updates = 0
         sb.Mods.file.exec_with_return = function(p)
-            load_tick[p:match("^(.-)/")] = ticks
+            load_update[p:match("^(.-)/")] = updates
             return ({ [mod_path("boom")] = mod_file("boom", nil, nil, true),
                       [mod_path("good")] = mod_file("good", { init = function() end }) })[p]
         end
         local mm = new_manager(sb)
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
+            updates = updates + 1
             mm:update(0.016)
-            if ticks == 1 then
-                runner.assert_nil(next(load_tick), "nothing loads on the anchor tick")
+            if updates == 1 then
+                runner.assert_nil(next(load_update), "nothing loads on the anchor update")
             end
         end
-        runner.assert_eq(3, ticks, "boom burned phase 1; good waited for its own tick")
-        runner.assert_eq(2, load_tick.boom, "boom's failed run still consumed tick 2")
-        runner.assert_eq(3, load_tick.good, "good loads on tick 3, not early on tick 2")
+        runner.assert_eq(3, updates, "boom burned its update; good waited for its own update")
+        runner.assert_eq(2, load_update.boom, "boom's failed run still consumed update 2")
+        runner.assert_eq(3, load_update.good, "good loads on update 3, not early on update 2")
         runner.assert_eq("failed", mm._mods[1].state)
         runner.assert_eq("running", mm._mods[2].state)
         runner.assert_eq(true, mm._adapter:is_load_done())
     end)
 
-    runner.register("mod_manager: phased — framework init failure finalizes on THAT tick; later entries skipped", function()
+    runner.register("mod_manager: staged — framework init failure finalizes on THAT update; later entries skipped", function()
         local logged = {}
         local seq = {}
         local sb = setup({ order = { "prior", "dmf", "later" } })
@@ -646,12 +646,12 @@ return function(runner)
         mm:update(0.016)  -- anchor
         runner.assert_eq("not_loaded", mm._mods[3].state)
         mm:update(0.016)  -- prior loads
-        runner.assert_eq(false, mm._adapter:is_load_done(), "pass active after prior's tick")
-        mm:update(0.016)  -- dmf's init raises -> finalize on THIS tick
+        runner.assert_eq(false, mm._adapter:is_load_done(), "pass active after prior's update")
+        mm:update(0.016)  -- dmf's init raises -> finalize on THIS update
         runner.assert_eq(true, mm._adapter:is_load_done(),
-            "the pass finalizes on the framework-failure tick")
+            "the pass finalizes on the framework-failure update")
         runner.assert_eq({ "prior:init", "dmf:init", "dmf:unload", "prior:unload" }, seq,
-            "reverse-order cleanup ran on the failure tick")
+            "reverse-order cleanup ran on the failure update")
         runner.assert_eq("stopped", mm._mods[1].state)
         runner.assert_eq("disabled", mm._mods[2].state)
         runner.assert_eq("skipped", mm._mods[3].state, "later never loaded -> skipped")
@@ -663,13 +663,13 @@ return function(runner)
         runner.assert_nil(mm._mod_load_index)
     end)
 
-    runner.register("mod_manager: phased — empty mods.lst begins AND finalizes on the anchor tick", function()
+    runner.register("mod_manager: staged — empty mods.lst begins AND finalizes on the anchor update", function()
         local logged = {}
         local sb = setup({ order = {} })
         sb.__print = function(m) table.insert(logged, m) end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor == finalize
-        runner.assert_eq(true, mm._adapter:is_load_done(), "empty pass done on the anchor tick")
+        runner.assert_eq(true, mm._adapter:is_load_done(), "empty pass done on the anchor update")
         runner.assert_eq(1, mm._generation)
         runner.assert_eq(1, count_log(logged, "initial load pass complete: 0 entries, 0 failed"))
 
@@ -678,10 +678,10 @@ return function(runner)
         local mm2 = new_manager(sb2)
         mm2:update(0.016)
         runner.assert_eq(true, mm2._adapter:is_load_done(),
-            "missing-list pass also begins and finalizes on the anchor tick")
+            "missing-list pass also begins and finalizes on the anchor update")
     end)
 
-    runner.register("mod_manager: phased — escaped load-step error force-finalizes; remaining entries stay not_loaded", function()
+    runner.register("mod_manager: staged — escaped load-step error force-finalizes; remaining entries stay not_loaded", function()
         -- A raising Mods.file.exec_with_return escapes _load_one (no inner
         -- pcall on that call, by design — the pass-level containment owns it).
         local logged = {}
@@ -692,12 +692,12 @@ return function(runner)
             return mod_file("beta", { init = function() end })
         end
         local mm = new_manager(sb)
-        local ticks = 0
+        local updates = 0
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
+            updates = updates + 1
             mm:update(0.016)
         end
-        runner.assert_eq(2, ticks, "the escape finalizes on the entry's tick")
+        runner.assert_eq(2, updates, "the escape finalizes on the entry's update")
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq("not_loaded", mm._mods[1].state, "the escaping entry stays not_loaded")
         runner.assert_eq("not_loaded", mm._mods[2].state, "remaining entries stay not_loaded")
@@ -708,7 +708,7 @@ return function(runner)
         runner.assert_not_nil(find_log(logged, "initial generation finalized with errors"))
     end)
 
-    runner.register("mod_manager: phased — a nil-valued escape (error(nil)) still force-finalizes", function()
+    runner.register("mod_manager: staged — a nil-valued escape (error(nil)) still force-finalizes", function()
         -- error(nil) is legal Lua; pcall returns (false, nil), so the escape
         -- must coerce to truthy or the pass would silently skip the force-
         -- finalize and keep loading later entries.
@@ -720,13 +720,13 @@ return function(runner)
             return mod_file("beta", { init = function() end })
         end
         local mm = new_manager(sb)
-        local ticks = 0
+        local updates = 0
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
-            if ticks > 100 then runner.fail("nil escape stalled the pass") end
+            updates = updates + 1
+            if updates > 100 then runner.fail("nil escape stalled the pass") end
             mm:update(0.016)
         end
-        runner.assert_eq(2, ticks, "the nil escape finalizes on the entry's own tick")
+        runner.assert_eq(2, updates, "the nil escape finalizes on the entry's own update")
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq("not_loaded", mm._mods[1].state, "the escaping entry stays not_loaded")
         runner.assert_eq("not_loaded", mm._mods[2].state, "remaining entries stay not_loaded")
@@ -735,7 +735,7 @@ return function(runner)
             "the nil escape still logs the pass error line")
     end)
 
-    runner.register("mod_manager: phased — destroy mid-pass settles the pass; a later update loads nothing further", function()
+    runner.register("mod_manager: staged — destroy mid-pass settles the pass; a later update loads nothing further", function()
         local sb = setup({ order = { "alpha", "beta" } })
         local execd = {}
         sb.Mods.file.exec_with_return = function(p)
@@ -745,12 +745,12 @@ return function(runner)
         end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- alpha's tick (pass open; beta still pending)
+        mm:update(0.016)  -- alpha's update (pass open; beta still pending)
         runner.assert_eq(false, mm._adapter:is_load_done())
-        runner.assert_not_nil(mm._load_phase)
+        runner.assert_not_nil(mm._load_cursor)
 
         mm:destroy()
-        runner.assert_nil(mm._load_phase, "destroy settles the pass fields")
+        runner.assert_nil(mm._load_cursor, "destroy settles the pass fields")
         runner.assert_nil(mm._pass_kind)
         runner.assert_nil(mm._mod_load_index, "destroy clears the load index")
         runner.assert_eq(false, mm._adapter:is_load_done(),
@@ -765,7 +765,7 @@ return function(runner)
         runner.assert_eq("not_loaded", mm._mods[2].state, "the pending entry never loads")
     end)
 
-    runner.register("mod_manager: phased — _mod_load_index holds entry P after its tick, nil after finalize", function()
+    runner.register("mod_manager: staged — _mod_load_index holds entry P after its update, nil after finalize", function()
         local seen_during_update = nil
         local sb = setup({ order = { "alpha", "beta" } })
         local function outer(name)
@@ -785,19 +785,116 @@ return function(runner)
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
         runner.assert_nil(mm._mod_load_index)
-        mm:update(0.016)  -- alpha's tick
+        mm:update(0.016)  -- alpha's update
         runner.assert_eq(1, mm._mod_load_index,
-            "index still points at entry 1 after its tick (community parity)")
+            "index still points at entry 1 after its update (community parity)")
         runner.assert_eq(1, seen_during_update,
-            "the index persists through the same tick's update fan-out")
-        mm:update(0.016)  -- beta's tick + finalize
+            "the index persists through the same update's fan-out")
+        mm:update(0.016)  -- beta's update + finalize
         runner.assert_nil(mm._mod_load_index, "index clears once, at finalize")
     end)
 
+    runner.register("mod_manager: staged — TRACE stamps: begin unstaged, entry #k stage=k-1, end carries the final stage", function()
+        -- The stamp vocabulary: stage (0 at the first loading update, +1 per
+        -- update after, per pass), update (since injection), frame (engine).
+        -- The engine wraps bump the counter at update entry; mirror that here
+        -- so each manager update runs with a fresh update/frame pair.
+        local logged = {}
+        local sb = setup({ order = { "alpha", "beta", "gamma" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = 0
+        sb.Mods.file.exec_with_return = function(p)
+            local name = p:match("^(.-)/")
+            return mod_file(name, { init = function() end })
+        end
+        local mm = new_manager(sb)
+        local function engine_update()
+            sb.Mods._relay._update_bump()
+            sb.FRAME_INDEX = sb.FRAME_INDEX + 1
+            mm:update(0.016)
+        end
+
+        engine_update()  -- update=1: the anchor (begin line, nothing loads)
+        local begin_line = find_log(logged, "load pass begin (initial)")
+        runner.assert_not_nil(begin_line)
+        runner.assert_eq(1, count_log(logged, "load pass begin (initial) update=1 frame=1"),
+            "the begin line is stamped but carries NO stage (nothing loaded yet)")
+        runner.assert_truthy(not begin_line:find("stage=", 1, true),
+            "no stage field exists before the first load attempt")
+
+        engine_update()  -- update=2: entry #1
+        engine_update()  -- update=3: entry #2
+        engine_update()  -- update=4: entry #3 + finalize (pass ends on the last entry's update)
+        runner.assert_eq(1, count_log(logged, "load entry #1 'alpha' stage=0 update=2 frame=2"),
+            "entry #1 opens the stage at 0")
+        runner.assert_eq(1, count_log(logged, "load entry #2 'beta' stage=1 update=3 frame=3"),
+            "entry #k carries stage=k-1")
+        runner.assert_eq(1, count_log(logged, "load entry #3 'gamma' stage=2 update=4 frame=4"))
+        runner.assert_eq(1, count_log(logged, "entry 'gamma' result=running stage=2 update=4 frame=4"),
+            "same-update lines share the stage")
+        runner.assert_eq(1, count_log(logged, "load pass end (initial, generation 1) stage=2 update=4 frame=4"),
+            "the end line carries the pass's final stage (the last entry's stage)")
+        runner.assert_eq(true, mm._adapter:is_load_done())
+
+        -- After finalize the pass no longer stages anything: the epoch is
+        -- cleared and the stamp is unstaged again.
+        runner.assert_nil(sb.Mods._relay._stage_epoch,
+            "finalize clears the stage epoch")
+        runner.assert_eq(" update=4 frame=4", sb.Mods._relay.frame_stamp(),
+            "the stamp carries no stage once the pass finalized")
+    end)
+
+    runner.register("mod_manager: staged — a failed FIRST entry still opens the stage (attempt-based)", function()
+        local logged = {}
+        local sb = setup({ order = { "boom", "good" } })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = 0
+        sb.Mods.file.exec_with_return = function(p)
+            return ({ [mod_path("boom")] = mod_file("boom", nil, nil, true),
+                      [mod_path("good")] = mod_file("good", { init = function() end }) })[p]
+        end
+        local mm = new_manager(sb)
+        local function engine_update()
+            sb.Mods._relay._update_bump()
+            sb.FRAME_INDEX = sb.FRAME_INDEX + 1
+            mm:update(0.016)
+        end
+        engine_update()  -- anchor
+        engine_update()  -- boom's load attempt (run raises)
+        engine_update()  -- good's load + finalize
+        runner.assert_eq(1, count_log(logged, "load entry #1 'boom' stage=0 update=2 frame=2"),
+            "the first ATTEMPT opens the stage (failed or not)")
+        runner.assert_eq(1, count_log(logged, "entry 'boom' result=failed stage=0 update=2 frame=2"))
+        runner.assert_eq(1, count_log(logged, "load entry #2 'good' stage=1 update=3 frame=3"),
+            "the next update's entry is stage=1 — the failed entry burned its update")
+    end)
+
+    runner.register("mod_manager: staged — empty mods.lst: no stage anywhere, begin and end unstaged", function()
+        local logged = {}
+        local sb = setup({ order = {} })
+        sb.__print = function(m) table.insert(logged, m) end
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = 0
+        local mm = new_manager(sb)
+        sb.Mods._relay._update_bump()
+        sb.FRAME_INDEX = sb.FRAME_INDEX + 1
+        mm:update(0.016)  -- anchor == finalize (no entry ever loads)
+        runner.assert_eq(true, mm._adapter:is_load_done())
+        runner.assert_eq(1, count_log(logged, "load pass begin (initial) update=1 frame=1"),
+            "the begin line is unstaged")
+        runner.assert_eq(1, count_log(logged, "load pass end (initial, generation 1) update=1 frame=1"),
+            "the end line is unstaged too (same update; no load ever happened)")
+        runner.assert_eq(0, count_log(logged, "stage="),
+            "an empty pass never publishes a stage epoch -> no staged line anywhere")
+        runner.assert_nil(sb.Mods._relay._stage_epoch)
+    end)
+
     -- ---------------------------------------------------------------------
-    -- on_game_state_changed across the phased pass: dispatch to loaded
+    -- on_game_state_changed across the staged pass: dispatch to loaded
     -- entries during the INITIAL pass (community parity — boot transitions
-    -- can land inside the multi-tick pass); suppression everywhere else.
+    -- can land inside the multi-update pass); suppression everywhere else.
     -- ---------------------------------------------------------------------
 
     runner.register("mod_manager: gsc mid-initial-pass dispatches to already-loaded entries only", function()
@@ -817,7 +914,7 @@ return function(runner)
         end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- alpha's tick (beta still not_loaded)
+        mm:update(0.016)  -- alpha's update (beta still not_loaded)
         runner.assert_eq(false, mm._adapter:is_load_done(), "pass still open")
 
         local sobj = { _name = "StateTitle" }
@@ -876,7 +973,7 @@ return function(runner)
         mm:update(0.016)  -- prior loads
         mm:update(0.016)  -- dmf init raises -> framework stop
         runner.assert_eq(true, mm._generation_failed, "sanity: generation stopped")
-        runner.assert_eq(true, mm._adapter:is_load_done(), "pass finalized on the failure tick")
+        runner.assert_eq(true, mm._adapter:is_load_done(), "pass finalized on the failure update")
 
         local ok, err = pcall(function()
             mm:on_game_state_changed("enter", "StateTitle", {})
@@ -904,7 +1001,7 @@ return function(runner)
         end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- boom's tick
+        mm:update(0.016)  -- boom's update
         runner.assert_eq("running", mm._mods[1].state)
 
         mm:on_game_state_changed("enter", "StateTitle", {})  -- boom raises
@@ -912,10 +1009,10 @@ return function(runner)
             "the one-strike containment disabled the failing entry")
         runner.assert_eq(false, mm._adapter:is_load_done(), "the pass is still open")
 
-        mm:update(0.016)  -- good's own tick — the pass advances normally
+        mm:update(0.016)  -- good's own update — the pass advances normally
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq("running", mm._mods[2].state,
-            "the sibling still loads on its own tick (pass unaffected)")
+            "the sibling still loads on its own update (pass unaffected)")
         runner.assert_not_nil(find_log(logged, "mod 'boom' on_game_state_changed failed"))
         runner.assert_eq(1, #mm._failure_records)
         runner.assert_eq(1, mm._failure_records[1].generation,
@@ -924,11 +1021,11 @@ return function(runner)
 
     runner.register("mod_manager: a gsc-driven framework failure mid-initial-pass stops + finalizes cleanly", function()
         -- The composition the gsc gate makes reachable: dmf's outer
-        -- on_game_state_changed raises AFTER its load tick (prior loaded,
+        -- on_game_state_changed raises AFTER its load update (prior loaded,
         -- later still unloaded). The framework path fires FROM the dispatch
-        -- (stop flag set, loaded outers reverse-cleaned on that tick), an
+        -- (stop flag set, loaded outers reverse-cleaned on that update), an
         -- interim gsc dispatches nothing (gate open, _generation_failed early
-        -- return), and the NEXT tick finalizes the stopped pass.
+        -- return), and the NEXT update finalizes the stopped pass.
         local logged = {}
         local seq = {}
         local unloads = {}
@@ -955,9 +1052,9 @@ return function(runner)
         end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- prior's tick
-        mm:update(0.016)  -- dmf's load tick (init fine; later still unloaded)
-        runner.assert_eq(false, mm._adapter:is_load_done(), "pass open after dmf's tick")
+        mm:update(0.016)  -- prior's update
+        mm:update(0.016)  -- dmf's load update (init fine; later still unloaded)
+        runner.assert_eq(false, mm._adapter:is_load_done(), "pass open after dmf's update")
 
         local ok, err = pcall(function()
             mm:on_game_state_changed("enter", "StateTitle", {})
@@ -966,15 +1063,15 @@ return function(runner)
         runner.assert_eq(true, mm._generation_failed, "the framework path fired from gsc")
         runner.assert_eq(true, mm._stop_load_pass, "the stop flag is set")
         runner.assert_eq({ "dmf", "prior" }, unloads,
-            "loaded outers reverse-cleaned on the gsc tick")
+            "loaded outers reverse-cleaned on the gsc update")
         runner.assert_not_nil(find_log(logged, "framework-boundary lifecycle failure"))
         runner.assert_eq(1, #mm._failure_records)
         runner.assert_eq(true, mm._failure_records[1].framework)
 
-        -- Interim gsc before the next tick: gate OPEN (initial pass), so no
+        -- Interim gsc before the next update: gate OPEN (initial pass), so no
         -- suppressed log — and the _generation_failed early return dispatches
         -- nothing (no further callbacks, no double teardown).
-        runner.assert_not_nil(mm._load_phase, "the stopped pass is still open")
+        runner.assert_not_nil(mm._load_cursor, "the stopped pass is still open")
         local ok2, err2 = pcall(function()
             mm:on_game_state_changed("exit", "StateTitle", {})
         end)
@@ -982,9 +1079,9 @@ return function(runner)
         runner.assert_eq(0, count_log(logged, "on_game_state_changed ignored"),
             "no suppressed log: the gate is open mid-initial-pass")
         runner.assert_eq({ "dmf", "prior" }, unloads, "no additional teardown")
-        runner.assert_eq(false, mm._adapter:is_load_done(), "finalize waits for the next tick")
+        runner.assert_eq(false, mm._adapter:is_load_done(), "finalize waits for the next update")
 
-        mm:update(0.016)  -- the finalize tick
+        mm:update(0.016)  -- the finalize update
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq("skipped", mm._mods[3].state, "later never loaded -> skipped")
         local later_ran = false
@@ -1015,7 +1112,7 @@ return function(runner)
         end
         local mm = new_manager(sb)
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- alpha's tick (pass open)
+        mm:update(0.016)  -- alpha's update (pass open)
         mm:destroy()      -- settles the pass: fields nil -> suppressed again
 
         local ok, err = pcall(function()
@@ -1154,9 +1251,9 @@ return function(runner)
                 { update = function(self, dt) table.insert(calls, dt) end }) })[p]
         end
         local mm = new_manager(sb)
-        -- 1-entry list: anchor tick, then the entry tick (load + finalize in
-        -- one tick) — the mod's FIRST update fires on its own load tick.
-        tick_to_done(mm)
+        -- 1-entry list: anchor update, then the entry update (load + finalize in
+        -- one update) — the mod's FIRST update fires on its own load update.
+        update_to_done(mm)
         runner.assert_eq({ 0.016 }, calls)
         mm:update(0.033)
         runner.assert_eq({ 0.016, 0.033 }, calls)
@@ -1190,7 +1287,7 @@ return function(runner)
             return ({ [mod_path("dmf")] = mod_file("dmf", { init = function() end }) })[p]
         end
         local mm = new_manager(sb)
-        local ok, err = pcall(function() tick_to_done(mm) end)
+        local ok, err = pcall(function() update_to_done(mm) end)
         runner.assert_eq(true, ok, tostring(err))
         runner.assert_eq(0, count_error_level(logged),
             "a clean load pass logs no WARN/ERROR lines")

@@ -1573,15 +1573,15 @@ return function(runner)
             "exactly one io observer registered (chassis used the manager's adapter)")
 
         -- The version property published once at creation, BEFORE any per-mod
-        -- key from the load pass. The pass is phased (anchor tick, then one
-        -- entry per tick), so drive StateGame.update until the manager done.
-        local sg_ticks = 0
+        -- key from the load pass. The pass is staged (anchor update, then one
+        -- entry per update), so drive StateGame.update until the manager done.
+        local sg_updates = 0
         repeat
             sg.update(sg, 0.016)
-            sg_ticks = sg_ticks + 1
-        until mm._state == "done" or sg_ticks > 100
+            sg_updates = sg_updates + 1
+        until mm._state == "done" or sg_updates > 100
         runner.assert_eq("done", mm._state, "the real manager completed its load pass")
-        runner.assert_eq(2, sg_ticks, "1-entry phased pass: anchor tick + entry tick")
+        runner.assert_eq(2, sg_updates, "1-entry staged pass: anchor update + entry update")
         runner.assert_eq({ { "ModRelay:Version", "0.4.0-test" },
                            { "Mod:some_dmf_mod", true } }, crash_calls,
             "version precedes per-mod keys; one of each")
@@ -2116,15 +2116,39 @@ return function(runner)
         sb.FRAME_INDEX = 7
         local inst = setmetatable({ _state = { name = "StateA" } }, { __index = gsm })
         inst:_change_state("StateB")
-        runner.assert_eq(1, count_lines(logged, "state exit: StateA tick=0 frame=7"),
+        runner.assert_eq(1, count_lines(logged, "state exit: StateA update=0 frame=7"),
             "exit dispatch logs the outgoing state + stamp")
-        runner.assert_eq(1, count_lines(logged, "state enter: StateB tick=0 frame=7"),
+        runner.assert_eq(1, count_lines(logged, "state enter: StateB update=0 frame=7"),
             "enter dispatch logs the incoming state + stamp")
         inst:destroy()
-        runner.assert_eq(1, count_lines(logged, "state exit (final): StateB tick=0 frame=7"),
+        runner.assert_eq(1, count_lines(logged, "state exit (final): StateB update=0 frame=7"),
             "the destroy wrap's final exit logs its own shape + stamp")
         runner.assert_eq(0, count_lines(logged, "state exit (final): StateA"),
             "the already-exited StateA is not redispatched by destroy")
+    end)
+
+    runner.register("lifecycle: state-dispatch lines carry the current stage while a pass epoch is published", function()
+        -- mod_manager publishes the stage epoch between a pass's first load
+        -- attempt and its finalize; every stamp the dispatch lines append
+        -- must lead with the derived stage for as long as it is set.
+        local logged = {}
+        local sb, gsm, bsr = setup_destroy({ print_fn = function(m) table.insert(logged, m) end })
+        sb.FRAME_INDEX = 8
+        sb.Mods._relay._update = 40
+        sb.Mods._relay._stage_epoch = 38
+        local inst = setmetatable({ _state = { name = "StateA" } }, { __index = gsm })
+        inst:_change_state("StateB")
+        runner.assert_eq(1, count_lines(logged, "state exit: StateA stage=2 update=40 frame=8"),
+            "a dispatch line during the pass leads with the current stage")
+        runner.assert_eq(1, count_lines(logged, "state enter: StateB stage=2 update=40 frame=8"),
+            "enter lines stage identically (same update shares a stage)")
+        -- Pass over (epoch cleared): the stamp is unstaged again.
+        sb.Mods._relay._stage_epoch = nil
+        sb.Mods._relay._update_bump()
+        sb.FRAME_INDEX = 9
+        inst:_change_state("StateC")
+        runner.assert_eq(1, count_lines(logged, "state enter: StateC update=41 frame=9"),
+            "with the epoch cleared the dispatch stamp carries no stage")
     end)
 
     runner.register("lifecycle: a skipped exit (no current state) emits no exit line; enter still logs", function()
@@ -2135,7 +2159,7 @@ return function(runner)
         inst:_change_state("StateFirst")
         runner.assert_eq(0, count_lines(logged, "state exit:"),
             "no outgoing state -> no dispatch -> no success line")
-        runner.assert_eq(1, count_lines(logged, "state enter: StateFirst tick=0 frame=3"),
+        runner.assert_eq(1, count_lines(logged, "state enter: StateFirst update=0 frame=3"),
             "enter still dispatches and logs")
     end)
 
@@ -2155,7 +2179,7 @@ return function(runner)
             "the contained failure is logged as an ERROR")
         runner.assert_eq(0, count_lines(logged, "state exit: "),
             "a failed exit dispatch emits no success line")
-        runner.assert_eq(1, count_lines(logged, "state enter: StateB tick=0 frame=5"),
+        runner.assert_eq(1, count_lines(logged, "state enter: StateB update=0 frame=5"),
             "the enter dispatch (which succeeded) still logs")
     end)
 
@@ -2175,24 +2199,24 @@ return function(runner)
         local inst = setmetatable({ _state = { name = toxic } }, { __index = gsm })
         local ok, err = pcall(function() inst:_change_state("StateB") end)
         runner.assert_eq(true, ok, "the exit dispatch line must contain the unprintable name: " .. tostring(err))
-        runner.assert_eq(1, count_lines(logged, "state exit: <unprintable error> tick=0 frame=9"),
+        runner.assert_eq(1, count_lines(logged, "state exit: <unprintable error> update=0 frame=9"),
             "the exit line renders the safe fallback + stamp")
-        runner.assert_eq(1, count_lines(logged, "state enter: StateB tick=0 frame=9"),
+        runner.assert_eq(1, count_lines(logged, "state enter: StateB update=0 frame=9"),
             "the enter line (plain string name) is unaffected")
         -- The destroy wrap's final-exit line is equally safe.
         inst._state = { name = toxic }
         local ok2, err2 = pcall(function() inst:destroy() end)
         runner.assert_eq(true, ok2, "the final-exit line must contain the unprintable name: " .. tostring(err2))
-        runner.assert_eq(1, count_lines(logged, "state exit (final): <unprintable error> tick=0 frame=9"),
+        runner.assert_eq(1, count_lines(logged, "state exit (final): <unprintable error> update=0 frame=9"),
             "the final-exit line renders the safe fallback + stamp")
     end)
 
     -- ---------------------------------------------------------------------
-    -- Loader-relative tick counter (the StateBoot.update -> StateGame.update
+    -- Loader-relative update counter (the StateBoot.update -> StateGame.update
     -- observation chain; docs/reference/relay/logging.md).
     -- ---------------------------------------------------------------------
 
-    runner.register("lifecycle: StateBoot.update wrap increments the tick once per boot update", function()
+    runner.register("lifecycle: StateBoot.update wrap increments the update counter once per boot update", function()
         local logged = {}
         local sb = setup(function(m) table.insert(logged, m) end)
         sb.Mods.coordinate_bootstrap()  -- installs the class wrapper
@@ -2202,26 +2226,26 @@ return function(runner)
             orig_calls = orig_calls + 1
             return "boot-result", nil, "extra"
         end
-        runner.assert_eq(0, sb.Mods._relay._tick, "tick 0 before any engine update (injection epoch)")
+        runner.assert_eq(0, sb.Mods._relay._update, "update 0 before any engine update (injection epoch)")
         sb.Mods.coordinate_bootstrap()  -- installs the StateBoot.update wrap
         runner.assert_eq(1, count_lines(logged, "bootstrap: StateBoot.update wrapped"),
             "the tick-driver landing fires exactly once")
-        runner.assert_eq(0, sb.Mods._relay._tick, "installing the wrap does not itself bump")
+        runner.assert_eq(0, sb.Mods._relay._update, "installing the wrap does not itself bump")
 
         local inst = setmetatable({}, { __index = boot })
         local r1, r2, r3 = inst:update(0.016)
         runner.assert_eq("boot-result", r1, "original first return preserved")
         runner.assert_nil(r2, "embedded nil preserved")
         runner.assert_eq("extra", r3, "trailing value preserved")
-        runner.assert_eq(1, sb.Mods._relay._tick, "one engine update observed -> tick 1")
+        runner.assert_eq(1, sb.Mods._relay._update, "one engine update observed -> update 1")
         inst:update(0.016)
         inst:update(0.016)
-        runner.assert_eq(3, sb.Mods._relay._tick, "exactly one increment per engine update")
+        runner.assert_eq(3, sb.Mods._relay._update, "exactly one increment per engine update")
         runner.assert_eq(3, orig_calls, "the original ran once per update (no re-entry)")
         -- Later coordinator calls never re-wrap (no double bump per update).
         sb.Mods.coordinate_bootstrap()
         inst:update(0.016)
-        runner.assert_eq(4, sb.Mods._relay._tick)
+        runner.assert_eq(4, sb.Mods._relay._update)
         runner.assert_eq(4, orig_calls)
         runner.assert_eq(1, count_lines(logged, "bootstrap: StateBoot.update wrapped"),
             "the landing never repeats")
@@ -2237,8 +2261,8 @@ return function(runner)
         local ok, err = pcall(function() inst:update(0.016) end)
         runner.assert_eq(false, ok, "original StateBoot.update errors must propagate (no swallow)")
         runner.assert_truthy(tostring(err):find("boot update boom") ~= nil, "engine error preserved")
-        runner.assert_eq(1, sb.Mods._relay._tick,
-            "the update boundary was entered, so the tick counted it (entry increment, like FRAME_INDEX)")
+        runner.assert_eq(1, sb.Mods._relay._update,
+            "the update boundary was entered, so the counter counted it (entry increment, like FRAME_INDEX)")
     end)
 
     runner.register("lifecycle: StateBoot→StateGame chain — exactly one increment per engine update, no double", function()
@@ -2273,10 +2297,10 @@ return function(runner)
         end
         sb.Mods.coordinate_bootstrap()  -- wraps BSR + the StateBoot tick driver
 
-        runner.assert_eq(" tick=0 frame=?", sb.Mods._relay.frame_stamp(),
-            "pre-main.lua moment: tick=0, FRAME_INDEX absent")
+        runner.assert_eq(" update=0 frame=?", sb.Mods._relay.frame_stamp(),
+            "pre-main.lua moment: update=0, FRAME_INDEX absent")
         sb.FRAME_INDEX = -1  -- main.lua loaded; still no update has run
-        runner.assert_eq(" tick=0 frame=-1", sb.Mods._relay.frame_stamp())
+        runner.assert_eq(" update=0 frame=-1", sb.Mods._relay.frame_stamp())
 
         -- Simulate engine updates: FRAME_INDEX advances at Main.update entry,
         -- then the current state's update runs.
@@ -2287,37 +2311,37 @@ return function(runner)
         local boot_inst = setmetatable({}, { __index = boot })
         local sg_inst = setmetatable({}, { __index = sg })
 
-        -- Boot phase: 3 updates (the first also completes the bootstrap via
+        -- Boot window: 3 updates (the first also completes the bootstrap via
         -- the BSR wrap inside StateBoot.update, installing the StateGame wrap
         -- mid-update — StateGame.update itself does NOT run this update).
         engine_update(boot_inst)
-        runner.assert_eq(1, sb.Mods._relay._tick, "first engine update -> tick 1")
-        runner.assert_eq(" tick=1 frame=0", seen_stamp,
-            "a stamp taken inside the first update sees post-boundary values (tick = frame + 1)")
+        runner.assert_eq(1, sb.Mods._relay._update, "first engine update -> update 1")
+        runner.assert_eq(" update=1 frame=0", seen_stamp,
+            "a stamp taken inside the first update sees post-boundary values (update = frame + 1)")
         engine_update(boot_inst)
         engine_update(boot_inst)
-        runner.assert_eq(3, sb.Mods._relay._tick, "three boot updates -> tick 3")
+        runner.assert_eq(3, sb.Mods._relay._update, "three boot updates -> update 3")
 
         -- Boot completes; StateGame takes over: 2 more updates.
         engine_update(sg_inst)
         engine_update(sg_inst)
-        runner.assert_eq(5, sb.Mods._relay._tick,
+        runner.assert_eq(5, sb.Mods._relay._update,
             "the chain totals exactly one increment per engine update (3 boot + 2 game = 5)")
         runner.assert_eq(4, sb.FRAME_INDEX, "sanity: 5 updates, FRAME_INDEX -1 -> 4")
     end)
 
-    runner.register("lifecycle: no tick observation while neither chain wrap is installed (0 until the first observable update)", function()
+    runner.register("lifecycle: no update observation while neither chain wrap is installed (0 until the first observable update)", function()
         -- Without CLASS.StateBoot (older-engine/harness shape), the counter
-        -- stays 0 until the StateGame wrap's first tick — the epoch is
+        -- stays 0 until the StateGame wrap's first update — the epoch is
         -- anchored at injection, never shifted.
         local sb, mu, mg = setup()
         sb.Mods.coordinate_bootstrap()
         local bsr = sb.class("BootStateRequireGameScripts")
         bsr._state_update = function() end
         sb.Mods.coordinate_bootstrap()
-        runner.assert_eq(0, sb.Mods._relay._tick, "no StateBoot class -> no boot-phase observation")
-        bsr._state_update(bsr)  -- boot ticks alone do not bump the counter
-        runner.assert_eq(0, sb.Mods._relay._tick,
+        runner.assert_eq(0, sb.Mods._relay._update, "no StateBoot class -> no boot-window observation")
+        bsr._state_update(bsr)  -- boot _state_update calls alone do not bump the counter
+        runner.assert_eq(0, sb.Mods._relay._update,
             "the BSR wrap is not an increment point (only the StateBoot/StateGame update wraps are)")
     end)
 end

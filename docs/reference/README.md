@@ -16,11 +16,11 @@ validated facts or contracts.
   [`relay/relay-stack-analysis.md`](relay/relay-stack-analysis.md) — a
   descriptive (not normative) walkthrough of the full Relay stack, mirroring
   the community-toolchain reference's shape; and
-  [`relay/load-phases.md`](relay/load-phases.md) — the phase-scheduling
-  contract (phase 0 = the anchor tick; a mod scheduled at phase P loads
-  exactly P engine updates after it; the positional `mods.lst` default —
-  entry i at phase i, one entry per manager tick — is implemented; authored
-  multi-mod-per-phase schedules are future work, carrier shape TBD).
+  [`relay/load-stages.md`](relay/load-stages.md) — the stage-scheduling
+  contract (stage 0 = the first entry's load update; entry i loads on
+  update i after the load-pass anchor; the positional `mods.lst` default —
+  entry i at stage i−1, one entry per update — is implemented; authored
+  multi-mod-per-stage schedules are future work, carrier shape TBD).
 - [`darktide/`](darktide/) — validated facts about the Darktide engine binary
   (LuaJIT, `lua_State` offsets, sandboxed `_G`, discovery methodology).
   Properties of the game, independent of any implementation.

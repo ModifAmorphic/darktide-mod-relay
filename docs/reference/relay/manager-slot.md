@@ -105,8 +105,8 @@ compiled with `loadstring`, and run in the loader's shared global
 environment. It runs during engine boot, from the loader's bootstrap retry
 loop, after the engine's global `class` is available; boot-complete globals
 may not exist yet, so defer engine access to `update()` — the built-in
-manager begins its load pass on the first update tick and advances one
-`mods.lst` entry per tick for exactly this reason.
+manager begins its load pass on the first manager update and advances one
+`mods.lst` entry per update for exactly this reason.
 
 **The contract:**
 
@@ -248,7 +248,7 @@ Everything below is built-in-manager policy. Under an alternate, Relay does
 **not** provide:
 
 - **Hot-reload machinery** — generations, the teardown-frame +
-  one-entry-per-tick replacement-replay sequencing, the LEFT Ctrl+Shift+R
+  one-entry-per-update replacement-replay sequencing, the LEFT Ctrl+Shift+R
   gesture, and the `request_reload` seam.
 - **Failure containment** — the nil/table-only run-result validation, the
   one-strike outer lifecycle containment (standalone disable vs

@@ -3,9 +3,10 @@
 -- Owns mods.lst scanning, run-result validation, outer-object lifecycle
 -- driving, generation-aware per-mod Crashify metadata, one-strike outer failure
 -- containment, guarded engine alerts, and developer-mode hot reload. Loading
--- is phased (community parity): a load pass spans one manager tick per
--- mods.lst entry — phase 0 anchors the pass (bookkeeping only), entry i loads
--- on tick i, and updates fan out every tick to whatever is already loaded.
+-- is staged (community parity): a load pass spans one manager update per
+-- mods.lst entry — the anchor update opens the pass (bookkeeping only), entry
+-- i loads on update i after it, and updates fan out every update to whatever
+-- is already loaded.
 -- Stock-DMF-specific field transitions + stale-global retirement stay in
 -- dmf_adapter.lua; the manager-agnostic startup duties (adapter establish, io
 -- observer, the process-lifetime Crashify version property) are chassis-owned
@@ -102,7 +103,7 @@ function ModManager:init()
 
     self._mods = {}
     self._mods_loaded = false
-    self._load_phase = nil
+    self._load_cursor = nil
     self._pass_kind = nil
     self._pass_had_errors = false
     self._generation = 0
@@ -177,7 +178,7 @@ function ModManager:_disable_crashify(message)
     log_warn(message)
 end
 
-function ModManager:_crashify_call(method_name, phase, ...)
+function ModManager:_crashify_call(method_name, context, ...)
     if self._crashify_disabled then
         return false
     end
@@ -195,7 +196,7 @@ function ModManager:_crashify_call(method_name, phase, ...)
         return true
     end)
     if not ok then
-        self:_disable_crashify("Crashify " .. phase
+        self:_disable_crashify("Crashify " .. context
             .. " failed; crash metadata disabled for this generation")
         return false
     end
@@ -349,17 +350,17 @@ function ModManager:_queue_cleanup(entry, object)
     self._cleanup_queue[#self._cleanup_queue + 1] = { entry = entry, object = object }
 end
 
-function ModManager:_call_teardown(entry, object, phase, ...)
+function ModManager:_call_teardown(entry, object, callback, ...)
     local args = pack(...)
     local ok, implemented, result = _xpcall(function()
-        local callback = object[phase]
-        if _type(callback) ~= "function" then
+        local fn = object[callback]
+        if _type(fn) ~= "function" then
             return false, nil
         end
-        return true, callback(object, _unpack(args, 1, args.n))
+        return true, fn(object, _unpack(args, 1, args.n))
     end, protected_failure_detail)
     if not ok then
-        log_warn("mod '" .. display_name(entry and entry.name) .. "' " .. phase
+        log_warn("mod '" .. display_name(entry and entry.name) .. "' " .. callback
             .. " failed during best-effort teardown: " .. safe_text(implemented))
         return false, nil, true
     end
@@ -444,7 +445,7 @@ function ModManager:_rebuild_framework_cleanup_queue(failed_entry, failed_object
     end
 end
 
-function ModManager:_handle_lifecycle_failure(entry, object, phase, detail)
+function ModManager:_handle_lifecycle_failure(entry, object, callback, detail)
     if entry._failure_claimed then
         return
     end
@@ -457,7 +458,7 @@ function ModManager:_handle_lifecycle_failure(entry, object, phase, detail)
     self._failure_records[#self._failure_records + 1] = {
         name = entry.name,
         generation = generation,
-        phase = phase,
+        callback = callback,
         detail = detail,
         framework = framework,
     }
@@ -467,13 +468,13 @@ function ModManager:_handle_lifecycle_failure(entry, object, phase, detail)
         self._stop_load_pass = true
         self:_rebuild_framework_cleanup_queue(entry, object)
         log_error("framework-boundary lifecycle failure at entry '" .. display_name(entry.name)
-            .. "' in generation " .. generation .. " during " .. phase
+            .. "' in generation " .. generation .. " during " .. callback
             .. "; Relay stopped the current generation:\n" .. detail)
         self:_attempt_alert("Mod Relay stopped the current mod generation after a framework-boundary error. "
             .. self:_alert_suffix())
     else
         self:_queue_cleanup(entry, object)
-        log_error("mod '" .. display_name(entry.name) .. "' " .. phase
+        log_error("mod '" .. display_name(entry.name) .. "' " .. callback
             .. " failed in generation " .. generation
             .. "; Relay disabled this entry:\n" .. detail)
         self:_attempt_alert("Mod Relay disabled mod '" .. display_name(entry.name)
@@ -481,17 +482,17 @@ function ModManager:_handle_lifecycle_failure(entry, object, phase, detail)
     end
 end
 
-function ModManager:_call_outer(entry, object, phase, ...)
+function ModManager:_call_outer(entry, object, callback, ...)
     local args = pack(...)
     local ok, implemented, result = _xpcall(function()
-        local callback = object[phase]
-        if _type(callback) ~= "function" then
+        local fn = object[callback]
+        if _type(fn) ~= "function" then
             return false, nil
         end
-        return true, callback(object, _unpack(args, 1, args.n))
+        return true, fn(object, _unpack(args, 1, args.n))
     end, protected_failure_detail)
     if not ok then
-        self:_handle_lifecycle_failure(entry, object, phase, safe_text(implemented))
+        self:_handle_lifecycle_failure(entry, object, callback, safe_text(implemented))
         return false, false, nil
     end
     return true, implemented, result
@@ -516,26 +517,27 @@ function ModManager:update(dt)
         -- tears down whatever the aborted pass had loaded, so dropping the
         -- pass bookkeeping keeps the replacement pass from interleaving
         -- with it.
-        self._load_phase = nil
+        self._load_cursor = nil
         self._pass_kind = nil
         self._pass_had_errors = false
         self._load_target_generation = nil
+        self:_close_load_stage()
         self._adapter:end_load_pass()
         self:_begin_reload()
         self:_attempt_reminder_if_due(ALERT_REMINDER_SECONDS)
         return
     end
 
-    if self._reload_in_progress and self._load_phase == nil then
-        -- First manager tick after teardown: the replacement pass's phase-0
-        -- anchor.
+    if self._reload_in_progress and self._load_cursor == nil then
+        -- First manager update after teardown: the replacement pass's anchor
+        -- (no loads; the first entry loads on the next update).
         self:_begin_load_pass("reload", self._generation + 1)
     elseif not self._mods_loaded then
         self._mods_loaded = true
         self:_begin_load_pass("initial", 1)
     end
 
-    if self._load_phase ~= nil then
+    if self._load_cursor ~= nil then
         self:_advance_load_pass()
     end
 
@@ -673,18 +675,22 @@ function ModManager:_log_load_pass_summary()
     log_debug("initial load pass complete: " .. total .. " entries, " .. failed .. " failed")
 end
 
--- Begin a load pass anchored on THIS manager tick. Phase 0 is bookkeeping
--- only: no entry loads until the next tick. kind is "initial" (first boot
--- pass) or "reload" (post-teardown replacement); target_generation is the
--- generation the pass finalizes into.
+-- Begin a load pass anchored on THIS manager update. The anchor update is
+-- bookkeeping only: no entry loads until the next update. kind is "initial"
+-- (first boot pass) or "reload" (post-teardown replacement); target_generation
+-- is the generation the pass finalizes into.
 function ModManager:_begin_load_pass(kind, target_generation)
-    self._load_phase = 0
+    self._load_cursor = 0
     self._pass_kind = kind
     self._pass_had_errors = false
     self._load_target_generation = target_generation
     self._generation_failed = false
     self._stop_load_pass = false
     self._generation_globals_retired = false
+    -- Every pass-ending path clears the stage epoch, but a pass that never
+    -- began loading (or an aborted one) leaves nothing to inherit: a new pass
+    -- always starts unstaged.
+    self:_close_load_stage()
     if kind == "initial" then
         self:_prepare_crashify_generation(false)
         log_trace("load pass begin (initial)")
@@ -693,22 +699,22 @@ function ModManager:_begin_load_pass(kind, target_generation)
     end
 end
 
--- One manager tick of an active load pass: advance at most one phase (load at
--- most the single entry scheduled for it), then finalize when the pass is
--- complete, stopped, or escaped. The phase fields double as the active flag
--- (_load_phase nil == no pass).
+-- One manager update of an active load pass: advance at most one cursor step
+-- (load at most the single entry it points at), then finalize when the pass
+-- is complete, stopped, or escaped. The cursor field doubles as the active
+-- flag (_load_cursor nil == no pass).
 function ModManager:_advance_load_pass()
     local escape = nil
 
-    -- A framework failure during a previous tick's _drive_update can set the
-    -- stop flag after that tick's load: skip loading and finalize now.
+    -- A framework failure during a previous update's _drive_update can set
+    -- the stop flag after that update's load: skip loading and finalize now.
     if not self._stop_load_pass then
-        local phase = self._load_phase
-        if phase >= 1 then
-            local entry = self._mods[phase]
+        local cursor = self._load_cursor
+        if cursor >= 1 then
+            local entry = self._mods[cursor]
             if entry ~= nil then
                 local ok, detail = _pcall(function()
-                    return self:_load_pass_entry(phase, entry)
+                    return self:_load_pass_entry(cursor, entry)
                 end)
                 if not ok then
                     -- error(nil) escapes as a nil detail; a bare true keeps
@@ -719,19 +725,23 @@ function ModManager:_advance_load_pass()
         end
     end
 
-    self._load_phase = self._load_phase + 1
+    self._load_cursor = self._load_cursor + 1
 
-    if escape ~= nil or self._stop_load_pass or self._load_phase > #self._mods then
+    if escape ~= nil or self._stop_load_pass or self._load_cursor > #self._mods then
         self:_finalize_load_pass(escape)
     end
 end
 
--- The per-entry load step for one phase (the loop body of the former
--- single-tick pass, sequence unchanged). Contained in a pcall by
+-- The per-entry load step for one cursor position (the loop body of the
+-- former single-update pass, sequence unchanged). Contained in a pcall by
 -- _advance_load_pass; an escape force-finalizes with remaining entries left
 -- not_loaded.
-function ModManager:_load_pass_entry(phase, entry)
-    self._adapter:begin_load_entry(phase)
+function ModManager:_load_pass_entry(cursor, entry)
+    -- Stage epoch opens at the pass's FIRST load attempt (attempt-based: a
+    -- failed first entry still opens it); the stamp helper derives stage=
+    -- as current update - epoch while it is set.
+    self:_open_load_stage()
+    self._adapter:begin_load_entry(cursor)
     log_trace("load entry #" .. safe_text(entry.id) .. " '"
         .. display_name(entry.name) .. "'")
     if not self:_load_one(entry, self._reload_data) then
@@ -774,7 +784,7 @@ function ModManager:_finalize_load_pass(escape)
     self._load_target_generation = nil
     self._generation = target
     self._adapter:mark_load_done()
-    self._load_phase = nil
+    self._load_cursor = nil
 
     if kind == "initial" then
         self:_log_load_pass_summary()
@@ -801,20 +811,50 @@ function ModManager:_finalize_load_pass(escape)
         self._reload_degraded = false
     end
 
-    -- The pass-end marker lands on the finalize tick, after the kind-specific
-    -- summary/completion lines (docs/reference/relay/logging.md).
+    -- The pass-end marker lands on the finalize update, after the
+    -- kind-specific summary/completion lines (docs/reference/relay/logging.md).
+    -- Emitted BEFORE the stage close so it carries the pass's final stage.
     log_trace("load pass end (" .. kind .. ", generation " .. target .. ")")
+    self:_close_load_stage()
 
     self._pass_kind = nil
     self._pass_had_errors = false
 end
 
-function ModManager:_fail_load_entry(entry, phase)
+-- Stage epoch (Mods._relay._stage_epoch): the update index of the current
+-- pass's FIRST load attempt. The stamp helper (init.lua) derives the stamp's
+-- `stage=` field as current update - epoch while the epoch is set, so stage is
+-- 0 on the first loading update and +1 per update after. Set here (manager-
+-- owned: the manager owns the pass lifecycle), cleared on every pass-ending
+-- path — finalize, the teardown branch, destroy — plus defensively at pass
+-- begin. Empty/missing mods.lst never loads an entry, so the epoch never
+-- opens and no line is ever staged. Total over corrupted state (type checks;
+-- never throws into engine code).
+function ModManager:_open_load_stage()
+    local relay = (_type(Mods) == "table") and _rawget(Mods, "_relay") or nil
+    if _type(relay) ~= "table" or _type(relay._stage_epoch) == "number" then
+        return
+    end
+    local now = relay._update
+    if _type(now) ~= "number" or now < 0 then
+        now = 0
+    end
+    relay._stage_epoch = now
+end
+
+function ModManager:_close_load_stage()
+    local relay = (_type(Mods) == "table") and _rawget(Mods, "_relay") or nil
+    if _type(relay) == "table" then
+        relay._stage_epoch = nil
+    end
+end
+
+function ModManager:_fail_load_entry(entry, reason)
     if entry then
         entry.object = nil
         entry.state = "failed"
     end
-    self:_log_dmf_framework_failure(entry, phase)
+    self:_log_dmf_framework_failure(entry, reason)
     return false
 end
 
@@ -883,9 +923,9 @@ function ModManager:_load_one(entry, reload_data)
     return true
 end
 
-function ModManager:_log_dmf_framework_failure(entry, phase)
+function ModManager:_log_dmf_framework_failure(entry, reason)
     if entry and entry.name == "dmf" then
-        log_error("DMF FRAMEWORK LOAD FAILURE ('dmf' " .. phase
+        log_error("DMF FRAMEWORK LOAD FAILURE ('dmf' " .. reason
             .. "); load degraded — mods depending on DMF may not work")
     end
 end
@@ -911,17 +951,17 @@ function ModManager:_drive_update(dt)
 end
 
 function ModManager:on_game_state_changed(status, state_name, state_object)
-    -- Community parity: the initial pass spans multiple ticks now, and boot
-    -- state transitions can land inside it (e.g. StateTitle enter ~1 tick
+    -- Community parity: the initial pass spans multiple updates now, and boot
+    -- state transitions can land inside it (e.g. StateTitle enter ~1 update
     -- after the anchor), so dispatch to already-loaded entries while the
     -- initial pass is actively loading — updates already flow to those same
-    -- entries on those same ticks, and the dispatch loop's nil-object skip
+    -- entries on those same updates, and the dispatch loop's nil-object skip
     -- limits delivery to loaded entries. Suppression stays load-bearing for
     -- the reload window (never dispatch into half-torn-down objects) and
     -- after destroy: a never-finalized pass is suppressed through the gate
     -- (settled fields -> not done), while after a done destroy the gate is
     -- open and the emptied entry table delivers nothing.
-    local initial_pass_open = self._load_phase ~= nil and self._pass_kind == "initial"
+    local initial_pass_open = self._load_cursor ~= nil and self._pass_kind == "initial"
     if not self._adapter:is_load_done() and not initial_pass_open then
         if not self._gsc_ignored_logged then
             log_debug("on_game_state_changed ignored (reload/load in progress)")
@@ -963,12 +1003,13 @@ function ModManager:destroy()
     -- a later update() would begin a fresh replacement pass over the stale
     -- reload data. (_reload_requested/_reload_degraded stay with the normal
     -- machinery — both are harmless without _reload_in_progress.)
-    self._load_phase = nil
+    self._load_cursor = nil
     self._pass_kind = nil
     self._pass_had_errors = false
     self._load_target_generation = nil
     self._reload_in_progress = false
     self._reload_data = nil
+    self:_close_load_stage()
     self._adapter:end_load_pass()
     self:_drain_cleanup(false)
     for i = #self._mods, 1, -1 do

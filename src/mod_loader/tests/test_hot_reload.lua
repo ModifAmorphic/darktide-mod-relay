@@ -154,27 +154,27 @@ return function(runner)
         return mock.run_module("mod_manager", sb)
     end
 
-    -- Tick update(0.016) until the active load pass finalizes (phased: the
-    -- anchor tick loads nothing, then one entry per tick). Bounded; asserts
-    -- completion. Returns the ticks driven.
-    local function tick_to_done(mm, bound)
+    -- Tick update(0.016) until the active load pass finalizes (staged: the
+    -- anchor update loads nothing, then one entry per update). Bounded; asserts
+    -- completion. Returns the updates driven.
+    local function update_to_done(mm, bound)
         bound = bound or 100
-        local ticks = 0
+        local updates = 0
         while not mm._adapter:is_load_done() do
-            ticks = ticks + 1
-            if ticks > bound then
-                runner.fail("load pass did not finalize within " .. bound .. " ticks")
+            updates = updates + 1
+            if updates > bound then
+                runner.fail("load pass did not finalize within " .. bound .. " updates")
             end
             mm:update(0.016)
         end
-        return ticks
+        return updates
     end
 
-    -- Drive one full reload: the teardown tick, then the phased replacement
+    -- Drive one full reload: the teardown update, then the staged replacement
     -- pass to completion.
     local function reload_to_done(mm)
         mm:update(0.016)  -- teardown frame
-        tick_to_done(mm)  -- anchor + one entry per tick
+        update_to_done(mm)  -- anchor + one entry per update
     end
 
     local function new_loaded(sb)
@@ -183,7 +183,7 @@ return function(runner)
         -- (Managers.mod publication + settings restore-if-nil). The real
         -- chassis wiring is covered by test_lifecycle.
         mm._adapter:establish()
-        tick_to_done(mm)
+        update_to_done(mm)
         return mm
     end
 
@@ -194,7 +194,7 @@ return function(runner)
         local ModManager = load_driver(sb)
         local mm = ModManager:new()
         mm._adapter:establish()
-        tick_to_done(mm)
+        update_to_done(mm)
         return mm, ModManager
     end
 
@@ -305,7 +305,7 @@ return function(runner)
             "exact combo consumed the request and entered teardown")
         runner.assert_eq(false, mm._reload_requested, "request consumed in the same frame")
         kstate.r = false; kstate.lshift = false; kstate.lctrl = false
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq("done", mm._state)
         runner.assert_eq(2, mm._generation)
     end)
@@ -472,7 +472,7 @@ return function(runner)
         runner.assert_eq(0, count_tag(seq, ":update"),
             "no mod update may run in the teardown frame")
         runner.assert_nil(mm._state, "state is nil during teardown")
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq("done", mm._state)
         runner.assert_eq(2, mm._generation)
         runner.assert_truthy(count_tag(seq, ":init") >= 2, "replacement replay ran init")
@@ -495,7 +495,7 @@ return function(runner)
         mm:on_game_state_changed("enter", "StateIngame", {})
         runner.assert_eq(0, count_tag(seq, ":gsc:"),
             "no outer state-change callback while not done")
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq("done", mm._state)
         clear(seq)
         -- After done, a state change is forwarded to the NEW generation.
@@ -504,11 +504,11 @@ return function(runner)
             "after done, new-generation state callbacks fire")
     end)
 
-    runner.register("hot_reload: phased replay — teardown tick, anchor tick, one entry per tick, completion on the final replay tick", function()
+    runner.register("hot_reload: staged replay — teardown update, anchor update, one entry per update, completion on the final replay update", function()
         -- Community-parity replacement pacing: the reload spans teardown (no
-        -- loads) -> phase-0 anchor (pass-begin line, no entries) -> one entry
-        -- per tick -> mark_load_done + generation increment + completion log
-        -- all on the final replay tick. Reload requests are refused mid-replay
+        -- loads) -> anchor update (pass-begin line, no entries) -> one entry
+        -- per update -> mark_load_done + generation increment + completion log
+        -- all on the final replay update. Reload requests are refused mid-replay
         -- and gsc stays suppressed until done; per-name reload_data still
         -- reaches the right entry.
         local logged = {}
@@ -524,13 +524,13 @@ return function(runner)
 
         mm:request_reload("test")
         clear(seq)
-        mm:update(0.016)  -- teardown tick: on_reload/on_unload only
-        runner.assert_eq(0, count_tag(seq, ":init"), "no loads in the teardown tick")
+        mm:update(0.016)  -- teardown update: on_reload/on_unload only
+        runner.assert_eq(0, count_tag(seq, ":init"), "no loads in the teardown update")
 
-        mm:update(0.016)  -- anchor tick of the replacement pass
+        mm:update(0.016)  -- anchor update of the replacement pass
         runner.assert_eq(1, count_log(logged, "load pass begin (reload, generation 2)"),
-            "the anchor tick logs the reload pass begin with its target generation")
-        runner.assert_eq(0, count_tag(seq, ":init"), "the anchor tick loads no entries")
+            "the anchor update logs the reload pass begin with its target generation")
+        runner.assert_eq(0, count_tag(seq, ":init"), "the anchor update loads no entries")
         runner.assert_eq(false, mm._adapter:is_load_done())
 
         -- Mid-replay: a reload request is refused and gsc is suppressed.
@@ -539,24 +539,24 @@ return function(runner)
         mm:on_game_state_changed("enter", "StateIngame", {})
         runner.assert_eq(0, count_tag(seq, ":gsc:"), "gsc suppressed during the replay")
 
-        mm:update(0.016)  -- alpha's replay tick
+        mm:update(0.016)  -- alpha's replay update
         runner.assert_eq(1, count_tag(seq, ":init"), "exactly one entry loaded")
         runner.assert_eq(false, mm._adapter:is_load_done())
         runner.assert_eq(1, mm._generation, "generation advances only at finalize")
         runner.assert_eq(1, mm._mod_load_index,
-            "_mod_load_index holds the replayed entry between its ticks")
+            "_mod_load_index holds the replayed entry between its updates")
         runner.assert_eq(0, count_log(logged, "load pass end (reload, generation 2)"),
-            "no pass-end line before the finalize tick")
+            "no pass-end line before the finalize update")
 
-        mm:update(0.016)  -- beta's replay tick: last entry -> finalize
+        mm:update(0.016)  -- beta's replay update: last entry -> finalize
         runner.assert_eq(2, count_tag(seq, ":init"), "one init per entry across the replay")
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq(2, mm._generation,
-            "generation increments on the final replay tick")
+            "generation increments on the final replay update")
         runner.assert_eq(1, count_log(logged, "hot reload generation 2 completed cleanly"),
-            "the completion log lands on the final replay tick")
+            "the completion log lands on the final replay update")
         runner.assert_eq(1, count_log(logged, "load pass end (reload, generation 2)"),
-            "the pass-end TRACE lands exactly once, on the replay finalize tick")
+            "the pass-end TRACE lands exactly once, on the replay finalize update")
         runner.assert_nil(mm._mod_load_index)
 
         -- Per-name reload_data still delivered to the right entry.
@@ -570,14 +570,59 @@ return function(runner)
         runner.assert_eq("beta_data", received.beta)
     end)
 
+    runner.register("hot_reload: staged replay — the stage re-zeroes at the replay's first entry", function()
+        -- Every pass gets its own stage epoch: the replacement replay's
+        -- first entry is stage=0 again, its begin line (anchor, pre-load) is
+        -- unstaged, and the replay's end line carries the replay's final
+        -- stage. Engine-shaped updates: bump at entry, then the manager.
+        local logged = {}
+        local sb, state = setup({ print = function(m) table.insert(logged, m) end })
+        sb.Mods._relay._trace_enabled = true
+        sb.FRAME_INDEX = 0
+        stage(state, { "alpha", "beta" }, {
+            alpha = mod_file("alpha", recording_mod("alpha", {})),
+            beta = mod_file("beta", recording_mod("beta", {})),
+        })
+        local mm = load_driver(sb):new()
+        mm._adapter:establish()
+        local function engine_update()
+            sb.Mods._relay._update_bump()
+            sb.FRAME_INDEX = sb.FRAME_INDEX + 1
+            mm:update(0.016)
+        end
+
+        engine_update()  -- initial anchor
+        engine_update()  -- initial entry #1: stage=0
+        engine_update()  -- initial entry #2 + finalize: stage=1
+        runner.assert_eq(1, count_log(logged, "load entry #1 'alpha' stage=0"))
+        runner.assert_eq(1, count_log(logged, "load pass end (initial, generation 1) stage=1"),
+            "the initial pass ends at its final stage")
+
+        mm:request_reload("test")
+        engine_update()  -- teardown (no loads; no staged lines)
+        engine_update()  -- replay anchor: the begin line lands here (pre-load)
+        local replay_begin = find_log(logged, "load pass begin (reload, generation 2)")
+        runner.assert_not_nil(replay_begin)
+        runner.assert_truthy(not replay_begin:find("stage=", 1, true),
+            "the replay's begin line is unstaged (pre-load, like every pass)")
+        engine_update()  -- replay entry #1: re-zeroed
+        engine_update()  -- replay entry #2 + finalize
+        runner.assert_eq(1, count_log(logged, "load entry #1 'alpha' stage=0 update=6 frame=6"),
+            "the replay's first entry re-opens the stage at 0 (per-pass epoch)")
+        runner.assert_eq(1, count_log(logged, "load entry #2 'beta' stage=1 update=7 frame=7"))
+        runner.assert_eq(1, count_log(logged, "load pass end (reload, generation 2) stage=1 update=7 frame=7"),
+            "the replay's end line carries the replay's own final stage")
+        runner.assert_nil(sb.Mods._relay._stage_epoch, "the epoch clears at the replay finalize")
+    end)
+
     runner.register("hot_reload: mid-replay framework drive failure finalizes degraded and skips the unloaded tail", function()
-        -- A framework-boundary UPDATE failure on a MID-replay tick (later
+        -- A framework-boundary UPDATE failure on a MID-replay update (later
         -- entries still unloaded) stops the replacement pass after that
-        -- tick's load step: the pass finalizes on the NEXT tick reporting
+        -- update's load step: the pass finalizes on the NEXT update reporting
         -- "completed with errors" (a stopped generation is never clean —
         -- load-time framework failures already set _pass_had_errors; this is
         -- the drive-time corner), the unloaded tail ends skipped, and the
-        -- loaded outers reverse-unloaded exactly once on the failure tick.
+        -- loaded outers reverse-unloaded exactly once on the failure update.
         local logged = {}
         local seq = {}
         local sb, state = setup({ print = function(m) table.insert(logged, m) end })
@@ -602,24 +647,24 @@ return function(runner)
         })
         clear(seq)
         mm:request_reload("test")
-        mm:update(0.016)  -- teardown tick (gen-1 on_reload/on_unload)
+        mm:update(0.016)  -- teardown update (gen-1 on_reload/on_unload)
         clear(seq)
-        mm:update(0.016)  -- replay anchor tick (loads nothing)
+        mm:update(0.016)  -- replay anchor update (loads nothing)
         runner.assert_eq(0, count_tag(seq, ":init"), "anchor loads nothing")
 
-        mm:update(0.016)  -- prior's replay tick (loads + first update)
-        mm:update(0.016)  -- dmf's replay tick: loads fine, then its update raises
+        mm:update(0.016)  -- prior's replay update (loads + first update)
+        mm:update(0.016)  -- dmf's replay update: loads fine, then its update raises
         runner.assert_eq(2, count_tag(seq, ":init"),
-            "prior + dmf loaded; later still unloaded at the failure tick")
+            "prior + dmf loaded; later still unloaded at the failure update")
         runner.assert_eq(false, mm._adapter:is_load_done(),
-            "the pass is still open at the end of the failure tick")
+            "the pass is still open at the end of the failure update")
         runner.assert_eq(1, mm._generation, "generation advances only at finalize")
         runner.assert_eq({ "dmf:on_unload", "prior:on_unload" },
             only_tags(seq, ":on_unload"),
-            "the failure tick's fan-out reverse-unloaded the loaded outers")
+            "the failure update's fan-out reverse-unloaded the loaded outers")
         runner.assert_not_nil(find_log(logged, "framework-boundary lifecycle failure"))
 
-        mm:update(0.016)  -- finalize tick (stop honored; later never loads)
+        mm:update(0.016)  -- finalize update (stop honored; later never loads)
         runner.assert_eq(true, mm._adapter:is_load_done())
         runner.assert_eq(2, mm._generation)
         runner.assert_eq(2, count_tag(seq, ":init"), "later never initialized")
@@ -658,16 +703,16 @@ return function(runner)
         runner.assert_eq(true, mm._adapter:is_load_done())
 
         mm:request_reload("test")
-        mm:update(0.016)  -- teardown tick
-        mm:update(0.016)  -- replay anchor tick (loads nothing)
+        mm:update(0.016)  -- teardown update
+        mm:update(0.016)  -- replay anchor update (loads nothing)
         runner.assert_eq(1, count_log(logged, "load pass begin (reload, generation 2)"))
-        mm:update(0.016)  -- alpha's replay tick (beta still pending)
+        mm:update(0.016)  -- alpha's replay update (beta still pending)
         runner.assert_eq(false, mm._adapter:is_load_done(), "pass still open mid-replay")
 
         mm:destroy()
         runner.assert_eq(false, mm._reload_in_progress, "destroy settles the reload flag")
         runner.assert_nil(mm._reload_data, "destroy clears the staged reload data")
-        runner.assert_nil(mm._load_phase, "the pass bookkeeping is settled")
+        runner.assert_nil(mm._load_cursor, "the pass bookkeeping is settled")
         runner.assert_nil(mm._mod_load_index)
         runner.assert_eq(false, mm._adapter:is_load_done(),
             "destroy is terminal, not a completion (no mark_load_done)")
@@ -806,7 +851,7 @@ return function(runner)
         stage(state, { "alpha" }, { alpha = gen2 })
         mm:request_reload("test")
         mm:update(0.016)  -- teardown (rescan rebuilds the entry tables)
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq(2, mm._generation)
         runner.assert_eq(gen2, mm._mods[1].data,
             "generation 2 carries the freshly executed descriptor table")
@@ -990,7 +1035,7 @@ return function(runner)
         runner.assert_nil(sb.get_mod)
         runner.assert_not_nil(sb.Managers.dmf.persistent_tables,
             "persistent tables untouched by retirement")
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq("done", mm._state)
         -- New definitions work after retirement.
         sb.DMFMod = { new_gen = true }
@@ -1013,7 +1058,7 @@ return function(runner)
         local mm = new_loaded(sb)
         mm:request_reload("test")
         mm:update(0.016)  -- teardown
-        tick_to_done(mm)  -- replacement replay completes degraded
+        update_to_done(mm)  -- replacement replay completes degraded
         runner.assert_eq("done", mm._state, "completes despite on_reload failure")
         runner.assert_eq(2, mm._generation)
         runner.assert_truthy(find_log(logged, "on_reload failed") ~= nil)
@@ -1166,10 +1211,10 @@ return function(runner)
 
         -- Swap the per-entry load step to throw on the replacement pass only.
         local real_load_step = mm._load_pass_entry
-        mm._load_pass_entry = function(self, phase, entry)
+        mm._load_pass_entry = function(self, cursor, entry)
             error("induced load-step boom")
         end
-        local ok_update = pcall(function() tick_to_done(mm) end)  -- replacement replay
+        local ok_update = pcall(function() update_to_done(mm) end)  -- replacement replay
         runner.assert_eq(true, ok_update, "update must not propagate the load-step throw")
 
         -- ALWAYS-finalized invariants, regardless of the throw.
@@ -1207,7 +1252,7 @@ return function(runner)
         stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", seq)) })
         mm:request_reload("test")
         mm:update(0.016)  -- teardown: old alpha unloaded exactly once
-        tick_to_done(mm)  -- replacement: new alpha loaded
+        update_to_done(mm)  -- replacement: new alpha loaded
         local unloaded_before = count_tag(seq, ":on_unload")
         runner.assert_eq(1, unloaded_before, "old alpha unloaded exactly once during teardown")
         mm:destroy()
@@ -1225,7 +1270,7 @@ return function(runner)
         local mm = new_loaded(sb)
         mm:request_reload("test")
         mm:update(0.016)  -- teardown (alpha on_reload fails; both unloaded)
-        tick_to_done(mm)  -- replacement: alpha+beta reloaded
+        update_to_done(mm)  -- replacement: alpha+beta reloaded
         runner.assert_eq("done", mm._state)
         clear(seq)
         mm:destroy()
@@ -1350,7 +1395,7 @@ return function(runner)
         mm._reload_requested = true
         mm:update(0.016)  -- teardown frame
         runner.assert_eq(true, mm._reload_in_progress, "legacy direct flag consumed -> teardown")
-        tick_to_done(mm)  -- replacement replay
+        update_to_done(mm)  -- replacement replay
         runner.assert_eq("done", mm._state)
         runner.assert_eq(2, mm._generation, "legacy path completed a reload")
     end)
@@ -1368,18 +1413,18 @@ return function(runner)
         local mm = load_driver(sb):new()
         mm._adapter:establish()
         mm:update(0.016)  -- anchor
-        mm:update(0.016)  -- alpha's tick: pass open, index = 1, beta pending
+        mm:update(0.016)  -- alpha's update: pass open, index = 1, beta pending
         runner.assert_eq(1, mm._mod_load_index)
         runner.assert_eq(false, mm._adapter:is_load_done())
 
         mm._reload_requested = true
-        mm:update(0.016)  -- teardown tick aborts the open pass
+        mm:update(0.016)  -- teardown update aborts the open pass
         runner.assert_nil(mm._mod_load_index,
             "the mid-pass abort clears the load index (no stale index at teardown)")
-        runner.assert_nil(mm._load_phase, "the pass bookkeeping is settled")
+        runner.assert_nil(mm._load_cursor, "the pass bookkeeping is settled")
         runner.assert_eq(true, mm._reload_in_progress)
 
-        tick_to_done(mm)  -- replacement replay completes
+        update_to_done(mm)  -- replacement replay completes
         runner.assert_eq("done", mm._state)
         -- The aborted pass never finalized, so no generation was installed
         -- before the teardown; the replacement installs generation 1.
@@ -1400,7 +1445,7 @@ return function(runner)
         sb.FRAME_INDEX = 12
         stage(state, { "alpha" }, { alpha = mod_file("alpha", recording_mod("alpha", {})) })
         local mm = new_loaded(sb)
-        runner.assert_eq(1, count_log(logged, "load pass begin (initial) tick=0 frame=12"),
+        runner.assert_eq(1, count_log(logged, "load pass begin (initial) update=0 frame=12"),
             "the initial pass-begin line is stamped")
         mm:request_reload("test")
         mm:update(0.016)  -- teardown frame (no load pass)

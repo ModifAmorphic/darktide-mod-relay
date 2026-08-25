@@ -509,13 +509,13 @@ return function(runner)
         return sb, logged
     end
 
-    runner.register("entry: publishes log_trace + frame_stamp + _tick_bump on Mods._relay", function()
+    runner.register("entry: publishes log_trace + frame_stamp + _update_bump on Mods._relay", function()
         local sb = run_init_trace(nil)
         runner.assert_type("function", sb.Mods._relay.log_trace)
         runner.assert_type("function", sb.Mods._relay.frame_stamp)
-        runner.assert_type("function", sb.Mods._relay._tick_bump)
-        runner.assert_eq(0, sb.Mods._relay._tick,
-            "the tick counter starts at 0 (injection epoch)")
+        runner.assert_type("function", sb.Mods._relay._update_bump)
+        runner.assert_eq(0, sb.Mods._relay._update,
+            "the update counter starts at 0 (injection epoch)")
         runner.assert_eq(false, sb.Mods._relay._trace_enabled,
             "no baked RELAY_LOG_LEVEL -> the private trace flag is false")
         runner.assert_nil(sb.RELAY_LOG_LEVEL,
@@ -551,8 +551,8 @@ return function(runner)
                 "the trampoline global must be retired (enabled case)")
             sb.Mods._relay.log_trace("a trace message")
             runner.assert_eq(1, #logged, "exactly one line for one call")
-            runner.assert_eq("TRACE [mod_loader] a trace message tick=0 frame=?", logged[1],
-                "TRACE follows the community prefix shape + appends the combined tick/frame stamp")
+            runner.assert_eq("TRACE [mod_loader] a trace message update=0 frame=?", logged[1],
+                "TRACE follows the community prefix shape + appends the combined update/frame stamp")
         end
     end)
 
@@ -568,61 +568,99 @@ return function(runner)
         runner.assert_eq(true, ok, "non-string/unprintable messages must not raise")
     end)
 
-    runner.register("entry: frame_stamp formats ' tick=N frame=M' (tick primary, frame secondary)", function()
+    runner.register("entry: frame_stamp formats 'update=N frame=M' (update primary, frame secondary)", function()
         local sb = run_init_trace(nil)
-        -- Pre-main.lua moment: FRAME_INDEX does not exist yet; tick 0 = injection.
-        runner.assert_eq(" tick=0 frame=?", sb.Mods._relay.frame_stamp(),
-            "no FRAME_INDEX yet (pre-main.lua) -> tick=0, frame '?'")
+        -- Pre-main.lua moment: FRAME_INDEX does not exist yet; update 0 = injection.
+        runner.assert_eq(" update=0 frame=?", sb.Mods._relay.frame_stamp(),
+            "no FRAME_INDEX yet (pre-main.lua) -> update=0, frame '?'")
         sb.FRAME_INDEX = -1  -- scripts/main.lua initializes it to -1 at load
-        runner.assert_eq(" tick=0 frame=-1", sb.Mods._relay.frame_stamp(),
-            "pre-first-update: tick still 0, the initial -1 renders")
-        -- Per engine update: tick +1 (observed boundaries), FRAME_INDEX +1.
-        sb.Mods._relay._tick_bump()
+        runner.assert_eq(" update=0 frame=-1", sb.Mods._relay.frame_stamp(),
+            "pre-first-update: update still 0, the initial -1 renders")
+        -- Per engine update: update +1 (observed boundaries), FRAME_INDEX +1.
+        sb.Mods._relay._update_bump()
         sb.FRAME_INDEX = 0
-        runner.assert_eq(" tick=1 frame=0", sb.Mods._relay.frame_stamp(),
-            "during/after the first observed update: tick=1 frame=0")
-        sb.Mods._relay._tick_bump()
+        runner.assert_eq(" update=1 frame=0", sb.Mods._relay.frame_stamp(),
+            "during/after the first observed update: update=1 frame=0")
+        sb.Mods._relay._update_bump()
         sb.FRAME_INDEX = 1
-        runner.assert_eq(" tick=2 frame=1", sb.Mods._relay.frame_stamp())
-        sb.Mods._relay._tick_bump()
+        runner.assert_eq(" update=2 frame=1", sb.Mods._relay.frame_stamp())
+        sb.Mods._relay._update_bump()
         sb.FRAME_INDEX = 12345
-        runner.assert_eq(" tick=3 frame=12345", sb.Mods._relay.frame_stamp())
+        runner.assert_eq(" update=3 frame=12345", sb.Mods._relay.frame_stamp())
         -- A non-number FRAME_INDEX degrades only the frame field.
         sb.FRAME_INDEX = "not a number"
-        runner.assert_eq(" tick=3 frame=?", sb.Mods._relay.frame_stamp(),
-            "a non-number FRAME_INDEX degrades to '?' (tick unaffected)")
-        -- Contract shape: leading space, tick first (non-negative digits),
+        runner.assert_eq(" update=3 frame=?", sb.Mods._relay.frame_stamp(),
+            "a non-number FRAME_INDEX degrades to '?' (update unaffected)")
+        -- Contract shape: leading space, update first (non-negative digits),
         -- frame second (optional minus, digits, or '?').
         sb.FRAME_INDEX = 7
         local stamp = sb.Mods._relay.frame_stamp()
-        runner.assert_truthy(stamp:find("^ tick=%d+ frame=%-?%d+$") ~= nil,
-            "numeric stamps match '^ tick=%d+ frame=%-?%d+$'")
+        runner.assert_truthy(stamp:find("^ update=%d+ frame=%-?%d+$") ~= nil,
+            "numeric stamps match '^ update=%d+ frame=%-?%d+$'")
     end)
 
-    runner.register("entry: _tick_bump increments monotonically and is total over corrupted state", function()
+    runner.register("entry: frame_stamp leads with 'stage=S' while a stage epoch is published", function()
+        -- mod_manager owns the epoch (set at a pass's first load attempt,
+        -- cleared at every pass end); this pins the STAMP side against the
+        -- real helper: stage leads, then update, then frame; computed
+        -- (update - epoch), 0-based; absent entirely with no epoch.
+        local sb = run_init_trace(nil)
+        sb.FRAME_INDEX = 5
+        sb.Mods._relay._update = 36
+        runner.assert_eq(" update=36 frame=5", sb.Mods._relay.frame_stamp(),
+            "no epoch published -> no stage field")
+        sb.Mods._relay._stage_epoch = 36
+        runner.assert_eq(" stage=0 update=36 frame=5", sb.Mods._relay.frame_stamp(),
+            "epoch == current update -> stage=0 (the first loading update)")
+        sb.Mods._relay._update_bump()
+        sb.FRAME_INDEX = 6
+        runner.assert_eq(" stage=1 update=37 frame=6", sb.Mods._relay.frame_stamp(),
+            "one update later -> stage=1 (same-update lines share a stage)")
+        sb.Mods._relay._update_bump()
+        sb.Mods._relay._update_bump()
+        runner.assert_eq(" stage=3 update=39 frame=6", sb.Mods._relay.frame_stamp(),
+            "stage tracks the counter (epoch untouched)")
+        -- Clearing the epoch removes the field again (the pass ended).
+        sb.Mods._relay._stage_epoch = nil
+        runner.assert_eq(" update=39 frame=6", sb.Mods._relay.frame_stamp(),
+            "epoch cleared -> the stamp is unstaged again")
+        -- Total over corrupted state: a non-number epoch is ignored; a
+        -- corrupted counter with a live epoch clamps the rendered values.
+        sb.Mods._relay._stage_epoch = "bogus"
+        runner.assert_eq(" update=39 frame=6", sb.Mods._relay.frame_stamp(),
+            "a non-number epoch means no stage (never throws)")
+        sb.Mods._relay._stage_epoch = 38
+        sb.Mods._relay._update = {}
+        local ok, stamp = pcall(sb.Mods._relay.frame_stamp)
+        runner.assert_eq(true, ok, "frame_stamp must never throw")
+        runner.assert_eq(" stage=0 update=0 frame=6", stamp,
+            "a corrupted counter renders update=0 and stage clamps to 0")
+    end)
+
+    runner.register("entry: _update_bump increments monotonically and is total over corrupted state", function()
         local sb = run_init_trace(nil)
         for i = 1, 3 do
-            sb.Mods._relay._tick_bump()
-            runner.assert_eq(i, sb.Mods._relay._tick)
+            sb.Mods._relay._update_bump()
+            runner.assert_eq(i, sb.Mods._relay._update)
         end
         -- A corrupted counter (non-number / negative) never throws and
         -- restarts from a sane value.
         local ok = pcall(function()
-            sb.Mods._relay._tick = "bogus"
-            sb.Mods._relay._tick_bump()
-            runner.assert_eq(1, sb.Mods._relay._tick,
+            sb.Mods._relay._update = "bogus"
+            sb.Mods._relay._update_bump()
+            runner.assert_eq(1, sb.Mods._relay._update,
                 "a non-number counter resets to 0 then increments")
-            sb.Mods._relay._tick = -5
-            sb.Mods._relay._tick_bump()
-            runner.assert_eq(1, sb.Mods._relay._tick,
+            sb.Mods._relay._update = -5
+            sb.Mods._relay._update_bump()
+            runner.assert_eq(1, sb.Mods._relay._update,
                 "a negative counter clamps to 0 then increments")
         end)
         runner.assert_eq(true, ok, "the bump must never throw")
-        -- frame_stamp renders a corrupted counter as tick=0, never throws.
-        sb.Mods._relay._tick = {}
+        -- frame_stamp renders a corrupted counter as update=0, never throws.
+        sb.Mods._relay._update = {}
         local ok2, stamp = pcall(sb.Mods._relay.frame_stamp)
         runner.assert_eq(true, ok2)
-        runner.assert_eq(" tick=0 frame=?", stamp)
+        runner.assert_eq(" update=0 frame=?", stamp)
     end)
 
     runner.register("entry: a malformed (non-string) baked global degrades to trace off (never a failure path)", function()

@@ -348,31 +348,32 @@ calls exactly `update(dt)` and `on_game_state_changed(...)` on whoever
 occupies the slot). The built-in manager is the generic scan/load/lifecycle
 driver:
 
-1. **Scanning phase** (`init()`, during boot): reads `mods.lst` (one mod
+1. **Scanning** (`init()`, during boot): reads `mods.lst` (one mod
    folder name per line, in load order) and builds the entire `_mods` table
    up front. The order file is **authoritative and caller-authored** — the
    loader injects nothing. DMF is **not** auto-inserted (unlike DML, which
    unconditionally prepends `dmf` to its load order); DMF is first only
    because `mods.lst` lists it first. Missing/empty file → no mod loads
    (graceful, no crash).
-2. **Loading phase** (begins on the **first `StateGame.update` tick** — the
-   phase-0 anchor, pass bookkeeping only): a **phased load** that advances
-   **exactly one entry per manager tick**, in order — entry i (1-based list
-   position) loads on the i-th tick after the anchor. Each load step: execute
+2. **Loading** (begins on the **first `StateGame.update` manager update** —
+   the load-pass anchor, pass bookkeeping only): a **staged load** that
+   advances **exactly one entry per manager update**, in order — entry i
+   (1-based list position) loads on the i-th update after the anchor, at
+   stage i−1. Each load step: execute
    the `.mod` descriptor, publish the descriptor table on the entry as
    `entry.data`,
    call its `run()` (pcall-guarded), accept only **nil** (a DMF-driven
    side-effect registration) or a **table** (an outer object — stored, and
    its `init()` called synchronously, before any later entry loads). The pass
-   is deferred from boot to the first update tick because boot-complete
+   is deferred from boot to the first manager update because boot-complete
    globals (`Managers.input`, …) do not exist yet during the boot-state
    requires; the scan can run at boot because it reads no engine globals.
    This matches DML's pacing (one listed mod per loading update; the normative
-   phase contract is in [`load-phases.md`](load-phases.md)).
-3. **Running phase**: every update tick drives `update(dt)` for every outer
+   stage contract is in [`load-stages.md`](load-stages.md)).
+3. **Running**: every update drives `update(dt)` for every outer
    object loaded so far, polls the developer-mode-gated hot-reload shortcut,
    and drives the reload state machine. Updates overlap the pass: an outer
-   mod's first `update` lands on its own load tick, and already-loaded mods
+   mod's first `update` lands on its own load update, and already-loaded mods
    keep updating while later entries still load.
 4. **Failure state**: per-mod pcall fault isolation — missing/malformed
    descriptors, throwing `run()` calls, and invalid (non-nil/non-table)
@@ -394,13 +395,13 @@ Loading contracts worth naming:
   `nil` until the manager decides the pass is complete, then is published as
   `"done"` exactly once — including the empty, all-failed, and framework-
   stopped cases. DMF polls `_state == "done"` from its own update (driven
-  every tick; no earlier than the finalize tick's update drive) and fires its
+  every update; no earlier than the finalize update's update drive) and fires its
   `all_mods_loaded` event. The loader's own anchor flag (`_mods_loaded` — set
-  on the first manager tick, at pass begin) is a
+  on the first manager update, at pass begin) is a
   separate, loader-internal field DMF never reads.
-- **`_mod_load_index`** is set to the entry's index at its load tick (so
+- **`_mod_load_index`** is set to the entry's index at its load update (so
   DMF's `new_mod` → `DMFMod:init()` reads the right `_mods` entry), persists
-  between entry ticks — visible across engine updates mid-pass, community
+  between entry loads — visible across engine updates mid-pass, community
   parity — and is cleared once, at pass finalize. The descriptor table is
   published as `entry.data` before `run()` because `DMFMod:init()` reads
   `.data.packages` during construction.
@@ -427,9 +428,10 @@ Loading contracts worth naming:
    stored keyed by stable mod **name**; `on_unload` in reverse order; retire
    the stale DMF generation globals; remove old `Mod:*` keys; reread the
    authoritative `mods.lst`) and then a **replacement replay** — an anchor
-   tick, then one entry per tick, with `init(reload_data_for_same_name)`
-   delivered at each entry's tick; `mark_load_done`, the generation
-   increment, and the completion INFO/WARN land on the final replay tick.
+   update, then one entry per update (the stage counter reset so the
+   replay's first entry is stage 0), with `init(reload_data_for_same_name)`
+   delivered at each entry's load update; `mark_load_done`, the generation
+   increment, and the completion INFO/WARN land on the final replay update.
    Reload is best-effort and non-transactional — no shadow load, no rollback;
    a completion with errors recommends a game restart.
 
@@ -598,25 +600,26 @@ DMF under the configured mod root.
      GameStateMachine.destroy wrapped (opt-in Step 5: StateSplash)
         │
         ▼
-9. First StateGame.update tick (the phase-0 anchor): Managers.mod:update(dt)
+9. First StateGame.update (the load-pass anchor update):
+   Managers.mod:update(dt)
    performs pass bookkeeping only — no entries load (the scan ran at manager
-   creation). Each subsequent tick loads at most the next entry, in
+   creation). Each subsequent update loads at most the next entry, in
    mods.lst order, then drives update(dt) for every outer object loaded
    so far:
-   a. DMF first (listed first), on the tick after the anchor: dmf.mod
-      executed → entry.data
+   a. DMF first (listed first), on the update after the anchor (stage 0):
+      dmf.mod executed → entry.data
       published → run() returns the dmf_mod_object → init() loads
       the framework modules (the io observer adapts DMFMod:io_*
       mid-init, before Phase 2)
-   b. each user mod in order, one per tick: run() → nil (DMF-driven) or
+   b. each user mod in order, one per update: run() → nil (DMF-driven) or
       table (outer-driven → init() before any later entry loads)
-   c. on the last entry's tick: _mod_load_index cleared once (at pass
-      finalize); _state = "done" published
+   c. on the last entry's load update: _mod_load_index cleared once (at
+      pass finalize); _state = "done" published
          │
          ▼
-10. DMF's own update (driven every tick from its own load tick onward —
+10. DMF's own update (driven every update from its own load update onward —
     updates overlap the pass) polls Managers.mod._state == "done" and,
-    the first time it sees it — no earlier than the finalize tick's own
+    the first time it sees it — no earlier than the finalize update's own
     update drive — fires all_mods_loaded to its registered user mods
          │
          ▼
@@ -624,9 +627,9 @@ DMF under the configured mod root.
     Managers.mod:update(dt) before the engine update — outer objects'
     update(dt) (DMF among them; DMF's inner loop drives its registered
     mods), the reload-shortcut poll, and the reload state machine
-    (optional hot reload: LEFT Ctrl + LEFT Shift + R in developer mode
-    → teardown frame → replacement replay: anchor tick, then one entry
-    per tick)
+    (optional hot reload: LEFT Ctrl + Left Shift + R in developer mode
+    → teardown frame → replacement replay: anchor update, then one entry
+    per update)
         │
         ▼
 12. Shutdown: the GameStateMachine.destroy wrap dispatches one final

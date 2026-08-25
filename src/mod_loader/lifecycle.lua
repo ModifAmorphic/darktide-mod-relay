@@ -23,10 +23,10 @@ local _type = type
 local _string_find = string.find
 
 -- Leveled diagnostics (init.lua publishes the helper on Mods._relay before this
--- module loads). frame_stamp appends the combined tick/frame correlation stamp
--- to the state-dispatch lines (tick = loader-relative engine updates since
--- injection, primary; FRAME_INDEX secondary — see
--- docs/reference/relay/logging.md); _tick_bump advances the counter at each
+-- module loads). frame_stamp appends the combined stage/update/frame
+-- correlation stamp to the state-dispatch lines (update = loader-relative
+-- engine updates since injection, primary; FRAME_INDEX secondary — see
+-- docs/reference/relay/logging.md); _update_bump advances the counter at each
 -- observed engine update boundary. display_text safely renders the
 -- interpolated state names (pcall'd, scrubbed, capped — a raising __tostring
 -- can never throw out of a dispatch line).
@@ -36,7 +36,7 @@ local log_warn  = Mods._relay.log_warn
 local log_error = Mods._relay.log_error
 local frame_stamp = Mods._relay.frame_stamp
 local display_text = Mods._relay.display_text
-local _tick_bump = Mods._relay._tick_bump
+local _update_bump = Mods._relay._update_bump
 
 -- ---------------------------------------------------------------------------
 -- Throttled containment-error logging for the five chassis containment sites
@@ -473,7 +473,7 @@ local function advance_bootstrap()
         if sg and _type(sg.update) == "function" then
             local orig_update = sg.update
             sg.update = function(self, dt, ...)
-                _tick_bump()
+                _update_bump()
                 local m = Managers and Managers.mod
                 if m then
                     -- Opportunistic version-publication retry (cheap flag
@@ -706,7 +706,7 @@ local function coordinate_bootstrap()
         if sbt and _type(sbt.update) == "function" then
             local orig_boot_update = sbt.update
             sbt.update = function(self, ...)
-                _tick_bump()
+                _update_bump()
                 local results = _pack(orig_boot_update(self, ...))
                 return _unpack(results, 1, results.n)
             end
