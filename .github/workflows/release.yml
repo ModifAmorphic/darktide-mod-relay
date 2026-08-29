@@ -1,5 +1,6 @@
 # Release pipeline — release-please versions on src/, then a chained Windows
-# build attaches the runtime bundle and attests it with Sigstore.
+# build attaches the runtime bundle and attests it with Sigstore, then dispatches
+# to the post-release AV/VT scan workflow.
 #
 # release-please versions on changes under src/ (Rust + C + Lua all count),
 # cuts the tag + GitHub release, then the build-assets job (same workflow,
@@ -83,3 +84,25 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: src/${{ needs.release-please.outputs.tag_name }}-windows-x64.zip
+
+  dispatch-av-vt:
+    needs: [release-please, build-assets]
+    if: ${{ always() && needs.release-please.result == 'success' && needs.build-assets.result == 'success' && needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch repository event for AV/VT scan
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'relay-release-assets-published',
+              client_payload: {
+                tag_name: '${{ needs.release-please.outputs.tag_name }}',
+                windows_asset: '${{ needs.release-please.outputs.tag_name }}-windows-x64.zip'
+              }
+            })
