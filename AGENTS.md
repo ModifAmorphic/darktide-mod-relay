@@ -174,7 +174,8 @@ src/                Mod Relay — the injected modding runtime + injector
   README.md         the component README (developers / power users)
 docs/               architecture/ + reference/ (relay/, darktide/, community-tools/)
 .github/workflows/  CI: pr.yml (PR gate: mingw cross-compile + msvc native) +
-                      release.yml (release pipeline + Windows bundle attestation)
+                      release.yml (release pipeline + Windows bundle attestation) +
+                      post-release-av.yml (post-release Defender/VirusTotal scan + review issue)
 .gitignore          ignores src/target, src/bin, build artifacts
 ```
 
@@ -292,7 +293,11 @@ Build outputs land in `src/bin/`; cargo's artifacts in `src/target/`.
   cross-compile + wine tests, and msvc Windows native). Pushes to `main` run
   the release pipeline (`.github/workflows/release.yml`: release-please
   versions + tags, then builds + attaches the Windows x64 runtime bundle to the
-  release). Both gate on clippy + tests.
+  release). Both gate on clippy + tests. After a release's assets are uploaded
+  and attested, release.yml dispatches `relay-release-assets-published` to
+  post-release-av.yml, which scans the `<tag>-windows-x64.zip` asset with Defender
+  + VirusTotal and opens a `virus-scan` manual-review issue in this repo; it
+  requires the `VIRUSTOTAL_API_KEY` repo secret (hard-fails when missing, by design).
 - **Release Please metadata invariant — do not “fix” the Cargo version.** The
   non-negotiable operational requirement is that a PR created or updated by
   Release Please **must not start `.github/workflows/pr.yml` at all**. Do not
