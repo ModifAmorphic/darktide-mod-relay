@@ -53,13 +53,15 @@ src/                Mod Relay — the injected modding runtime + injector
   target/           cargo build artifacts (gitignored)
   discovery/        Rust crate: LuaJIT discovery engine (pure library, C-ABI staticlib)
   shell/            C shell — the injected DLL (DllMain, MinHook, lua_newstate +
-                      lua_pcall hooks, production trampoline @ pcall#1; the
-                      trampoline bakes MOD_LOADER_DIR + RELAY_MOD_PATH +
-                      RELAY_MOD_MANAGER + MOD_RELAY_VERSION + RELAY_SKIP_SPLASH +
-                      RELAY_MODS_IN_GAME_TREE (the launcher-derived
-                      mods-in-game-tree hint — see `--mod-path`)
-                      into the pcall#1
-                      chunk globals; log_sink.c
+                       lua_pcall hooks, production trampoline @ pcall#1; the
+                       trampoline bakes MOD_LOADER_DIR + RELAY_MOD_PATH +
+                       RELAY_MOD_MANAGER + MOD_RELAY_VERSION + RELAY_SKIP_SPLASH +
+                       RELAY_MODS_IN_GAME_TREE (the launcher-derived
+                       mods-in-game-tree hint — see `--mod-path`) +
+                       RELAY_LOG_LEVEL (raw value, verbatim — drives the loader's
+                       source-gated trace diagnostics)
+                       into the pcall#1
+                       chunk globals; log_sink.c
                       is the pure, I/O-free lua-print line-sanitization helper for
                       the optional print tee, compiled into both the DLL and the
                       C unit tests)
@@ -132,13 +134,18 @@ src/                Mod Relay — the injected modding runtime + injector
                        success) — the manager-facing contract is normative in
                        docs/reference/relay/manager-slot.md;
                        mod_manager.lua is the generic
-                       scan/load/lifecycle driver (the built-in manager) + the
+                       scan/load/lifecycle driver (the built-in manager;
+                       staged initial load — exactly one mods.lst entry per
+                       manager update from the load-pass anchor (entry i at
+                       stage i-1), community pacing, updates interleaved
+                       with the pass) + the
                        hot-reload state machine
                       (request_reload seam, _check_reload trigger-detection seam
                       for the community reload-control contract (detection only,
                       dynamic dispatch so a community replacement can suppress or
                       redirect the built-in gesture), LEFT Ctrl+Shift+R keyboard
-                      trigger, two-frame teardown/replacement sequencing,
+                      trigger, teardown frame + one-entry-per-update
+                      replacement replay,
                        reload-data association keyed by name, nil/table-only
                        run-result validation, unconditional load finalization,
                        generation-aware per-mod Crashify metadata (`Mod:<name>`;

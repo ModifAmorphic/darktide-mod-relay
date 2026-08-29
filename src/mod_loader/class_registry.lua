@@ -27,6 +27,16 @@ end
 local _rawget = rawget
 local _print = __print or print
 
+-- Leveled diagnostics (init.lua publishes the helpers on Mods._relay before
+-- this module loads). log_trace is source-gated (no-op unless trace is on);
+-- the per-registration TRACE line is high-volume by design — thousands per
+-- boot is expected and acceptable because the gate keeps it off by default.
+-- display_text scrubs/caps the interpolated name so a control-bearing or
+-- oversized class name cannot forge diagnostic lines.
+local log_trace = Mods._relay.log_trace
+local log_debug = Mods._relay.log_debug
+local display_text = Mods._relay.display_text
+
 local installed = false
 local original_class = nil
 
@@ -52,6 +62,7 @@ local function install_class_registry()
             if _rawget(_G, name) == nil then
                 _G[name] = result
             end
+            log_trace("class registered: " .. display_text(name))
         end
         return result
     end
@@ -64,6 +75,7 @@ end
 local function retire_class(name)
     if type(name) ~= "string" then return end
     _G[name] = nil
+    log_debug("class retired: " .. display_text(name))
 end
 
 Mods.install_class_registry = install_class_registry

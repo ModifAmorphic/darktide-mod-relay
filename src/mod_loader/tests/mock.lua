@@ -258,6 +258,69 @@ function M.attach_logger(sb)
     relay.log_debug = relay.log_debug or make("DEBUG")
     relay.log_warn  = relay.log_warn  or make("WARN")
     relay.log_error = relay.log_error or make("ERROR")
+    -- The loader-relative update counter (init.lua publishes the real one on
+    -- Mods._relay; seeded here so isolated module tests can read — and inject,
+    -- by assignment — an update source).
+    if relay._update == nil then
+        relay._update = 0
+    end
+    -- frame_stamp mirrors init.lua's helper: " stage=S update=N frame=M" —
+    -- the stage lead appears only while a load pass is between its first load
+    -- attempt and its finalize (mod_manager publishes the stage epoch on
+    -- relay._stage_epoch; S = update - epoch, 0-based per pass) — computed
+    -- from the injectable relay._update + the sandbox's FRAME_INDEX
+    -- (sb._G == sb, so this is the module-side rawget(_G, ...)); " frame=?"
+    -- when absent or non-number; a corrupted _update renders as 0.
+    if relay.frame_stamp == nil then
+        relay.frame_stamp = function()
+            local u = relay._update
+            if type(u) ~= "number" or u < 0 then u = 0 end
+            local lead = ""
+            local epoch = relay._stage_epoch
+            if type(epoch) == "number" and epoch >= 0 then
+                local s = u - epoch
+                if s < 0 then s = 0 end
+                lead = " stage=" .. tostring(s)
+            end
+            local n = rawget(sb, "FRAME_INDEX")
+            local f = type(n) == "number" and tostring(n) or "?"
+            return lead .. " update=" .. tostring(u) .. " frame=" .. f
+        end
+    end
+    -- _update_bump mirrors init.lua's helper (defensive reset + increment).
+    if relay._update_bump == nil then
+        relay._update_bump = function()
+            local u = relay._update
+            if type(u) ~= "number" or u < 0 then u = 0 end
+            relay._update = u + 1
+        end
+    end
+    -- display_text mirrors init.lua's shared scrubber (real semantics —
+    -- tests assert scrubbed/capped output through it): pcall'd tostring,
+    -- control bytes -> '?', 80-byte display cap (77 + "...").
+    if relay.display_text == nil then
+        relay.display_text = function(value)
+            local ok, text = pcall(tostring, value)
+            if not ok or type(text) ~= "string" then
+                return "<unprintable error>"
+            end
+            local rendered = text:gsub("%c", "?")
+            if #rendered > 80 then
+                rendered = rendered:sub(1, 77) .. "..."
+            end
+            return rendered
+        end
+    end
+    -- log_trace mirrors init.lua's gated helper, but reads the injectable
+    -- relay._trace_enabled flag at CALL time so isolated module tests can
+    -- exercise both states without re-running the entry (init bakes its gate
+    -- once, at entry time).
+    if relay.log_trace == nil then
+        relay.log_trace = function(message)
+            if relay._trace_enabled ~= true then return end
+            sb.__print("TRACE [mod_loader] " .. tostring(message) .. relay.frame_stamp())
+        end
+    end
 end
 
 return M

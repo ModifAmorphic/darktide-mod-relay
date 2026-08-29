@@ -12,7 +12,15 @@ validated facts or contracts.
   discovery anchor);
   [`relay/manager-slot.md`](relay/manager-slot.md) — the manager-slot
   contract (selecting an alternate mod manager, the failure policy, and the
-  environment provided to the occupant).
+  environment provided to the occupant); and
+  [`relay/relay-stack-analysis.md`](relay/relay-stack-analysis.md) — a
+  descriptive (not normative) walkthrough of the full Relay stack, mirroring
+  the community-toolchain reference's shape; and
+  [`relay/load-stages.md`](relay/load-stages.md) — the stage-scheduling
+  contract (stage 0 = the first entry's load update; entry i loads on
+  update i after the load-pass anchor; the positional `mods.lst` default —
+  entry i at stage i−1, one entry per update — is implemented; authored
+  multi-mod-per-stage schedules are future work, carrier shape TBD).
 - [`darktide/`](darktide/) — validated facts about the Darktide engine binary
   (LuaJIT, `lua_State` offsets, sandboxed `_G`, discovery methodology).
   Properties of the game, independent of any implementation.

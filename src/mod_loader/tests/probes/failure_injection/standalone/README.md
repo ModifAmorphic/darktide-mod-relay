@@ -6,7 +6,7 @@ Verifies Relay's **standalone** outer-entry failure containment: one injected
 `update` error must disable exactly that entry for the rest of the generation,
 call its `on_unload` exactly once, emit one full console diagnostic + one
 immediate engine alert, and repeat the alert on a controlled cadence — all
-without affecting a healthy sibling entry loaded alongside it.
+without affecting a healthy sibling entry later in the same list.
 
 This is an explicit **failure-injection** scenario. The standalone probe
 **intentionally raises one error** in `fail` mode (that is the behavior under
@@ -58,61 +58,67 @@ No Lua editing is required. The failure is selected by `mode.txt`.
 ## Expected sequence (initial `fail` mode)
 
 Relay scans `mods.lst` into an entry list **without** executing any `.mod`;
-`.mod` execution happens during the load pass, in listed order. The standalone
-entry is listed first, so its load + init complete before the sibling's; the
-sibling then initializes in the same load pass despite the fact that the
-standalone will fail its first update.
+`.mod` execution happens during the load pass, in listed order — one entry
+per manager update (list position = load update offset from the pass
+anchor). The
+standalone entry is listed first, so its load + init + first update all land
+on its own update; the healthy sibling loads on the next update, after the
+standalone has already failed and been cleaned up.
 
 On reaching the main menu, expect (roughly, in order):
 
-**Load pass** (both entries load cleanly — only `update` fails):
+**Load update 1 — the standalone's load update** (load, then the update
+drive for everything loaded so far — only the standalone):
 
 1. `[STANDALONE_FAILURE] scenario-loaded mode=fail ...` (its `.mod` executes)
 2. `[STANDALONE_FAILURE] run mode=fail`
 3. `[STANDALONE_FAILURE] init mode=fail`
-4. `[HEALTHY_SIBLING] scenario-loaded ...`
-5. `[HEALTHY_SIBLING] run` / `[HEALTHY_SIBLING] init ...`
-
-**First update fan-out** (the standalone fails; the sibling still runs; cleanup
-drains at the end of the fan-out — all in the same generation):
-
-6. `[STANDALONE_FAILURE] update mode=fail counter=updates:1 ...` — the first
-   and only fail-mode update.
-7. `[STANDALONE_FAILURE] update raising injected scratch error ...`
-8. Relay's single full diagnostic:
+4. `[STANDALONE_FAILURE] update mode=fail counter=updates:1 ...` — the first
+   and only fail-mode update (an outer mod's first `update` lands on its own
+   load update).
+5. `[STANDALONE_FAILURE] update raising injected scratch error ...`
+6. Relay's single full diagnostic:
    ```
    ERROR [mod_loader] mod 'standalone_failure_probe' update failed in generation 1;
    Relay disabled this entry:
    <full traceback>
    ```
-9. One **engine alert** in the notification feed (Relay uses the engine's
+7. One **engine alert** in the notification feed (Relay uses the engine's
    `event_add_notification_message` / `alert` path — **not** a DMF method):
    > Mod Relay disabled mod 'standalone_failure_probe' after a lifecycle error.
    > Restart the game or hot reload in developer mode. See the Darktide console
    > log for details.
-10. `[HEALTHY_SIBLING] update bounded-first-update ...` — the update loop
-    continues to the sibling after the failure is latched.
-11. `[STANDALONE_FAILURE] on_unload mode=fail counter=updates:1 unloads:1` —
-    exactly one cleanup unload. Detachment and the failure latch are immediate
-    (inside the failing update call), but the queued `on_unload` drains here at
-    the end of the same fan-out — after the healthy sibling has been driven
-    (step 10) — not deferred to reload or shutdown.
+8. `[STANDALONE_FAILURE] on_unload mode=fail counter=updates:1 unloads:1` —
+   exactly one cleanup unload. Detachment and the failure latch are immediate
+   (inside the failing update call), but the queued `on_unload` drains here at
+   the end of this update's fan-out — the sibling has not loaded yet —
+   not deferred to reload or shutdown.
+
+**Load update 2 — the sibling's load update** (the pass continues; only the
+standalone entry was disabled):
+
+9. `[HEALTHY_SIBLING] scenario-loaded ...` → `[HEALTHY_SIBLING] run` →
+   `[HEALTHY_SIBLING] init ...`
+10. `[HEALTHY_SIBLING] update bounded-first-update ...` — its first update,
+    on its own load update; the update loop is unaffected by the sibling
+    failure latched one update earlier.
 
 ### Marker-count expectations (initial fail mode)
 
 - **Exactly one** `[STANDALONE_FAILURE] update mode=fail` line (counter
   `updates:1`). If you see `updates:2` or more, Relay retried a disabled
   callback — a containment bug.
-- **Exactly one** `[STANDALONE_FAILURE] on_unload` line in this phase
+- **Exactly one** `[STANDALONE_FAILURE] on_unload` line in this stage
   (`unloads:1`). Detachment is immediate, but the queued `on_unload` drains at
-  the end of the update fan-out in the failing generation (after healthy
-  siblings have been driven); a second unload line before any reload/shutdown
+  the end of the failing update's fan-out (the sibling has not loaded
+  yet at that point); a second unload line before any reload/shutdown
   is a double-unload bug.
 - **Exactly one** full `[mod_loader] ... update failed ...` diagnostic with a
   traceback. The traceback must not repeat every frame.
 - **One** immediate alert, then reminders at the controlled cadence.
-- The healthy sibling's `init` (load pass) and a bounded first `update`
-  (update fan-out) must both appear; the sibling must not spam per-frame
+- The healthy sibling's `init` and a bounded first `update` must both appear —
+  both on the sibling's own load update (one update after the standalone's,
+  following the failure); the sibling must not spam per-frame
   `update` lines.
 
 ### Alert cadence and dev-mode text
@@ -151,9 +157,9 @@ To recover in-process:
   callback.
 - `_RELAY_STANDALONE_FAIL_UNLOADS` becomes **2** across the full
   fail → recover → shutdown cycle: unload #1 is the failed object's queued
-  `on_unload`, drained at the end of the update fan-out in the failing
-  generation (step 11 above — detachment itself is immediate, but the unload
-  runs after the healthy sibling is driven), and unload #2 is the recovered
+  `on_unload`, drained at the end of the failing update's fan-out
+  (step 8 above — detachment itself is immediate; the sibling loads one
+  update later), and unload #2 is the recovered
   healthy replacement being unloaded at process shutdown. The failed object is
   **not** unloaded a second time during hot-reload teardown — its cleanup was
   already claimed and drained in the failing generation, so a second unload of

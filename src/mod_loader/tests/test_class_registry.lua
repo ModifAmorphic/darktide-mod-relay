@@ -19,16 +19,20 @@ local mock = require("mock")
 
 return function(runner)
     -- Load class_registry into a sandbox. The test sets up `class` + CLASS as
-    -- needed before/after loading.
+    -- needed before/after loading. Returns the sandbox + the captured log
+    -- lines (attach_logger routes the module's leveled prints to sb.__print,
+    -- which the spy records). Trace tests toggle sb.Mods._relay._trace_enabled.
     local function setup(class_fn)
+        local logged = {}
         local sb = mock.new_sandbox()
         sb.Mods = {}
-        sb.__print = function() end
+        sb.__print = function(m) logged[#logged + 1] = m end
+        mock.attach_logger(sb)
         if class_fn ~= nil then
             sb.class = class_fn
         end
         mock.run_module("class_registry", sb)
-        return sb
+        return sb, logged
     end
 
     -- A fake engine class() that records calls + returns a fresh table per name.
@@ -281,5 +285,122 @@ return function(runner)
         sb.Mods.retire_class("NeverRegistered")
         runner.assert_nil(sb._G.NeverRegistered,
             "retire of an unregistered name leaves _G clean")
+    end)
+
+    -- ---------------------------------------------------------------------
+    -- Trace/diagnostic events (registration TRACE gated; retire DEBUG)
+    -- ---------------------------------------------------------------------
+
+    local function count_log(logged, sub)
+        local n = 0
+        for _, line in ipairs(logged) do
+            if type(line) == "string" and line:find(sub, 1, true) then n = n + 1 end
+        end
+        return n
+    end
+
+    runner.register("class_registry: registration emits exactly one 'class registered' TRACE when enabled", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.install_class_registry()
+        sb.class("Foo")
+        sb.class("Bar")
+        runner.assert_eq(2, count_log(logged, "class registered: "),
+            "one TRACE line per registration")
+        runner.assert_eq(1, count_log(logged, "class registered: Foo"))
+        runner.assert_eq(1, count_log(logged, "class registered: Bar"))
+        runner.assert_truthy(logged[1]:find("^TRACE %[mod_loader%] ") ~= nil,
+            "the registration line carries the TRACE community prefix")
+        runner.assert_truthy(logged[1]:find(" frame=") ~= nil,
+            "the gated TRACE helper appends the frame stamp")
+    end)
+
+    runner.register("class_registry: registration lines carry the current stage while a pass epoch is published", function()
+        -- A class registering DURING a load pass (mods register classes from
+        -- their run) lands between the pass's first load and its finalize,
+        -- so its TRACE line leads with the derived stage.
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods._relay._update = 12
+        sb.Mods._relay._stage_epoch = 11
+        sb.Mods.install_class_registry()
+        sb.FRAME_INDEX = 11
+        sb.class("Staged")
+        runner.assert_eq(1, count_log(logged, "class registered: Staged stage=1 update=12 frame=11"),
+            "a registration during the pass carries the current stage")
+        -- Outside a pass (no epoch) the same registration is unstaged.
+        sb.Mods._relay._stage_epoch = nil
+        sb.class("Unstaged")
+        runner.assert_eq(1, count_log(logged, "class registered: Unstaged update=12 frame=11"),
+            "with no epoch published the registration stamp carries no stage")
+    end)
+
+    runner.register("class_registry: registration emits NO trace lines when the gate is off (default)", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods.install_class_registry()
+        sb.class("Foo")
+        sb.class("Bar")
+        runner.assert_eq(0, count_log(logged, "class registered"),
+            "trace off: zero registration lines")
+        runner.assert_eq(0, #logged, "trace off: the module logs nothing on registration")
+    end)
+
+    runner.register("class_registry: a non-string class name emits no registration line", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.install_class_registry()
+        sb.class(123)
+        runner.assert_eq(0, count_log(logged, "class registered"),
+            "no TRACE line for a name that is not stored")
+    end)
+
+    runner.register("class_registry: retire_class emits the 'class retired' DEBUG line", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods.install_class_registry()
+        sb.class("Foo")
+        sb.Mods.retire_class("Foo")
+        runner.assert_eq(1, count_log(logged, "class retired: Foo"),
+            "retire emits exactly one DEBUG line naming the class")
+        runner.assert_eq(0, count_log(logged, "class registered"),
+            "the registration lines stay gated off in the same scenario")
+        -- Non-string names stay silent no-ops.
+        sb.Mods.retire_class(nil)
+        sb.Mods.retire_class(123)
+        runner.assert_eq(1, count_log(logged, "class retired:"),
+            "non-string retire names emit nothing")
+    end)
+
+    runner.register("class_registry: a control-char class name is scrubbed (no line forging)", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.install_class_registry()
+        sb.class("Evil\nName")
+        runner.assert_eq(1, count_log(logged, "class registered: Evil?Name"),
+            "control bytes in the name render as '?'")
+        for _, line in ipairs(logged) do
+            runner.assert_truthy(not line:find("\n", 1, true),
+                "no raw newline may appear in a diagnostic line (forging)")
+        end
+        sb.Mods.retire_class("Evil\nName")
+        runner.assert_eq(1, count_log(logged, "class retired: Evil?Name"),
+            "the retire line scrubs the same way")
+    end)
+
+    runner.register("class_registry: an oversized class name is capped in diagnostics", function()
+        local cf = fake_class()
+        local sb, logged = setup(cf)
+        sb.Mods._relay._trace_enabled = true
+        sb.Mods.install_class_registry()
+        sb.class(string.rep("x", 120))
+        runner.assert_eq(1, count_log(logged, "class registered: " .. string.rep("x", 77) .. "..."),
+            "the name is capped at 80 display bytes (77 + ellipsis)")
+        runner.assert_eq(0, count_log(logged, string.rep("x", 90)),
+            "the full raw oversized name never appears")
     end)
 end

@@ -191,11 +191,17 @@ Mods.lua.os = Mods.lua.os or os
 -- failure can NEVER become a second failure path that breaks loading. Mechanism
 -- only — no level threshold: prints go to the console log unfiltered, and level
 -- filtering is the shell/tee's job. _print is post-tee __print so diagnostics
--- are tee'd when --log-lua is on.
+-- are tee'd when --log-lua is on. TRACE is the one deliberate exception: it is
+-- source-gated (never even prints unless RELAY_LOG_LEVEL resolves to trace)
+-- because its event volume (per class registration) is too high to emit
+-- unfiltered; see docs/reference/relay/logging.md.
 do
     local _pcall = pcall
     local _tostring = tostring
     local _type = type
+    local _rawget = rawget
+    local _string_gsub = string.gsub
+    local _string_sub = string.sub
     local _print = __print
     local function safe_text(value)
         local ok, text = _pcall(_tostring, value)
@@ -209,10 +215,104 @@ do
             _pcall(_print, level .. " [mod_loader] " .. safe_text(message))
         end
     end
+
+    -- Shared safe display text for names interpolated into diagnostic lines
+    -- (class names, state names): safe_text plus control-char scrubbing and a
+    -- display-length cap, so a control-bearing or oversized name can never
+    -- forge lines or blow them up. Same 80-byte cap semantics as the mod
+    -- manager's mod-name display helper (which keeps its own entry-specific
+    -- labels on top of this shape).
+    local _DISPLAY_MAX_BYTES = 80
+    local function display_text(value)
+        local rendered = _string_gsub(safe_text(value), "%c", "?")
+        if #rendered > _DISPLAY_MAX_BYTES then
+            rendered = _string_sub(rendered, 1, _DISPLAY_MAX_BYTES - 3) .. "..."
+        end
+        return rendered
+    end
+    Mods._relay.display_text = display_text
+
+    -- Trace opt-in, snapshotted ONCE (process-lifetime) from the
+    -- trampoline-baked RELAY_LOG_LEVEL global (same snapshot-and-retire
+    -- config channel as every other setting; "" = not baked; an absent
+    -- global is nil-safe for older shells / test sandboxes). Matches
+    -- "trace" case-insensitively, mirroring the shell's level matching;
+    -- any other value means off. Loader-internal flag.
+    local level = RELAY_LOG_LEVEL ~= "" and RELAY_LOG_LEVEL or nil
+    RELAY_LOG_LEVEL = nil
+    local _trace_enabled = false
+    if _type(level) == "string" and level:lower() == "trace" then
+        _trace_enabled = true
+    end
+    Mods._relay._trace_enabled = _trace_enabled
+
+    -- Loader-relative update counter + the combined stamp. The counter counts
+    -- observed engine update boundaries since THIS entry: 0 = injection
+    -- epoch (pcall#1, before any engine update has run under our
+    -- observation), +1 at each observed Main.update entry — the same
+    -- boundary the engine uses for FRAME_INDEX. lifecycle.lua's
+    -- StateBoot.update -> StateGame.update wrap chain does the incrementing
+    -- (exactly one wrap fires per engine update); until those wraps install,
+    -- stamps carry update=0. FRAME_INDEX stays in the stamp as the secondary,
+    -- hardware/build-dependent axis. Both helpers are total over corrupted
+    -- state (pcall + type checks) and never throw into engine code.
+    Mods._relay._update = 0
+    local function update_bump()
+        _pcall(function()
+            local u = Mods._relay._update
+            if _type(u) ~= "number" or u < 0 then u = 0 end
+            Mods._relay._update = u + 1
+        end)
+    end
+    Mods._relay._update_bump = update_bump
+
+    -- Combined correlation stamp: " update=N frame=M", led by " stage=S"
+    -- while a load pass is between its first load attempt and its finalize
+    -- (mod_manager publishes the stage epoch — the update of that first
+    -- attempt — on Mods._relay._stage_epoch; S = current update - epoch,
+    -- 0 on the first loading update, +1 per update after, cleared at pass
+    -- end). Field order: stage, update, frame. " frame=?" before that global
+    -- exists (pre-main.lua moments; it is initialized to -1 by
+    -- scripts/main.lua and increments once per Main.update, so the initial
+    -- -1 renders as a number). Leading space by design so call sites can
+    -- append it directly. Never throws.
+    local function frame_stamp()
+        local ok, stamp = _pcall(function()
+            local u = Mods._relay._update
+            if _type(u) ~= "number" or u < 0 then u = 0 end
+            local lead = ""
+            local epoch = Mods._relay._stage_epoch
+            if _type(epoch) == "number" and epoch >= 0 then
+                local s = u - epoch
+                if s < 0 then s = 0 end
+                lead = " stage=" .. _tostring(s)
+            end
+            local n = _rawget(_G, "FRAME_INDEX")
+            if _type(n) == "number" then
+                return lead .. " update=" .. _tostring(u) .. " frame=" .. _tostring(n)
+            end
+            return lead .. " update=" .. _tostring(u) .. " frame=?"
+        end)
+        if ok and _type(stamp) == "string" then
+            return stamp
+        end
+        return " update=? frame=?"
+    end
+    Mods._relay.frame_stamp = frame_stamp
+
     Mods._relay.log_info  = make_logger("INFO")
     Mods._relay.log_debug = make_logger("DEBUG")
     Mods._relay.log_warn  = make_logger("WARN")
     Mods._relay.log_error = make_logger("ERROR")
+    -- Same shape/safety as the other levels, plus the frame stamp appended to
+    -- every message; a no-op closure unless the trace gate is on.
+    if _trace_enabled then
+        Mods._relay.log_trace = function(message)
+            _pcall(_print, "TRACE [mod_loader] " .. safe_text(message) .. frame_stamp())
+        end
+    else
+        Mods._relay.log_trace = function() end
+    end
 end
 
 -- Publish the engine LuaJIT FFI module at the community contract surface.

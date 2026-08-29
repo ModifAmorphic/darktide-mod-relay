@@ -47,18 +47,20 @@ signals hook-ready.
   an engine global (appears late in boot); **`CLASS`** is never engine-set, so
   the mod loader sets it.
 - **Production trampoline + the mod loader.** The production trampoline is
-   wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
-   engine's pcall) it injects the proven chunk — set the root globals
-   (`MOD_LOADER_DIR` + `RELAY_MOD_PATH` + the optional
-   `RELAY_MOD_MANAGER` alternate-manager path), the internal `RELAY_SKIP_SPLASH`
-   switch (`"1"`/`""` from `--skip-splash`/`RELAY_SKIP_SPLASH=1`; the loader
-   snapshots it to wrap `StateSplash.on_enter` when opted in), the internal
-   `RELAY_MODS_IN_GAME_TREE` hint (`"1"`/`""`, launcher-derived — set iff the
-   mod path IS the game dir by handle identity; see the env-var contract),
-   plus a temporary
-   private handoff of the same manifest-derived full product version used by
-   launcher `--version`,
-   `io.open` the staged entry
+    wired in `dllmain.c`: on the first `lua_pcall` (one-shot, before the
+    engine's pcall) it injects the proven chunk — set the root globals
+    (`MOD_LOADER_DIR` + `RELAY_MOD_PATH` + the optional
+    `RELAY_MOD_MANAGER` alternate-manager path), the internal `RELAY_SKIP_SPLASH`
+    switch (`"1"`/`""` from `--skip-splash`/`RELAY_SKIP_SPLASH=1`; the loader
+    snapshots it to wrap `StateSplash.on_enter` when opted in), the internal
+    `RELAY_MODS_IN_GAME_TREE` hint (`"1"`/`""`, launcher-derived — set iff the
+    mod path IS the game dir by handle identity; see the env-var contract),
+    the internal `RELAY_LOG_LEVEL` raw value (`""` when unset; baked verbatim
+    for the loader's source-gated trace diagnostics — see Logging), plus a
+    temporary
+    private handoff of the same manifest-derived full product version used by
+    launcher `--version`,
+    `io.open` the staged entry
    (`<MOD_LOADER_DIR>/init.lua`) → read → `loadstring` → run. (When the Lua
    print tee is enabled, the trampoline also registers the private
    `__mod_relay_lua_log_sink` callback immediately before loading the chunk —
@@ -121,14 +123,15 @@ signals hook-ready.
     hook chain, no string-path deferred queue). The `destroy` wrapper dispatches
     one final `on_game_state_changed("exit", …)` for the active state before
     destruction (deduplicated against `_change_state` per state machine).
-  The loader splits load into two phases: `init()` SCANs (reads `mods.lst`,
+  The loader splits load into two steps: `init()` SCANs (reads `mods.lst`,
     builds the `_mods` table — the order file is authoritative, the loader
     injects nothing; no mod loaded — the settings restore + observer
     registration are chassis Step-1c duties, run under any manager), and the first
-    `StateGame.update` tick LOADs (per-mod `run()` → nil/table validation →
+    `StateGame.update` manager update anchors the LOAD pass (one entry per
+    update thereafter — per-mod `run()` → nil/table validation →
     optional object `init()`, then
     `_state="done"` via the adapter) — deferred so boot-complete globals like
-    `Managers.input` exist. Every `update` tick also polls the developer-mode-
+    `Managers.input` exist. Every `update` also polls the developer-mode-
     gated hot-reload shortcut (LEFT Ctrl + LEFT Shift + R) and drives the
     reload state machine: a request is consumed at the start of an update into a
     teardown frame (`on_reload` forward → `on_unload` reverse → retire stale DMF
@@ -301,10 +304,10 @@ global, so no loader-path env var exists.
 
 | Env var | Set by | Read by | Meaning |
 | --- | --- | --- | --- |
-| `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod path** config value — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here; the `Mods.lua.io.open`/`io.lines` wrapper roots relative paths there and passes absolute paths through verbatim). Unset ⇒ empty `RELAY_MOD_PATH` (mods won't load; graceful). |
+| `RELAY_MOD_PATH` | launcher (only when `--mod-path`/env configured) | shell trampoline + mod loader | the **mod path** config value — a directory that *contains* a `mods/` subdirectory where DMF + user mods + `mods.lst` live. The trampoline sets `RELAY_MOD_PATH` from it; the loader derives `Mods._mod_root` as `<mod_path>/mods` (`Mods.file.*` roots here; the `Mods.lua.io.open`/`io.lines` wrapper roots relative paths there and passes absolute paths through verbatim). Unset/too-long/control-bearing ⇒ degraded to unset at staging (empty `RELAY_MOD_PATH`; mods won't load; graceful — the chunk always builds). |
 | `RELAY_MOD_MANAGER` | launcher (only when `--mod-manager`/env configured) | shell trampoline + mod loader | the **alternate mod manager** selection — a file path used verbatim (no canonicalization/absolutization; relative paths resolve against the game's CWD at Lua load time, like `--mod-path`). The launcher pre-flights it (must exist as a regular file) before creating the game process and refuses to launch otherwise — an env value too long for the launcher's buffer is refused the same way, never degraded to the built-in; the shell reads it during trampoline staging — unset ⇒ empty `RELAY_MOD_MANAGER` (no alternate manager), but a **set** value that is unreadable/too-long/control-bearing is FATAL (logged at `ERROR`, `ExitProcess(1)` before the game resumes) so a configured manager is never silently dropped. |
 | `RELAY_LOG_FILE` | launcher | shell | shell log file path |
-| `RELAY_LOG_LEVEL` | launcher | shell | shell log level (`error`/`warn`/`info`/`debug`/`trace`) |
+| `RELAY_LOG_LEVEL` | launcher | shell + mod loader (trampoline-baked) | shell log level (`error`/`warn`/`info`/`debug`/`trace`). The shell resolves its native filter from the env directly (case-insensitive; unset/oversized/unknown ⇒ `info`). The trampoline additionally bakes the raw value verbatim into the pcall#1 chunk as the internal `RELAY_LOG_LEVEL` global (unset/read-error/too-long/control-bearing ⇒ degraded to unset at staging, the empty-string global, so the chunk always builds); init.lua snapshots + retires it once and the loader's trace gate enables its source-gated TRACE diagnostics only when the value matches `trace` case-insensitively (any other value, or the empty-string unset form, leaves the gate off). |
 | `RELAY_LOG_LUA` | launcher (canonicalized) | shell worker | the **Lua print tee** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_LUA=1` when the resolved config enables it (`--log-lua` or the env `1` itself), and **removes** it when disabled (never `0`/`true`/etc.). The shell snapshots it once at worker startup (`env_is_exact_one`); any other value (unset/empty/`0`/`true`/oversized) is off. Direct shell injectors may set `RELAY_LOG_LUA=1` themselves — that is the external non-launcher contract. |
 | `RELAY_LOG_APPEND` | launcher (canonicalized) | shell worker | the **log-append** switch: only the exact value `1` enables. The launcher sets `RELAY_LOG_APPEND=1` when the resolved config enables it (`--log-append` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and opens `relay.log` in append mode (`'a'`) when set; otherwise it truncates on open (`'w'`, a fresh file per launch). Direct shell injectors may set `RELAY_LOG_APPEND=1` themselves — that is the external non-launcher contract. |
 | `RELAY_SKIP_SPLASH` | launcher (canonicalized) | shell trampoline + mod loader | the **StateSplash skip** switch: only the exact value `1` enables. The launcher sets `RELAY_SKIP_SPLASH=1` when the resolved config enables it (`--skip-splash` or the env `1` itself), and **removes** it when disabled (same canonical-child-inheritance policy as `RELAY_LOG_LUA`). The shell snapshots it once at worker startup (`env_is_exact_one`) and bakes it into the trampoline chunk as the internal `RELAY_SKIP_SPLASH` global (`"1"` or `""`); init.lua snapshots it into `Mods._relay.skip_splash` and the loader's lifecycle step wraps `CLASS.StateSplash.on_enter` so the splash state advances directly to `StateTitle` without opening the splash view. Default off = vanilla splash. |

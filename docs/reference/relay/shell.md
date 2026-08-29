@@ -62,8 +62,8 @@ must hold or the engine corrupts:
 
 ## Trampoline-baked globals (the roots)
 
-The chunk sets six globals before `io.open`. Three are roots — the mod-loader
-root, the mod path, and the optional alternate-manager path; three are one-shot
+The chunk sets seven globals before `io.open`. Three are roots — the mod-loader
+root, the mod path, and the optional alternate-manager path; four are one-shot
 internal handoffs.
 
 - **`MOD_LOADER_DIR`** — the runtime-controlled loader root. Self-located by the
@@ -74,9 +74,11 @@ internal handoffs.
   proceeds unmodified). This is the only vanilla fallback, and it is non-fatal.
   It is **not** a user env var or flag and is never read from the environment.
 - **`RELAY_MOD_PATH`** — the user/mod-manager-controlled mod root (the launcher
-  publishes it from `--mod-path`/`RELAY_MOD_PATH`). **Optional:** unset or
-  overlong yields an empty-string global; the loader runs, finds no mod root, and
-  degrades gracefully — mods do not load, but nothing crashes.
+  publishes it from `--mod-path`/`RELAY_MOD_PATH`). **Optional:** unset,
+  overlong, or control-bearing yields an empty-string global (the value is
+  degraded to unset at staging, the chunk always builds); the loader runs,
+  finds no mod root, and degrades gracefully — mods do not load, but nothing
+  crashes.
 - **`RELAY_MOD_MANAGER`** — the user-controlled alternate mod manager (the
   launcher publishes it from `--mod-manager`/`RELAY_MOD_MANAGER`, used verbatim).
   **Optional when unset** (empty-string global — no alternate manager), but **a
@@ -96,9 +98,9 @@ internal handoffs.
   with a configured path after staging (selection, retry, the post-resume
   in-engine hard exit) is the manager-slot contract — normative in
   [`manager-slot.md`](manager-slot.md), not a native-shell concern.
-- **`MOD_RELAY_VERSION`**, **`RELAY_SKIP_SPLASH`**, and
-  **`RELAY_MODS_IN_GAME_TREE`** — one-shot internal handoffs.
-  `MOD_RELAY_VERSION` carries the build-injected product version (nil
+- **`MOD_RELAY_VERSION`**, **`RELAY_SKIP_SPLASH`**,
+  **`RELAY_MODS_IN_GAME_TREE`**, and **`RELAY_LOG_LEVEL`** — one-shot internal
+  handoffs. `MOD_RELAY_VERSION` carries the build-injected product version (nil
   when absent/overlong, so malformed metadata disables only version diagnostics);
   `RELAY_SKIP_SPLASH` carries the splash-skip opt-in (`"1"` only when
   `--skip-splash`/`RELAY_SKIP_SPLASH=1`, else `""`);
@@ -107,7 +109,13 @@ internal handoffs.
   directory — by handle identity, volume serial + file index, not path-text
   comparison — else `""`). A hint, not an operator commitment: non-`1`/unset
   is the normal default, so there is deliberately no FATAL path for it (unlike
-  `RELAY_MOD_MANAGER`). All three are snapshotted into
+  `RELAY_MOD_MANAGER`).   `RELAY_LOG_LEVEL` carries the raw log-level value from
+  the environment **verbatim** (never canonicalized in C — the shell's own
+  native filter read is unchanged; unset/read-error/too-long/control-bearing
+  degrades to unset at staging — the empty-string global — so the chunk always
+  builds), and the loader's trace gate matches `trace`
+  case-insensitively to enable its gated TRACE diagnostics — any other value
+  means the gate stays off. All four are snapshotted into
   the chunk and retired by the loader before community code runs; they are
   **not** community APIs and must not gain a stable consumer.
 

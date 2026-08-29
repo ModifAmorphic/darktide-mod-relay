@@ -150,6 +150,29 @@ return function(runner)
         }
     end
 
+    -- Drive manager:update(0.1) until the staged load pass finalizes (anchor
+    -- update + one entry per update). Bounded; asserts completion. Returns the
+    -- updates driven.
+    local function update_to_done(env, bound)
+        bound = bound or 100
+        local updates = 0
+        while not env.manager._adapter:is_load_done() do
+            updates = updates + 1
+            if updates > bound then
+                runner.fail("load pass did not finalize within " .. bound .. " updates")
+            end
+            env.manager:update(0.1)
+        end
+        return updates
+    end
+
+    -- Drive one full reload: the teardown update, then the staged replacement
+    -- pass to completion.
+    local function reload_to_done(env)
+        env.manager:update(0.1)  -- teardown frame
+        update_to_done(env)        -- anchor + one entry per update
+    end
+
     runner.register("hardening: every non-nil non-table run result is isolated before inspection", function()
         local tostring_called = false
         local proxy = newproxy(true)
@@ -181,7 +204,7 @@ return function(runner)
         end
         -- Rescan because setup intentionally constructed before staging.
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
 
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(1, env.manager._generation)
@@ -200,19 +223,23 @@ return function(runner)
 
     runner.register("hardening: unexpected initial load throw always finalizes and permits reload", function()
         local env = setup()
-        local real_load_all = env.manager._load_all
-        env.manager._load_all = function() error("unexpected initial pass boom") end
-        local ok = pcall(function() env.manager:update(0.1) end)
+        -- Stage one entry so the per-entry load step actually runs (an empty
+        -- pass performs no load step at all).
+        env.state.order = { "alpha" }
+        env.state.mods = { alpha = descriptor({}) }
+        env.manager:_scan_mods()
+        local real_load_step = env.manager._load_pass_entry
+        env.manager._load_pass_entry = function() error("unexpected initial pass boom") end
+        local ok = pcall(function() update_to_done(env) end)
         runner.assert_eq(true, ok)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(1, env.manager._generation)
         runner.assert_nil(env.manager._mod_load_index)
         runner.assert_not_nil(contains(env.logs, "initial generation finalized with errors"))
 
-        env.manager._load_all = real_load_all
+        env.manager._load_pass_entry = real_load_step
         runner.assert_eq(true, env.manager:request_reload("test"))
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(2, env.manager._generation)
     end)
@@ -222,11 +249,10 @@ return function(runner)
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         env.state.mods = { alpha = descriptor("invalid replacement") }
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(2, env.manager._generation)
         runner.assert_eq("failed", env.manager._mods[1].state)
@@ -258,7 +284,7 @@ return function(runner)
             outer = { run = function() sequence[#sequence + 1] = "run:outer"; return {} end },
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
 
         for _, call in ipairs(env.crash_calls) do
             runner.assert_truthy(call[2] ~= "ModRelay:Version",
@@ -290,7 +316,7 @@ return function(runner)
             good = descriptor({ init = function() initialized = initialized + 1 end }),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq("failed", env.manager._mods[1].state)
         runner.assert_eq("running", env.manager._mods[2].state)
         runner.assert_eq(1, initialized)
@@ -309,12 +335,11 @@ return function(runner)
         env.state.order = { "alpha", "beta" }
         env.state.mods = { alpha = descriptor({}), beta = descriptor({}) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         env.state.order = { "beta", "gamma" }
         env.state.mods = { beta = descriptor({}), gamma = descriptor({}) }
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         env.manager:destroy()
 
         local version_prints, version_removes = 0, 0
@@ -342,21 +367,19 @@ return function(runner)
         local env = setup()
         env.state.order = {}
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        env.manager:update(0.1)  -- empty list: anchor update begins AND finalizes
         runner.assert_eq(0, #env.crash_calls,
             "an empty order publishes no per-mod keys (version is chassis-owned)")
 
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq("running", env.manager._mods[1].state)
 
         env.sb.Crashify.remove_print_property = function() error("remove failure") end
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(3, env.manager._generation)
         runner.assert_eq("running", env.manager._mods[1].state)
@@ -370,8 +393,7 @@ return function(runner)
             if key == "Mod:alpha" then recovered_publications = recovered_publications + 1 end
         end
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq(4, env.manager._generation)
         runner.assert_eq(1, recovered_publications,
             "Crashify operations resume at a later generation boundary")
@@ -387,7 +409,7 @@ return function(runner)
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq("running", env.manager._mods[1].state)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(1, count_contains(env.logs, "Crashify unavailable"))
@@ -402,8 +424,7 @@ return function(runner)
             end,
         }
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq(1, count_contains(env.logs, "Crashify unavailable"),
             "the unavailable log stays once after recovery")
         runner.assert_eq("Mod:alpha", env.crash_calls[1][2])
@@ -421,7 +442,7 @@ return function(runner)
             dupe = descriptor(nil),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         for _, entry in ipairs(env.manager._mods) do
             runner.assert_eq("dmf_driven", entry.state)
         end
@@ -447,7 +468,7 @@ return function(runner)
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({}) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq("running", env.manager._mods[1].state)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq(0, #env.crash_calls, "generation 1 published nothing (throw contained)")
@@ -458,8 +479,7 @@ return function(runner)
             env.crash_calls[#env.crash_calls + 1] = { "print", key, value }
         end
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq(2, env.manager._generation)
         runner.assert_eq("done", env.manager._state)
         runner.assert_eq("Mod:alpha", env.crash_calls[1][2],
@@ -467,19 +487,19 @@ return function(runner)
     end)
 
     runner.register("hardening: init update and state failures disable once, unload once, and preserve siblings", function()
-        local phases = { "init", "update", "on_game_state_changed" }
-        for _, phase in ipairs(phases) do
+        local callbacks = { "init", "update", "on_game_state_changed" }
+        for _, callback in ipairs(callbacks) do
             local env = setup()
             local calls, unloads, sibling = 0, 0, 0
             local failing = {
                 init = function()
-                    if phase == "init" then calls = calls + 1; error("phase boom") end
+                    if callback == "init" then calls = calls + 1; error("callback boom") end
                 end,
                 update = function()
-                    if phase == "update" then calls = calls + 1; error("phase boom") end
+                    if callback == "update" then calls = calls + 1; error("callback boom") end
                 end,
                 on_game_state_changed = function()
-                    if phase == "on_game_state_changed" then calls = calls + 1; error("phase boom") end
+                    if callback == "on_game_state_changed" then calls = calls + 1; error("callback boom") end
                 end,
                 on_reload = function() error("must never run") end,
                 on_unload = function() unloads = unloads + 1 end,
@@ -494,14 +514,14 @@ return function(runner)
                 }),
             }
             env.manager:_scan_mods()
-            env.manager:update(0.1)
-            if phase == "on_game_state_changed" then
+            update_to_done(env)
+            if callback == "on_game_state_changed" then
                 env.manager:on_game_state_changed("enter", "StateGame", {})
             end
             env.manager:update(0.1)
             env.manager:on_game_state_changed("enter", "StateGame", {})
-            runner.assert_eq(1, calls, phase .. " must not retry")
-            runner.assert_eq(1, unloads, phase .. " cleanup exactly once")
+            runner.assert_eq(1, calls, callback .. " must not retry")
+            runner.assert_eq(1, unloads, callback .. " cleanup exactly once")
             runner.assert_eq("disabled", env.manager._mods[1].state)
             runner.assert_nil(env.manager._mods[1].object)
             runner.assert_truthy(sibling > 0, "healthy sibling continues")
@@ -528,7 +548,7 @@ return function(runner)
         env.state.order = { "unsafe\nentry" }
         env.state.mods = { ["unsafe\nentry"] = descriptor(object) }
         env.manager:_scan_mods()
-        local ok = pcall(function() env.manager:update(0.1) end)
+        local ok = pcall(function() update_to_done(env) end)
         runner.assert_eq(true, ok)
         runner.assert_eq(1, lookup_count)
         runner.assert_eq(1, unloads)
@@ -553,7 +573,7 @@ return function(runner)
             good = descriptor({ update = function() updates = updates + 1 end }),
         }
         env.manager:_scan_mods()
-        local ok = pcall(function() env.manager:update(0.1) end)
+        local ok = pcall(function() update_to_done(env) end)
         runner.assert_eq(true, ok)
         runner.assert_eq(2, updates)
         runner.assert_eq(1, unloads)
@@ -580,7 +600,7 @@ return function(runner)
             later = descriptor({ init = function() sequence[#sequence + 1] = "later:init" end }),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq({ "prior:init", "dmf:init", "dmf:unload", "prior:unload" }, sequence)
         runner.assert_eq("stopped", env.manager._mods[1].state)
         runner.assert_eq("disabled", env.manager._mods[2].state)
@@ -591,7 +611,12 @@ return function(runner)
         runner.assert_nil(contains(env.logs, "inner mod"))
     end)
 
-    runner.register("hardening: dmf update escape stops fan-out and reverse-unloads every outer object", function()
+    runner.register("hardening: dmf update escape stops fan-out and reverse-unloads every loaded outer object", function()
+        -- Staged pass: prior loads on its own update (first update fires there);
+        -- on dmf's load update the fan-out drives prior again, then dmf's update
+        -- raises -> framework stop. "later" was never loaded by then, so it is
+        -- skipped at the finalize update (no object, no unload); the loaded
+        -- outers are reverse-unloaded exactly once.
         local env = setup()
         local sequence = {}
         local function object(name, fail)
@@ -610,14 +635,15 @@ return function(runner)
             later = descriptor(object("later", false)),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq({
-            "prior:update", "dmf:update",
-            "later:unload", "dmf:unload", "prior:unload",
+            "prior:update", "prior:update", "dmf:update",
+            "dmf:unload", "prior:unload",
         }, sequence)
         runner.assert_eq("stopped", env.manager._mods[1].state)
         runner.assert_eq("disabled", env.manager._mods[2].state)
-        runner.assert_eq("stopped", env.manager._mods[3].state)
+        runner.assert_eq("skipped", env.manager._mods[3].state,
+            "later was never loaded; the stopped pass skips it at finalize")
         env.manager:update(1)
         runner.assert_eq(5, #sequence, "no outer callback repeats while generation is stopped")
     end)
@@ -632,7 +658,7 @@ return function(runner)
             good = descriptor({ update = function() end }),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq("dmf_driven", env.manager._mods[1].state)
         runner.assert_eq("failed", env.manager._mods[2].state)
         runner.assert_eq("failed", env.manager._mods[3].state)
@@ -654,7 +680,7 @@ return function(runner)
             }),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         env.manager:update(0.1)
         runner.assert_eq(2, contained)
         runner.assert_eq(false, env.manager._generation_failed)
@@ -667,7 +693,7 @@ return function(runner)
         env.state.order = { "bad" }
         env.state.mods = { bad = descriptor({ update = function() error("boom") end }) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq(1, #env.alerts)
         runner.assert_eq("event_add_notification_message", env.alerts[1].event_name)
         runner.assert_eq("alert", env.alerts[1].message_type)
@@ -690,7 +716,7 @@ return function(runner)
         env.state.order = { "bad" }
         env.state.mods = { bad = descriptor({ update = function() error("boom") end }) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq(1, count_contains(env.logs, "alert transport unavailable"))
         env.manager:update(15)
         runner.assert_eq(1, count_contains(env.logs, "alert transport unavailable"))
@@ -725,17 +751,68 @@ return function(runner)
             }),
         }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq(2, #env.alerts, "each newly latched failure gets an immediate attempt")
+        -- Staged pass: standalone fails on its own load update and its deferred
+        -- cleanup drains at that update's fan-out; dmf fails on the NEXT update
+        -- (framework stop). "later" was never loaded -> skipped, no unload.
         runner.assert_eq({
-            "standalone:update", "dmf:update",
-            "later:unload", "dmf:unload", "standalone:unload",
-        }, sequence, "framework stop rebuilds pending cleanup into exact reverse order")
+            "standalone:update", "standalone:unload",
+            "dmf:update", "dmf:unload",
+        }, sequence, "each loaded outer unloads exactly once (reverse at each stop)")
         env.manager:update(15)
-        runner.assert_eq(5, #sequence, "same-fan-out cleanup remains exactly once")
+        runner.assert_eq(4, #sequence, "same-fan-out cleanup remains exactly once")
         runner.assert_eq(3, #env.alerts)
         runner.assert_not_nil(env.alerts[3].data.text:find("framework-boundary", 1, true))
         runner.assert_nil(env.alerts[3].data.text:find("one or more mods", 1, true))
+    end)
+
+    runner.register("hardening: post-load fan-out stop merges pending standalone cleanup into reverse order", function()
+        -- The _rebuild_framework_cleanup_queue merge branch: a standalone
+        -- failure claims cleanup mid-fan-out (object cleared, cleanup queued
+        -- but not yet drained), then a framework failure in the SAME fan-out
+        -- rebuilds the queue reverse — the claimed-not-done standalone must
+        -- land AFTER the framework entry. Under staged loading the load pass
+        -- drains every update, so this branch only fires post-pass now.
+        local env = setup()
+        local sequence = {}
+        local fail = { prior = false, dmf = false }
+        local function object(name)
+            return {
+                update = function()
+                    sequence[#sequence + 1] = name .. ":update"
+                    if fail[name] then error(name .. " boom") end
+                end,
+                on_unload = function() sequence[#sequence + 1] = name .. ":unload" end,
+            }
+        end
+        env.state.order = { "prior", "mid", "dmf" }
+        env.state.mods = {
+            prior = descriptor(object("prior")),
+            mid = descriptor(object("mid")),
+            dmf = descriptor(object("dmf")),
+        }
+        env.manager:_scan_mods()
+        update_to_done(env)
+        runner.assert_eq("done", env.manager._state)
+        for i = #sequence, 1, -1 do sequence[i] = nil end  -- drop load-pass updates
+
+        -- ONE fan-out, two failures: prior's standalone first (cleanup claimed,
+        -- deferred), dmf's framework failure second (stop + reverse rebuild).
+        fail.prior = true
+        fail.dmf = true
+        env.manager:update(0.1)
+
+        runner.assert_eq({
+            "prior:update", "mid:update", "dmf:update",
+            "dmf:unload", "mid:unload", "prior:unload",
+        }, sequence, "the merged prior unload lands after dmf's (reverse rebuild)")
+        runner.assert_eq("disabled", env.manager._mods[1].state)
+        runner.assert_eq("stopped", env.manager._mods[2].state)
+        runner.assert_eq("disabled", env.manager._mods[3].state)
+        runner.assert_eq(2, #env.manager._failure_records)
+        env.manager:update(1)
+        runner.assert_eq(6, #sequence, "exactly-once unloads; no repeats while stopped")
     end)
 
     runner.register("hardening: framework-stopped generation hot reloads cleanly and clears old notices", function()
@@ -743,15 +820,14 @@ return function(runner)
         env.state.order = { "dmf" }
         env.state.mods = { dmf = descriptor({ update = function() error("framework") end }) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         runner.assert_eq(true, env.manager._generation_failed)
         runner.assert_eq("done", env.manager._state)
 
         local healthy_updates = 0
         env.state.mods = { dmf = descriptor({ update = function() healthy_updates = healthy_updates + 1 end }) }
         runner.assert_eq(true, env.manager:request_reload("test"))
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq(2, env.manager._generation)
         runner.assert_eq(false, env.manager._generation_failed)
         runner.assert_eq(0, #env.manager._failure_records)
@@ -767,15 +843,14 @@ return function(runner)
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor({ on_unload = function() unloads = unloads + 1 end }) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
 
         env.state.mods = { alpha = descriptor({
             update = function() error("replacement boom") end,
             on_unload = function() unloads = unloads + 1 end,
         }) }
         env.manager:request_reload("test")
-        env.manager:update(0.1)
-        env.manager:update(0.1)
+        reload_to_done(env)
         runner.assert_eq(2, env.manager._generation)
         runner.assert_eq(1, #env.manager._failure_records)
         runner.assert_eq(2, env.manager._failure_records[1].generation)
@@ -792,7 +867,7 @@ return function(runner)
         env.state.order = { "alpha" }
         env.state.mods = { alpha = descriptor(object) }
         env.manager:_scan_mods()
-        env.manager:update(0.1)
+        update_to_done(env)
         local entry = env.manager._mods[1]
         env.manager:_handle_lifecycle_failure(entry, object, "update", "synthetic detail")
         env.manager:destroy()
